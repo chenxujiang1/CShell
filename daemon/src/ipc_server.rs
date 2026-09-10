@@ -383,6 +383,11 @@ mod tests {
     async fn slow_subscribers_under_pty_flood_do_not_block_a_control_connection() {
         const SLOW_CLIENTS: usize = 100;
         const MIN_FLOOD_GENERATIONS: u64 = 100;
+        // Keep the generation threshold deterministic while allowing loaded
+        // native runners enough time to start the shell and emit the paced
+        // four-second flood. The separate two-second control deadline remains
+        // the isolation requirement this test is intended to enforce.
+        const FLOOD_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
         let directory = tempfile::tempdir().unwrap();
         let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 256).unwrap());
         let attachment = registry
@@ -431,7 +436,7 @@ mod tests {
         }
 
         attachment.send_input(&slow_flood_command()).unwrap();
-        let flood_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let flood_deadline = tokio::time::Instant::now() + FLOOD_START_TIMEOUT;
         loop {
             let generation = attachment.full_frame().unwrap().generation;
             if generation >= initial_generation.saturating_add(MIN_FLOOD_GENERATIONS) {
