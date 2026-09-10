@@ -212,6 +212,19 @@ fn corpus() -> Vec<CorpusCase> {
             ],
         },
         CorpusCase {
+            name: "osc-dynamic-indexed-color",
+            size: TerminalSize::cells(2, 8),
+            input: "\x1b]4;1;rgb:01/02/03\x07\x1b[31mA",
+            cursor: (0, 1),
+            cells: vec![CellSpec {
+                style: Style {
+                    foreground: Color::Rgb(1, 2, 3),
+                    ..Style::default()
+                },
+                ..spec(0, 0, "A")
+            }],
+        },
+        CorpusCase {
             name: "osc-8-hyperlink-boundary",
             size: TerminalSize::cells(2, 8),
             input: "\x1b]8;id=docs;https://example.test/a\x1b\\A\x1b]8;;\x1b\\B",

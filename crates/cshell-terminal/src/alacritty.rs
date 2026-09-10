@@ -4,6 +4,7 @@ use crate::{
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{self, Color as AlacrittyColor, NamedColor};
 use cshell_domain::TerminalSize;
@@ -172,8 +173,8 @@ impl TerminalEngine for AlacrittyTerminalEngine {
                 source.zerowidth().into_iter().flatten().copied(),
                 width,
                 Style {
-                    foreground: map_color(source.fg),
-                    background: map_color(source.bg),
+                    foreground: map_color(source.fg, content.colors),
+                    background: map_color(source.bg, content.colors),
                     bold: source.flags.contains(Flags::BOLD),
                     italic: source.flags.contains(Flags::ITALIC),
                     underline: source.flags.intersects(Flags::ALL_UNDERLINES),
@@ -208,7 +209,15 @@ impl TerminalEngine for AlacrittyTerminalEngine {
     }
 }
 
-fn map_color(color: AlacrittyColor) -> Color {
+fn map_color(color: AlacrittyColor, dynamic_colors: &Colors) -> Color {
+    let index = match color {
+        AlacrittyColor::Spec(_) => None,
+        AlacrittyColor::Indexed(index) => Some(usize::from(index)),
+        AlacrittyColor::Named(named) => Some(named as usize),
+    };
+    if let Some(rgb) = index.and_then(|index| dynamic_colors[index]) {
+        return Color::Rgb(rgb.r, rgb.g, rgb.b);
+    }
     match color {
         AlacrittyColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
         AlacrittyColor::Indexed(index) => Color::Indexed(index),
@@ -306,6 +315,32 @@ mod tests {
         let row = snapshot.row(0).unwrap_or_default();
         assert_eq!(row[0].hyperlink_uri(), Some("https://example.test/a"));
         assert_eq!(row[1].hyperlink_uri(), None);
+    }
+
+    #[test]
+    fn resolves_and_resets_osc_dynamic_colors_in_project_cells() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(2, 8));
+        terminal.feed(b"\x1b]4;1;rgb:01/02/03\x07\x1b[31mA");
+        assert_eq!(
+            terminal.snapshot().row(0).unwrap_or_default()[0]
+                .style
+                .foreground,
+            Color::Rgb(1, 2, 3)
+        );
+
+        terminal.feed(b"\x1b]104;1\x07");
+        assert_eq!(
+            terminal.snapshot().row(0).unwrap_or_default()[0]
+                .style
+                .foreground,
+            Color::Indexed(1)
+        );
+
+        terminal.feed(b"\x1b[0m\x1b]10;rgb:04/05/06\x07\x1b]11;rgb:07/08/09\x07B");
+        let snapshot = terminal.snapshot();
+        let cell = &snapshot.row(0).unwrap_or_default()[1];
+        assert_eq!(cell.style.foreground, Color::Rgb(4, 5, 6));
+        assert_eq!(cell.style.background, Color::Rgb(7, 8, 9));
     }
 
     #[test]
