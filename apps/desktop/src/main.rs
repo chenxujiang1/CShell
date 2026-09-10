@@ -1,0 +1,664 @@
+mod daemon_connection;
+mod visual_corpus;
+mod window_e2e;
+
+use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};
+use cshell_render::{
+    EguiFrame, LogReflowLayout, LogReflowRequest, LogScrollbarState, LogSourceId, LogSurfaceError,
+    LogSurfaceModel, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
+};
+use cshell_ui::WorkbenchViewModel;
+use daemon_connection::{DesktopConnectionConfig, DesktopDaemonConnection};
+use std::error::Error;
+use std::sync::Arc;
+use tracing::info;
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, Ime, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::window::{Window, WindowAttributes, WindowId};
+
+const SESSION_LOG_ARGUMENT: &str = "--session-log";
+
+#[derive(Default)]
+struct DesktopApp {
+    window: Option<Arc<Window>>,
+    renderer: Option<WindowRenderer>,
+    egui_context: egui::Context,
+    egui_state: Option<egui_winit::State>,
+    last_renderer_attempt: Option<std::time::Instant>,
+    view_model: WorkbenchViewModel,
+    daemon: Option<DesktopDaemonConnection>,
+    terminal_surface: TerminalSurfaceModel,
+    log_surface: Option<LogSurfaceModel>,
+    submitted_log_page: Option<(LogSourceId, u64)>,
+    log_reflow: Option<LogReflowWorker>,
+    terminal_viewport: Option<TerminalViewport>,
+    viewport_rows: u16,
+    cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
+    wheel_row_accumulator: f64,
+    modifiers: ModifiersState,
+    window_e2e: Option<window_e2e::WindowE2e>,
+}
+
+struct LogReflowWorker {
+    requests: Option<std::sync::mpsc::Sender<LogReflowRequest>>,
+    results: std::sync::mpsc::Receiver<Result<LogReflowLayout, LogSurfaceError>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogScrollbarAction {
+    FollowTail,
+    JumpTo(u64),
+}
+
+impl LogReflowWorker {
+    fn start() -> Result<Self, std::io::Error> {
+        let (request_sender, request_receiver) = std::sync::mpsc::channel::<LogReflowRequest>();
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("cshell-log-reflow".to_owned())
+            .spawn(move || {
+                while let Ok(request) = request_receiver.recv() {
+                    if result_sender.send(request.execute()).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            requests: Some(request_sender),
+            results: result_receiver,
+            worker: Some(worker),
+        })
+    }
+
+    fn submit(&self, request: LogReflowRequest) -> bool {
+        self.requests
+            .as_ref()
+            .is_some_and(|sender| sender.send(request).is_ok())
+    }
+}
+
+impl Drop for LogReflowWorker {
+    fn drop(&mut self) {
+        self.requests.take();
+        if let Some(worker) = self.worker.take() {
+            let _result = worker.join();
+        }
+    }
+}
+
+impl ApplicationHandler for DesktopApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        match event_loop.create_window(
+            WindowAttributes::default()
+                .with_title("CShell Phase 0")
+                .with_inner_size(winit::dpi::LogicalSize::new(1200.0, 760.0)),
+        ) {
+            Ok(window) => {
+                let window = Arc::new(window);
+                info!(window_id = ?window.id(), "desktop shell created");
+                self.egui_state = Some(egui_winit::State::new(
+                    self.egui_context.clone(),
+                    egui::ViewportId::ROOT,
+                    window.as_ref(),
+                    Some(window.scale_factor() as f32),
+                    window.theme(),
+                    None,
+                ));
+                self.last_renderer_attempt = Some(std::time::Instant::now());
+                match initialize_renderer(Arc::clone(&window)) {
+                    Ok(renderer) => self.renderer = Some(renderer),
+                    Err(error) => tracing::error!(%error, "cannot initialize terminal renderer"),
+                }
+                window.request_redraw();
+                self.window = Some(window);
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot create desktop window");
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let (Some(reflow), Some(surface)) = (&self.log_reflow, &mut self.log_surface) {
+            while let Ok(result) = reflow.results.try_recv() {
+                match result {
+                    Ok(layout) => {
+                        let promoted = surface.submit_reflow(layout);
+                        if let Some(e2e) = &mut self.window_e2e {
+                            e2e.note_reflow(promoted);
+                        }
+                    }
+                    Err(error) => {
+                        surface.reflow_failed();
+                        tracing::error!(%error, "background log reflow failed");
+                    }
+                }
+            }
+        }
+        if let Some(daemon) = &self.daemon {
+            let view = daemon.view();
+            self.view_model.daemon_connected = view.connected;
+            self.view_model.daemon_status_detail = view.detail;
+            self.view_model.terminal_generation =
+                view.snapshot.as_ref().map(|snapshot| snapshot.generation);
+            if let Some(snapshot) = view.snapshot {
+                self.terminal_surface.submit_snapshot(snapshot);
+            }
+            if let Some(page) = view.log_page {
+                let key = (page.source_id, page.revision);
+                if self.submitted_log_page != Some(key)
+                    && let Some(log_surface) = &mut self.log_surface
+                {
+                    if let Err(error) = log_surface.submit_page(page) {
+                        tracing::error!(%error, "daemon log page rejected by render model");
+                    }
+                    // A delivered page is immutable. Even when it is stale for
+                    // the current anchor, retrying it every frame cannot make it
+                    // acceptable and would only flood the log until the newer
+                    // request arrives on the dedicated paging connection.
+                    self.submitted_log_page = Some(key);
+                }
+            }
+            if let Some(session_id) = view.session_id {
+                if let Some(session) = self
+                    .view_model
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                {
+                    session.connected = view.connected;
+                } else {
+                    self.view_model
+                        .sessions
+                        .push(cshell_ui::SessionTabViewModel {
+                            id: session_id,
+                            title: view
+                                .session_title
+                                .clone()
+                                .unwrap_or_else(|| "Terminal".to_owned()),
+                            connected: view.connected,
+                        });
+                    self.view_model.selected = Some(session_id);
+                }
+            }
+        }
+        if self.renderer.is_none()
+            && self
+                .last_renderer_attempt
+                .is_none_or(|attempt| attempt.elapsed() >= std::time::Duration::from_secs(2))
+            && let Some(window) = &self.window
+        {
+            self.last_renderer_attempt = Some(std::time::Instant::now());
+            match initialize_renderer(Arc::clone(window)) {
+                Ok(renderer) => self.renderer = Some(renderer),
+                Err(error) => tracing::error!(%error, "terminal renderer recovery failed"),
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        if self
+            .window_e2e
+            .as_mut()
+            .is_some_and(window_e2e::WindowE2e::should_exit)
+        {
+            event_loop.exit();
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(16),
+        ));
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = self.window.as_ref().cloned() else {
+            return;
+        };
+        if window.id() != window_id {
+            return;
+        }
+        let mut egui_consumed = false;
+        if let Some(state) = &mut self.egui_state {
+            let response = state.on_window_event(&window, &event);
+            egui_consumed = response.consumed;
+            if response.repaint {
+                window.request_redraw();
+            }
+        }
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                if let Some(e2e) = &mut self.window_e2e {
+                    e2e.note_resize(size);
+                }
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.resize(size);
+                }
+                window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = Some(position);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if !egui_consumed && self.log_surface.is_none() =>
+            {
+                if let Some(action) = terminal_key_action(&event, self.modifiers)
+                    && let Some(daemon) = &self.daemon
+                    && !daemon.send_input(action)
+                {
+                    tracing::warn!("terminal input was not accepted by the daemon client");
+                }
+            }
+            WindowEvent::Ime(Ime::Commit(text))
+                if !egui_consumed && self.log_surface.is_none() && !text.is_empty() =>
+            {
+                if let Some(daemon) = &self.daemon
+                    && !daemon.send_input(InputAction::Text(text))
+                {
+                    tracing::warn!("IME commit was not accepted by the daemon client");
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let over_terminal = self
+                    .cursor_position
+                    .zip(self.terminal_viewport)
+                    .is_some_and(|(cursor, viewport)| {
+                        cursor.x >= f64::from(viewport.x)
+                            && cursor.x < f64::from(viewport.x.saturating_add(viewport.width))
+                            && cursor.y >= f64::from(viewport.y)
+                            && cursor.y < f64::from(viewport.y.saturating_add(viewport.height))
+                    });
+                if over_terminal && self.viewport_rows > 0 {
+                    let rows = match delta {
+                        MouseScrollDelta::LineDelta(_, vertical) => f64::from(vertical) * 3.0,
+                        MouseScrollDelta::PixelDelta(position) => {
+                            let cell_height = self
+                                .terminal_viewport
+                                .map_or(1.0, |viewport| {
+                                    f64::from(viewport.height) / f64::from(self.viewport_rows)
+                                })
+                                .max(1.0);
+                            position.y / cell_height
+                        }
+                    };
+                    self.wheel_row_accumulator -= rows;
+                    let whole_rows = self.wheel_row_accumulator.trunc() as i32;
+                    if whole_rows != 0 {
+                        self.wheel_row_accumulator -= f64::from(whole_rows);
+                        if let Some(surface) = &mut self.log_surface {
+                            surface.scroll_visual_rows(whole_rows, self.viewport_rows);
+                        }
+                    }
+                }
+                window.request_redraw();
+            }
+            WindowEvent::RedrawRequested => {
+                let Some(renderer) = &mut self.renderer else {
+                    return;
+                };
+                let Some(egui_state) = &mut self.egui_state else {
+                    return;
+                };
+                let raw_input = egui_state.take_egui_input(&window);
+                let mut terminal_rect = egui::Rect::NOTHING;
+                let scrollbar_state = self
+                    .log_surface
+                    .as_ref()
+                    .and_then(|surface| surface.scrollbar_state(self.viewport_rows.max(1)));
+                let mut scrollbar_action = None;
+                let full_output = self.egui_context.run_ui(raw_input, |ui| {
+                    terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
+                    if let Some(state) = scrollbar_state {
+                        scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
+                    }
+                });
+                if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
+                    match action {
+                        LogScrollbarAction::FollowTail => surface.follow_tail(),
+                        LogScrollbarAction::JumpTo(line_id) => {
+                            surface.jump_to_line(line_id, 0);
+                        }
+                    }
+                }
+                let egui::FullOutput {
+                    platform_output,
+                    mut textures_delta,
+                    shapes,
+                    pixels_per_point,
+                    ..
+                } = full_output;
+                egui_state.handle_platform_output_with_event_loop(
+                    &window,
+                    event_loop,
+                    platform_output,
+                );
+                let paint_jobs = self.egui_context.tessellate(shapes, pixels_per_point);
+                let viewport = TerminalViewport::from_logical_rect(terminal_rect, pixels_per_point);
+                let viewport_rows = renderer.viewport_rows(viewport);
+                self.terminal_viewport = Some(viewport);
+                self.viewport_rows = viewport_rows;
+                if self.log_surface.is_none()
+                    && let Some(daemon) = &self.daemon
+                {
+                    daemon.request_resize(
+                        viewport_rows,
+                        renderer.viewport_columns(viewport),
+                        viewport.width.min(u32::from(u16::MAX)) as u16,
+                        viewport.height.min(u32::from(u16::MAX)) as u16,
+                    );
+                }
+                let egui_frame = EguiFrame {
+                    paint_jobs: &paint_jobs,
+                    textures_delta: &mut textures_delta,
+                    pixels_per_point,
+                };
+                let render_result = if let Some(log_surface) = &mut self.log_surface {
+                    let viewport_columns = renderer.viewport_columns(viewport);
+                    if let Some(request) = log_surface.request_reflow(viewport_columns)
+                        && self
+                            .log_reflow
+                            .as_ref()
+                            .is_none_or(|worker| !worker.submit(request))
+                    {
+                        log_surface.reflow_failed();
+                    }
+                    if let Some(request) = log_surface.take_page_request(viewport_rows) {
+                        if let Some(daemon) = &self.daemon {
+                            daemon.request_log_page(request);
+                        } else if let Some(e2e) = &mut self.window_e2e {
+                            let page = e2e.page_for(request);
+                            if let Err(error) = log_surface.submit_page(page) {
+                                e2e.fail(format!("generated log page was rejected: {error}"));
+                            }
+                        }
+                    }
+                    let frame = log_surface.prepare_frame(viewport_rows);
+                    renderer.render_log(frame.as_ref(), viewport, Some(egui_frame))
+                } else {
+                    let frame = self.terminal_surface.prepare_frame(0, viewport_rows);
+                    window.set_ime_allowed(true);
+                    if let Some(frame) = &frame {
+                        position_terminal_ime(&window, viewport, &frame.snapshot);
+                    }
+                    renderer.render(frame.as_ref(), viewport, Some(egui_frame))
+                };
+                // A surface/device failure can return before GPU texture upload. The next
+                // renderer recreates egui's font texture; clear this frame's abandoned deltas.
+                textures_delta.clear();
+                match render_result {
+                    Ok(_outcome) => {
+                        if let (Some(e2e), Some(log_surface)) =
+                            (&mut self.window_e2e, &mut self.log_surface)
+                        {
+                            e2e.on_present(log_surface, &window, viewport_rows);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(e2e) = &mut self.window_e2e {
+                            e2e.fail(format!("window render/present failed: {error}"));
+                        }
+                        tracing::error!(%error, "terminal frame rendering failed");
+                        self.renderer = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn position_terminal_ime(
+    window: &Window,
+    viewport: TerminalViewport,
+    snapshot: &cshell_terminal::FrameSnapshot,
+) {
+    let cell_width = (viewport.width / u32::from(snapshot.cols.max(1))).max(1);
+    let cell_height = (viewport.height / u32::from(snapshot.rows.max(1))).max(1);
+    let x = viewport
+        .x
+        .saturating_add(u32::from(snapshot.cursor_col).saturating_mul(cell_width));
+    let y = viewport.y.saturating_add(
+        u32::from(snapshot.cursor_row)
+            .saturating_add(1)
+            .saturating_mul(cell_height),
+    );
+    window.set_ime_cursor_area(
+        winit::dpi::PhysicalPosition::new(x, y),
+        winit::dpi::PhysicalSize::new(cell_width, cell_height),
+    );
+}
+
+fn terminal_key_action(
+    event: &winit::event::KeyEvent,
+    modifiers: ModifiersState,
+) -> Option<InputAction> {
+    if event.state != ElementState::Pressed || modifiers.super_key() {
+        return None;
+    }
+    let modifiers = Modifiers {
+        ctrl: modifiers.control_key(),
+        alt: modifiers.alt_key(),
+        shift: modifiers.shift_key(),
+        super_key: modifiers.super_key(),
+    };
+    let code = match &event.logical_key {
+        Key::Character(text) if modifiers.ctrl || modifiers.alt => {
+            KeyCode::Character(text.to_string())
+        }
+        Key::Character(_) => {
+            return event
+                .text
+                .as_ref()
+                .filter(|text| !text.is_empty())
+                .map(|text| InputAction::Text(text.to_string()));
+        }
+        Key::Named(NamedKey::Enter) => KeyCode::Enter,
+        Key::Named(NamedKey::Tab) => KeyCode::Tab,
+        Key::Named(NamedKey::Backspace) => KeyCode::Backspace,
+        Key::Named(NamedKey::Escape) => KeyCode::Escape,
+        Key::Named(NamedKey::ArrowUp) => KeyCode::ArrowUp,
+        Key::Named(NamedKey::ArrowDown) => KeyCode::ArrowDown,
+        Key::Named(NamedKey::ArrowLeft) => KeyCode::ArrowLeft,
+        Key::Named(NamedKey::ArrowRight) => KeyCode::ArrowRight,
+        Key::Named(named) => KeyCode::Function(function_key_number(*named)?),
+        _ => return None,
+    };
+    Some(InputAction::Key(KeyEvent {
+        code,
+        modifiers,
+        pressed: true,
+    }))
+}
+
+const fn function_key_number(key: NamedKey) -> Option<u8> {
+    match key {
+        NamedKey::F1 => Some(1),
+        NamedKey::F2 => Some(2),
+        NamedKey::F3 => Some(3),
+        NamedKey::F4 => Some(4),
+        NamedKey::F5 => Some(5),
+        NamedKey::F6 => Some(6),
+        NamedKey::F7 => Some(7),
+        NamedKey::F8 => Some(8),
+        NamedKey::F9 => Some(9),
+        NamedKey::F10 => Some(10),
+        NamedKey::F11 => Some(11),
+        NamedKey::F12 => Some(12),
+        NamedKey::F13 => Some(13),
+        NamedKey::F14 => Some(14),
+        NamedKey::F15 => Some(15),
+        NamedKey::F16 => Some(16),
+        NamedKey::F17 => Some(17),
+        NamedKey::F18 => Some(18),
+        NamedKey::F19 => Some(19),
+        NamedKey::F20 => Some(20),
+        NamedKey::F21 => Some(21),
+        NamedKey::F22 => Some(22),
+        NamedKey::F23 => Some(23),
+        NamedKey::F24 => Some(24),
+        _ => None,
+    }
+}
+
+fn draw_log_scrollbar(
+    ui: &mut egui::Ui,
+    terminal_rect: &mut egui::Rect,
+    state: LogScrollbarState,
+) -> Option<LogScrollbarAction> {
+    const WIDTH: f32 = 12.0;
+    const MIN_THUMB: f32 = 24.0;
+    if terminal_rect.width() <= WIDTH || terminal_rect.height() <= 0.0 {
+        return None;
+    }
+    let track = egui::Rect::from_min_max(
+        egui::pos2(terminal_rect.max.x - WIDTH, terminal_rect.min.y),
+        terminal_rect.max,
+    );
+    terminal_rect.max.x -= WIDTH;
+    let total = state.total_line_count.max(1);
+    let visible_fraction = (f64::from(state.viewport_rows) / total as f64).clamp(0.03, 1.0);
+    let thumb_height = (track.height() * visible_fraction as f32)
+        .max(MIN_THUMB)
+        .min(track.height());
+    let progress = if state.follow_tail || total <= 1 {
+        1.0
+    } else {
+        (state.top_line_id.saturating_sub(1) as f64 / total.saturating_sub(1) as f64)
+            .clamp(0.0, 1.0) as f32
+    };
+    let thumb_top = track.top() + (track.height() - thumb_height) * progress;
+    let thumb = egui::Rect::from_min_size(
+        egui::pos2(track.left() + 2.0, thumb_top),
+        egui::vec2(WIDTH - 4.0, thumb_height),
+    );
+    ui.painter()
+        .rect_filled(track, 0.0, egui::Color32::from_black_alpha(70));
+    ui.painter()
+        .rect_filled(thumb, 2.0, egui::Color32::from_gray(130));
+    let response = ui.interact(
+        track,
+        ui.make_persistent_id("cshell-log-scrollbar"),
+        egui::Sense::click_and_drag(),
+    );
+    if !(response.clicked() || response.dragged()) {
+        return None;
+    }
+    let pointer = response.interact_pointer_pos()?;
+    let progress = ((pointer.y - track.top()) / track.height()).clamp(0.0, 1.0);
+    Some(log_scrollbar_action(progress, total))
+}
+
+fn log_scrollbar_action(progress: f32, total_line_count: u64) -> LogScrollbarAction {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress >= 0.999 {
+        return LogScrollbarAction::FollowTail;
+    }
+    let total = total_line_count.max(1);
+    let line_id = 1 + (f64::from(progress) * total.saturating_sub(1) as f64).round() as u64;
+    LogScrollbarAction::JumpTo(line_id)
+}
+
+fn initialize_renderer(window: Arc<Window>) -> Result<WindowRenderer, Box<dyn Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(WindowRenderer::new(window))?)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+    let arguments: Vec<_> = std::env::args().collect();
+    let show_visual_corpus = arguments
+        .iter()
+        .any(|argument| argument == visual_corpus::ARGUMENT);
+    let show_log_corpus = arguments
+        .iter()
+        .any(|argument| argument == visual_corpus::LOG_ARGUMENT);
+    let show_session_log = arguments
+        .iter()
+        .any(|argument| argument == SESSION_LOG_ARGUMENT);
+    let run_window_e2e = arguments
+        .iter()
+        .any(|argument| argument == window_e2e::ARGUMENT);
+    let daemon = if show_visual_corpus || show_log_corpus || run_window_e2e {
+        None
+    } else {
+        DesktopConnectionConfig::from_env()?
+            .map(|config| DesktopDaemonConnection::start(config.with_log_pages(show_session_log)))
+            .transpose()?
+    };
+    let mut app = DesktopApp {
+        daemon,
+        ..DesktopApp::default()
+    };
+    if show_visual_corpus {
+        let snapshot = Arc::new(visual_corpus::snapshot());
+        app.view_model.daemon_status_detail = "visual corpus: terminal-unicode-v1".to_owned();
+        app.view_model.terminal_generation = Some(snapshot.generation);
+        app.terminal_surface.submit_snapshot(snapshot);
+    }
+    if show_log_corpus {
+        let mut log_surface = LogSurfaceModel::default();
+        log_surface.submit_page(visual_corpus::log_page())?;
+        app.view_model.daemon_status_detail = "log corpus: terminal-unicode-v1".to_owned();
+        app.log_surface = Some(log_surface);
+        app.log_reflow = Some(LogReflowWorker::start()?);
+    } else if show_session_log {
+        app.view_model.daemon_status_detail = "session log: loading".to_owned();
+        app.log_surface = Some(LogSurfaceModel::default());
+        app.log_reflow = Some(LogReflowWorker::start()?);
+    }
+    if run_window_e2e {
+        let e2e = window_e2e::WindowE2e::new();
+        let mut log_surface = LogSurfaceModel::default();
+        log_surface.submit_page(e2e.initial_page())?;
+        app.view_model.daemon_status_detail = "automated log window E2E".to_owned();
+        app.log_surface = Some(log_surface);
+        app.log_reflow = Some(LogReflowWorker::start()?);
+        app.window_e2e = Some(e2e);
+    }
+    event_loop.run_app(&mut app)?;
+    if let Some(e2e) = &app.window_e2e {
+        e2e.finish()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogScrollbarAction, log_scrollbar_action};
+
+    #[test]
+    fn scrollbar_maps_track_positions_to_stable_line_ids_and_tail_mode() {
+        assert_eq!(
+            log_scrollbar_action(0.0, 1_000),
+            LogScrollbarAction::JumpTo(1)
+        );
+        assert_eq!(
+            log_scrollbar_action(0.5, 1_000),
+            LogScrollbarAction::JumpTo(501)
+        );
+        assert_eq!(
+            log_scrollbar_action(1.0, 1_000),
+            LogScrollbarAction::FollowTail
+        );
+    }
+}

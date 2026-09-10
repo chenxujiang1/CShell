@@ -1,0 +1,1049 @@
+use crate::{
+    LocalSessionError, LocalSessionInfo, LocalSessionRegistry, SessionRegistryError,
+    SubscriptionFrame, TerminalFrameSubscription,
+};
+use cshell_ipc::{
+    Envelope, IpcError, LogPage, LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse,
+    SessionCreateResponse, SessionListResponse, SessionSummary, TerminalControlCodecError,
+    TerminalControlResponse, TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest,
+    TerminalStyle, envelope, read_envelope, write_envelope,
+};
+use cshell_output_store::{JournalColor, JournalStyle};
+use cshell_terminal::{Color, Style};
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+#[derive(Debug, Error)]
+pub enum SessionIpcError {
+    #[error(transparent)]
+    Transport(#[from] IpcError),
+    #[error(transparent)]
+    Registry(#[from] SessionRegistryError),
+    #[error("IPC request is not a supported session data-plane message")]
+    UnsupportedRequest,
+    #[error("terminal subscription has no initial frame")]
+    InitialFrameUnavailable,
+    #[error(transparent)]
+    InvalidLogPage(#[from] LogPageCodecError),
+    #[error(transparent)]
+    InvalidTerminalControl(#[from] TerminalControlCodecError),
+    #[error(transparent)]
+    LocalSession(#[from] LocalSessionError),
+}
+
+/// Authenticated IPC data-plane dispatcher for daemon-owned terminal sessions.
+#[derive(Clone, Debug)]
+pub struct SessionIpcService {
+    registry: Arc<LocalSessionRegistry>,
+}
+
+#[derive(Debug)]
+struct DispatchResult {
+    response: Envelope,
+    subscription: Option<TerminalFrameSubscription>,
+}
+
+impl SessionIpcService {
+    #[must_use]
+    pub const fn new(registry: Arc<LocalSessionRegistry>) -> Self {
+        Self { registry }
+    }
+
+    pub fn handle_request(&self, request: Envelope) -> Result<Envelope, SessionIpcError> {
+        self.dispatch(request).map(|result| result.response)
+    }
+
+    /// Serves one request after the connection has completed authenticated handshake.
+    pub async fn serve_one<S>(&self, stream: &mut S) -> Result<(), SessionIpcError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let request = read_envelope(stream).await?;
+        let response = self.handle_request(request)?;
+        write_envelope(stream, &response).await?;
+        Ok(())
+    }
+
+    /// Keeps an authenticated client subscribed at display refresh cadence.
+    ///
+    /// The reader owns its half of the stream so reads are never cancelled midway
+    /// through a length-prefixed frame. The writer polls a latest-only subscription;
+    /// slow clients therefore coalesce generations instead of accumulating snapshots.
+    pub async fn serve_connection<S>(&self, mut stream: S) -> Result<(), SessionIpcError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let initial_request = read_envelope(&mut stream).await?;
+        let initial = self.dispatch(initial_request)?;
+        let mut subscription = initial.subscription;
+        write_envelope(&mut stream, &initial.response).await?;
+
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let (request_sender, mut requests) = tokio::sync::mpsc::channel(8);
+        let reader_worker = tokio::spawn(async move {
+            loop {
+                let request = read_envelope(&mut reader).await;
+                let stop = request.is_err();
+                if request_sender.send(request).await.is_err() || stop {
+                    break;
+                }
+            }
+        });
+        let mut refresh = tokio::time::interval(std::time::Duration::from_millis(16));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let result = loop {
+            tokio::select! {
+                incoming = requests.recv() => {
+                    let Some(incoming) = incoming else {
+                        break Ok(());
+                    };
+                    let request = match incoming {
+                        Ok(request) => request,
+                        Err(error) if is_client_disconnect(&error) => break Ok(()),
+                        Err(error) => break Err(SessionIpcError::Transport(error)),
+                    };
+                    let dispatched = match self.dispatch(request) {
+                        Ok(dispatched) => dispatched,
+                        Err(error) => break Err(error),
+                    };
+                    if let Some(next_subscription) = dispatched.subscription {
+                        subscription = Some(next_subscription);
+                    }
+                    if let Err(error) = write_envelope(&mut writer, &dispatched.response).await {
+                        break if is_client_disconnect(&error) {
+                            Ok(())
+                        } else {
+                            Err(SessionIpcError::Transport(error))
+                        };
+                    }
+                }
+                _ = refresh.tick() => {
+                    let Some(frame) = subscription.as_mut().and_then(TerminalFrameSubscription::poll) else {
+                        continue;
+                    };
+                    let envelope = Envelope {
+                        request_id: 0,
+                        deadline_unix_ms: 0,
+                        payload: Some(frame.into_payload()),
+                    };
+                    if let Err(error) = write_envelope(&mut writer, &envelope).await {
+                        break if is_client_disconnect(&error) {
+                            Ok(())
+                        } else {
+                            Err(SessionIpcError::Transport(error))
+                        };
+                    }
+                }
+            }
+        };
+        reader_worker.abort();
+        result
+    }
+
+    fn dispatch(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
+        let request_id = request.request_id;
+        let (payload, subscription) = match request.payload {
+            Some(envelope::Payload::SnapshotRequest(snapshot_request)) => {
+                let mut subscription = self.registry.subscribe_request(&snapshot_request)?;
+                let Some(SubscriptionFrame::Full(full_frame)) = subscription.poll() else {
+                    return Err(SessionIpcError::InitialFrameUnavailable);
+                };
+                (envelope::Payload::FullFrame(full_frame), Some(subscription))
+            }
+            Some(envelope::Payload::SessionListRequest(_request)) => {
+                let sessions = self
+                    .registry
+                    .list()?
+                    .into_iter()
+                    .map(SessionSummary::from)
+                    .collect();
+                (
+                    envelope::Payload::SessionListResponse(SessionListResponse { sessions }),
+                    None,
+                )
+            }
+            Some(envelope::Payload::SessionCreateRequest(request)) => {
+                let session = self
+                    .registry
+                    .spawn_platform_default(request.rows, request.cols)?;
+                (
+                    envelope::Payload::SessionCreateResponse(SessionCreateResponse {
+                        session: Some(SessionSummary::from(session)),
+                    }),
+                    None,
+                )
+            }
+            Some(envelope::Payload::SessionCloseRequest(request)) => {
+                let session_id = LocalSessionRegistry::parse_session_id(&request.session_id)?;
+                self.registry.close(session_id)?;
+                (
+                    envelope::Payload::SessionCloseResponse(SessionCloseResponse {
+                        session_id: request.session_id,
+                    }),
+                    None,
+                )
+            }
+            Some(envelope::Payload::LogPageRequest(request)) => {
+                let session_id = request.session_id.clone();
+                let page = self.registry.fulfill_log_page_request(&request)?;
+                let rows = page
+                    .rows
+                    .into_iter()
+                    .map(|row| LogRow {
+                        line_id: row.line_id,
+                        text: row.text,
+                        style_spans: row
+                            .style_spans
+                            .into_iter()
+                            .map(|span| LogStyleSpan {
+                                start: span.start,
+                                end: span.end,
+                                style: Some(TerminalStyle::from(terminal_style(span.style))),
+                            })
+                            .collect(),
+                        truncated: row.truncated,
+                    })
+                    .collect();
+                let response = LogPage {
+                    session_id,
+                    revision: page.revision,
+                    anchor_line_id: page.anchor_line_id,
+                    rows,
+                    total_line_count: page.total_line_count,
+                    has_before: page.has_before,
+                    has_after: page.has_after,
+                };
+                response.validate()?;
+                (envelope::Payload::LogPage(response), None)
+            }
+            Some(envelope::Payload::TerminalInputRequest(request)) => (
+                envelope::Payload::TerminalControlResponse(self.dispatch_terminal_input(request)),
+                None,
+            ),
+            Some(envelope::Payload::TerminalResizeRequest(request)) => (
+                envelope::Payload::TerminalControlResponse(self.dispatch_terminal_resize(request)),
+                None,
+            ),
+            _ => return Err(SessionIpcError::UnsupportedRequest),
+        };
+        Ok(DispatchResult {
+            response: Envelope {
+                request_id,
+                deadline_unix_ms: 0,
+                payload: Some(payload),
+            },
+            subscription,
+        })
+    }
+
+    fn dispatch_terminal_input(&self, request: TerminalInputRequest) -> TerminalControlResponse {
+        let response_session_id = valid_control_session_id(&request.session_id);
+        let session_id = match LocalSessionRegistry::parse_session_id(&request.session_id) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                return TerminalControlResponse::new(
+                    response_session_id,
+                    registry_control_status(&error),
+                );
+            }
+        };
+        let action = match request.decode_action() {
+            Ok(action) => action,
+            Err(_) => {
+                return TerminalControlResponse::new(
+                    response_session_id,
+                    TerminalControlStatus::InvalidRequest,
+                );
+            }
+        };
+        let result = self
+            .registry
+            .attach(session_id)
+            .map_err(|error| registry_control_status(&error))
+            .and_then(|attachment| {
+                attachment
+                    .send_input(&action)
+                    .map_err(|error| local_control_status(&error))
+            });
+        TerminalControlResponse::new(
+            response_session_id,
+            result.err().unwrap_or(TerminalControlStatus::Accepted),
+        )
+    }
+
+    fn dispatch_terminal_resize(&self, request: TerminalResizeRequest) -> TerminalControlResponse {
+        let response_session_id = valid_control_session_id(&request.session_id);
+        let session_id = match LocalSessionRegistry::parse_session_id(&request.session_id) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                return TerminalControlResponse::new(
+                    response_session_id,
+                    registry_control_status(&error),
+                );
+            }
+        };
+        let size = match request.decode_size() {
+            Ok(size) => size,
+            Err(_) => {
+                return TerminalControlResponse::new(
+                    response_session_id,
+                    TerminalControlStatus::InvalidRequest,
+                );
+            }
+        };
+        let result = self
+            .registry
+            .attach(session_id)
+            .map_err(|error| registry_control_status(&error))
+            .and_then(|attachment| {
+                attachment
+                    .resize(size)
+                    .map_err(|error| local_control_status(&error))
+            });
+        TerminalControlResponse::new(
+            response_session_id,
+            result.err().unwrap_or(TerminalControlStatus::Accepted),
+        )
+    }
+}
+
+fn valid_control_session_id(session_id: &[u8]) -> Vec<u8> {
+    if session_id.len() == 16 {
+        session_id.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+fn registry_control_status(error: &SessionRegistryError) -> TerminalControlStatus {
+    match error {
+        SessionRegistryError::InvalidSessionIdLength(_) => TerminalControlStatus::InvalidRequest,
+        SessionRegistryError::UnknownSession(_) => TerminalControlStatus::UnknownSession,
+        SessionRegistryError::Session(error) => local_control_status(error),
+        _ => TerminalControlStatus::Failed,
+    }
+}
+
+fn local_control_status(error: &LocalSessionError) -> TerminalControlStatus {
+    match error {
+        LocalSessionError::InputBackpressure => TerminalControlStatus::Backpressure,
+        LocalSessionError::Closed => TerminalControlStatus::SessionClosed,
+        _ => TerminalControlStatus::Failed,
+    }
+}
+
+fn terminal_style(style: JournalStyle) -> Style {
+    Style {
+        foreground: terminal_color(style.foreground),
+        background: terminal_color(style.background),
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        inverse: style.inverse,
+    }
+}
+
+fn terminal_color(color: JournalColor) -> Color {
+    match color {
+        JournalColor::Default => Color::Default,
+        JournalColor::Indexed(value) => Color::Indexed(value),
+        JournalColor::Rgb(red, green, blue) => Color::Rgb(red, green, blue),
+    }
+}
+
+impl From<LocalSessionInfo> for SessionSummary {
+    fn from(info: LocalSessionInfo) -> Self {
+        Self {
+            session_id: info.session_id.as_uuid().as_bytes().to_vec(),
+            title: info.title,
+            running: info.running,
+            generation: info.generation,
+        }
+    }
+}
+
+fn is_client_disconnect(error: &IpcError) -> bool {
+    matches!(
+        error,
+        IpcError::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            )
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{SessionIpcService, terminal_style};
+    use crate::LocalSessionRegistry;
+    use cshell_domain::{InputAction, TerminalSize};
+    use cshell_ipc::{
+        Envelope, LogPageRequest, SessionListRequest, SnapshotRequest, TerminalControlStatus,
+        TerminalInputRequest, TerminalResizeRequest, envelope, read_envelope, write_envelope,
+    };
+    use cshell_local::{LocalProfile, WorkingDirectoryPolicy};
+    use cshell_output_store::{JournalColor, JournalStyle};
+    use cshell_terminal::{Color, Style};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn long_running_profile() -> LocalProfile {
+        #[cfg(windows)]
+        return LocalProfile {
+            name: "IPC snapshot probe".to_owned(),
+            program: PathBuf::from("cmd.exe"),
+            args: vec![
+                "/D".to_owned(),
+                "/S".to_owned(),
+                "/C".to_owned(),
+                "ping -n 30 127.0.0.1 >nul".to_owned(),
+            ],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        };
+
+        #[cfg(not(windows))]
+        LocalProfile {
+            name: "IPC snapshot probe".to_owned(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-lc".to_owned(), "sleep 30".to_owned()],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        }
+    }
+
+    fn interactive_profile() -> LocalProfile {
+        #[cfg(windows)]
+        return LocalProfile {
+            name: "IPC interactive input probe".to_owned(),
+            program: PathBuf::from("cmd.exe"),
+            args: vec!["/D".to_owned(), "/Q".to_owned()],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        };
+
+        #[cfg(not(windows))]
+        LocalProfile {
+            name: "IPC interactive input probe".to_owned(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec![],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn journal_style_maps_losslessly_to_terminal_style() {
+        assert_eq!(
+            terminal_style(JournalStyle {
+                foreground: JournalColor::Rgb(1, 2, 3),
+                background: JournalColor::Indexed(237),
+                bold: true,
+                italic: true,
+                underline: true,
+                inverse: true,
+            }),
+            Style {
+                foreground: Color::Rgb(1, 2, 3),
+                background: Color::Indexed(237),
+                bold: true,
+                italic: true,
+                underline: true,
+                inverse: true,
+            }
+        );
+    }
+
+    #[test]
+    fn control_plane_creates_lists_and_closes_a_local_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let service = SessionIpcService::new(Arc::clone(&registry));
+
+        let list = service
+            .handle_request(Envelope {
+                request_id: 1,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SessionListRequest(
+                    cshell_ipc::SessionListRequest {},
+                )),
+            })
+            .unwrap();
+        let Some(envelope::Payload::SessionListResponse(list)) = list.payload else {
+            panic!("expected session list");
+        };
+        assert!(list.sessions.is_empty());
+
+        let created = service
+            .handle_request(Envelope {
+                request_id: 2,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SessionCreateRequest(
+                    cshell_ipc::SessionCreateRequest { rows: 24, cols: 80 },
+                )),
+            })
+            .unwrap();
+        let Some(envelope::Payload::SessionCreateResponse(created)) = created.payload else {
+            panic!("expected create response");
+        };
+        let session = created.session.unwrap();
+        assert_eq!(session.session_id.len(), 16);
+        assert_eq!(registry.len(), 1);
+
+        let closed = service
+            .handle_request(Envelope {
+                request_id: 3,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SessionCloseRequest(
+                    cshell_ipc::SessionCloseRequest {
+                        session_id: session.session_id.clone(),
+                    },
+                )),
+            })
+            .unwrap();
+        assert!(matches!(
+            closed.payload,
+            Some(envelope::Payload::SessionCloseResponse(response))
+                if response.session_id == session.session_id
+        ));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn terminal_input_and_resize_are_dispatched_to_the_daemon_owned_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let attachment = registry
+            .spawn_local(&long_running_profile(), TerminalSize::cells(24, 80))
+            .unwrap();
+        let session_id = attachment.session_id();
+        drop(attachment);
+        let service = SessionIpcService::new(Arc::clone(&registry));
+
+        let input =
+            TerminalInputRequest::from_action(session_id, &InputAction::Text(String::new()))
+                .unwrap();
+        let response = service
+            .handle_request(Envelope {
+                request_id: 10,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::TerminalInputRequest(input)),
+            })
+            .unwrap();
+        let Some(envelope::Payload::TerminalControlResponse(response)) = response.payload else {
+            panic!("terminal input must return a control response");
+        };
+        assert_eq!(
+            response.decoded_status().unwrap(),
+            TerminalControlStatus::Accepted
+        );
+
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 1_000,
+            pixel_height: 600,
+            generation: 1,
+        };
+        let response = service
+            .handle_request(Envelope {
+                request_id: 11,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::TerminalResizeRequest(
+                    TerminalResizeRequest::from_size(session_id, size),
+                )),
+            })
+            .unwrap();
+        let Some(envelope::Payload::TerminalControlResponse(response)) = response.payload else {
+            panic!("terminal resize must return a control response");
+        };
+        assert_eq!(
+            response.decoded_status().unwrap(),
+            TerminalControlStatus::Accepted
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let snapshot = loop {
+            let frame = registry.attach(session_id).unwrap().full_frame().unwrap();
+            let snapshot = frame.decode_terminal_snapshot().unwrap();
+            if (snapshot.rows, snapshot.cols) == (30, 100) {
+                break snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resize was not published before the deadline"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!((snapshot.rows, snapshot.cols), (30, 100));
+    }
+
+    #[test]
+    fn terminal_control_failures_return_status_without_failing_the_ipc_dispatcher() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let service = SessionIpcService::new(registry);
+        let missing_session = cshell_domain::SessionId::new();
+
+        let malformed = service
+            .handle_request(Envelope {
+                request_id: 20,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::TerminalInputRequest(
+                    TerminalInputRequest {
+                        session_id: missing_session.as_uuid().as_bytes().to_vec(),
+                        key: None,
+                        text: None,
+                        paste: None,
+                        control: None,
+                    },
+                )),
+            })
+            .unwrap();
+        let Some(envelope::Payload::TerminalControlResponse(malformed)) = malformed.payload else {
+            panic!("malformed input must receive a response");
+        };
+        assert_eq!(
+            malformed.decoded_status().unwrap(),
+            TerminalControlStatus::InvalidRequest
+        );
+
+        let unknown = TerminalInputRequest::from_action(
+            missing_session,
+            &InputAction::Text("ignored".to_owned()),
+        )
+        .unwrap();
+        let unknown = service
+            .handle_request(Envelope {
+                request_id: 21,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::TerminalInputRequest(unknown)),
+            })
+            .unwrap();
+        let Some(envelope::Payload::TerminalControlResponse(unknown)) = unknown.payload else {
+            panic!("unknown session must receive a response");
+        };
+        assert_eq!(
+            unknown.decoded_status().unwrap(),
+            TerminalControlStatus::UnknownSession
+        );
+    }
+
+    #[test]
+    fn typed_ipc_input_executes_in_the_real_pty_and_reaches_the_journal() {
+        const MARKER: &str = "CSHELL_CONTROL_EXECUTED";
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let attachment = registry
+            .spawn_local(&interactive_profile(), TerminalSize::cells(24, 80))
+            .unwrap();
+        let session_id = attachment.session_id();
+        drop(attachment);
+        let service = SessionIpcService::new(Arc::clone(&registry));
+
+        let input = TerminalInputRequest::from_action(
+            session_id,
+            &InputAction::Text(format!("echo {MARKER}\r")),
+        )
+        .unwrap();
+        let response = service
+            .handle_request(Envelope {
+                request_id: 30,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::TerminalInputRequest(input)),
+            })
+            .unwrap();
+        let Some(envelope::Payload::TerminalControlResponse(response)) = response.payload else {
+            panic!("interactive input must return a control response");
+        };
+        assert_eq!(
+            response.decoded_status().unwrap(),
+            TerminalControlStatus::Accepted
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let page = registry
+                .fulfill_log_page_request(&LogPageRequest {
+                    session_id: session_id.as_uuid().as_bytes().to_vec(),
+                    anchor_line_id: None,
+                    cell_offset: 0,
+                    rows_before: 128,
+                    rows_after: 0,
+                })
+                .unwrap();
+            if page
+                .rows
+                .iter()
+                .any(|row| row.text.trim_start().starts_with(MARKER) && !row.text.contains("echo "))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "typed input did not produce an executed-command output line; journal rows: {:?}",
+                page.rows
+                    .iter()
+                    .map(|row| row.text.as_str())
+                    .collect::<Vec<_>>()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        registry.close(session_id).unwrap();
+    }
+
+    fn streaming_profile() -> LocalProfile {
+        #[cfg(windows)]
+        return LocalProfile {
+            name: "IPC streaming probe".to_owned(),
+            program: PathBuf::from("cmd.exe"),
+            args: vec![
+                "/D".to_owned(),
+                "/S".to_owned(),
+                "/C".to_owned(),
+                "echo CSHELL_STREAM_ONE & ping -n 2 127.0.0.1 >nul & echo CSHELL_STREAM_TWO"
+                    .to_owned(),
+            ],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        };
+
+        #[cfg(not(windows))]
+        LocalProfile {
+            name: "IPC streaming probe".to_owned(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-lc".to_owned(),
+                "printf CSHELL_STREAM_ONE; sleep 1; printf CSHELL_STREAM_TWO".to_owned(),
+            ],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        }
+    }
+
+    fn styled_streaming_profile() -> LocalProfile {
+        #[cfg(windows)]
+        return LocalProfile {
+            name: "IPC styled log probe".to_owned(),
+            program: PathBuf::from("powershell.exe"),
+            args: vec![
+                "-NoLogo".to_owned(),
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-Command".to_owned(),
+                "[Console]::Write(([char]27).ToString() + '[38;5;196mCSHELL_STYLED' + ([char]27) + '[0m' + [Environment]::NewLine); Start-Sleep -Seconds 2".to_owned(),
+            ],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        };
+
+        #[cfg(not(windows))]
+        LocalProfile {
+            name: "IPC styled log probe".to_owned(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-lc".to_owned(),
+                "printf '\\033[38;5;196mCSHELL_STYLED\\033[0m\\n'; sleep 2".to_owned(),
+            ],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_request_crosses_framed_ipc_and_returns_typed_full_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let attachment = registry
+            .spawn_local(&long_running_profile(), TerminalSize::cells(24, 80))
+            .unwrap();
+        let session_id = attachment.session_id();
+        drop(attachment);
+
+        let service = SessionIpcService::new(Arc::clone(&registry));
+        let (mut client, mut server) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(async move { service.serve_one(&mut server).await });
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 73,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SnapshotRequest(SnapshotRequest {
+                    session_id: session_id.as_uuid().as_bytes().to_vec(),
+                    current_generation: None,
+                })),
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = read_envelope(&mut client).await.unwrap();
+        assert_eq!(response.request_id, 73);
+        let Some(envelope::Payload::FullFrame(frame)) = response.payload else {
+            panic!("expected a full terminal frame");
+        };
+        assert_eq!(frame.session_id, session_id.as_uuid().as_bytes());
+        let snapshot = frame.decode_terminal_snapshot().unwrap();
+        assert_eq!((snapshot.rows, snapshot.cols), (24, 80));
+        server_task.await.unwrap().unwrap();
+
+        registry.close(session_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_terminal_control_keeps_the_framed_connection_usable() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let service = SessionIpcService::new(Arc::clone(&registry));
+        let (mut client, server) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(async move { service.serve_connection(server).await });
+
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 80,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SessionListRequest(SessionListRequest {})),
+            },
+        )
+        .await
+        .unwrap();
+        let initial = read_envelope(&mut client).await.unwrap();
+        assert!(matches!(
+            initial,
+            Envelope {
+                request_id: 80,
+                payload: Some(envelope::Payload::SessionListResponse(_)),
+                ..
+            }
+        ));
+
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 81,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::TerminalInputRequest(
+                    TerminalInputRequest {
+                        session_id: vec![0; 16],
+                        key: None,
+                        text: None,
+                        paste: None,
+                        control: None,
+                    },
+                )),
+            },
+        )
+        .await
+        .unwrap();
+        let rejected = read_envelope(&mut client).await.unwrap();
+        let Some(envelope::Payload::TerminalControlResponse(rejected)) = rejected.payload else {
+            panic!("invalid terminal control must receive a typed response");
+        };
+        assert_eq!(
+            rejected.decoded_status().unwrap(),
+            TerminalControlStatus::InvalidRequest
+        );
+
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 82,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SessionListRequest(SessionListRequest {})),
+            },
+        )
+        .await
+        .unwrap();
+        let after_rejection = read_envelope(&mut client).await.unwrap();
+        assert!(matches!(
+            after_rejection,
+            Envelope {
+                request_id: 82,
+                payload: Some(envelope::Payload::SessionListResponse(_)),
+                ..
+            }
+        ));
+
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_streams_merged_frames_until_the_client_disconnects() {
+        use cshell_ipc::{ApplyResult, TerminalReplicaState};
+
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let attachment = registry
+            .spawn_local(&streaming_profile(), TerminalSize::cells(24, 80))
+            .unwrap();
+        let session_id = attachment.session_id();
+        drop(attachment);
+
+        let service = SessionIpcService::new(Arc::clone(&registry));
+        let (mut client, server) = tokio::io::duplex(1024 * 1024);
+        let server_task = tokio::spawn(async move { service.serve_connection(server).await });
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 91,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SnapshotRequest(SnapshotRequest {
+                    session_id: session_id.as_uuid().as_bytes().to_vec(),
+                    current_generation: None,
+                })),
+            },
+        )
+        .await
+        .unwrap();
+
+        let initial = read_envelope(&mut client).await.unwrap();
+        let Some(envelope::Payload::FullFrame(initial)) = initial.payload else {
+            panic!("subscription must begin with a full frame");
+        };
+        let mut replica = TerminalReplicaState::new(session_id.as_uuid().as_bytes().to_vec());
+        assert_eq!(replica.apply_full(initial).unwrap(), ApplyResult::Applied);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let envelope = tokio::time::timeout(remaining, read_envelope(&mut client))
+                .await
+                .unwrap()
+                .unwrap();
+            match envelope.payload {
+                Some(envelope::Payload::FrameDelta(delta)) => {
+                    assert_eq!(replica.apply_delta(delta).unwrap(), ApplyResult::Applied);
+                }
+                Some(envelope::Payload::FullFrame(frame)) => {
+                    assert_eq!(replica.apply_full(frame).unwrap(), ApplyResult::Applied);
+                }
+                _ => panic!("unexpected subscription payload"),
+            }
+            let visible: String = replica
+                .snapshot()
+                .unwrap()
+                .cells
+                .iter()
+                .map(|cell| cell.character)
+                .collect();
+            if visible.contains("CSHELL_STREAM_ONE") {
+                break;
+            }
+        }
+
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        registry.close(session_id).unwrap();
+    }
+
+    #[test]
+    fn log_page_request_crosses_registry_index_and_ipc_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let attachment = registry
+            .spawn_local(&streaming_profile(), TerminalSize::cells(24, 80))
+            .unwrap();
+        let session_id = attachment.session_id();
+        drop(attachment);
+        let service = SessionIpcService::new(Arc::clone(&registry));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let response = service
+                .handle_request(Envelope {
+                    request_id: 101,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::LogPageRequest(LogPageRequest {
+                        session_id: session_id.as_uuid().as_bytes().to_vec(),
+                        anchor_line_id: None,
+                        cell_offset: 0,
+                        rows_before: 32,
+                        rows_after: 0,
+                    })),
+                })
+                .unwrap();
+            let Some(envelope::Payload::LogPage(page)) = response.payload else {
+                panic!("expected an indexed log page");
+            };
+            page.validate().unwrap();
+            if page
+                .rows
+                .iter()
+                .any(|row| row.text.contains("CSHELL_STREAM_ONE"))
+            {
+                assert_eq!(response.request_id, 101);
+                assert!(page.revision > 0);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "journal index did not observe PTY output"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        registry.close(session_id).unwrap();
+    }
+
+    #[test]
+    fn styled_log_page_crosses_pty_journal_registry_and_ipc() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let attachment = registry
+            .spawn_local(&styled_streaming_profile(), TerminalSize::cells(24, 80))
+            .unwrap();
+        let session_id = attachment.session_id();
+        drop(attachment);
+        let service = SessionIpcService::new(Arc::clone(&registry));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        loop {
+            let response = service
+                .handle_request(Envelope {
+                    request_id: 102,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::LogPageRequest(LogPageRequest {
+                        session_id: session_id.as_uuid().as_bytes().to_vec(),
+                        anchor_line_id: None,
+                        cell_offset: 0,
+                        rows_before: 8,
+                        rows_after: 0,
+                    })),
+                })
+                .unwrap();
+            let Some(envelope::Payload::LogPage(page)) = response.payload else {
+                panic!("expected a styled indexed log page");
+            };
+            page.validate().unwrap();
+            if let Some(row) = page
+                .rows
+                .iter()
+                .find(|row| row.text.contains("CSHELL_STYLED"))
+            {
+                let style = Style::try_from(row.style_spans[0].style.clone().unwrap()).unwrap();
+                assert_eq!(style.foreground, Color::Indexed(196));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "styled journal output did not reach IPC"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        registry.close(session_id).unwrap();
+    }
+}

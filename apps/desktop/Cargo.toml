@@ -1,0 +1,29 @@
+[package]
+name = "cshell-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cshell-domain = { path = "../../crates/cshell-domain" }
+cshell-ipc = { path = "../../crates/cshell-ipc" }
+cshell-render = { path = "../../crates/cshell-render" }
+cshell-terminal = { path = "../../crates/cshell-terminal" }
+cshell-ui = { path = "../../crates/cshell-ui" }
+egui.workspace = true
+egui-winit.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+cshell-local = { path = "../../crates/cshell-local" }
+cshelld = { path = "../../daemon" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

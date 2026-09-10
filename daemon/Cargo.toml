@@ -1,0 +1,39 @@
+[package]
+name = "cshelld"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cshell-domain = { path = "../crates/cshell-domain" }
+cshell-ipc = { path = "../crates/cshell-ipc" }
+cshell-local = { path = "../crates/cshell-local" }
+cshell-output-store = { path = "../crates/cshell-output-store" }
+cshell-ssh = { path = "../crates/cshell-ssh" }
+cshell-terminal = { path = "../crates/cshell-terminal" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[[bench]]
+name = "pipeline_throughput"
+harness = false
+
+[[bench]]
+name = "ipc_fanout"
+harness = false
+
+[lints]
+workspace = true

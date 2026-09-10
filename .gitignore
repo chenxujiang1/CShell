@@ -1,0 +1,68 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# CShell runtime state and generated journals
+/runtime/
+/runtime-output/
+/journals/
+/.cshell/
+*.csjr
+*.csjr.*
+*.csix
+*.csix.*
+*.csli
+*.csli.*
+daemon.discovery
+daemon.lock
+*.sock
+
+# Benchmarks, coverage, profiling and crash output
+/artifacts/
+/bench-output/
+/coverage/
+*.profraw
+*.profdata
+lcov.info
+cobertura.xml
+*.dmp
+core
+core.*
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+/.ssh/
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local agent state
+/.codex/
+/.agents/
+
+# Internal development plans and progress records
+/DEVELOPMENT.md
+/STATUS.md
+/docs/DEVELOPMENT.md
+/docs/phase*/
+/docs/dev/
+/docs/progress/
+/docs/status/
+
+# Editors, operating systems and temporary files
+/.idea/
+/.vscode/
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

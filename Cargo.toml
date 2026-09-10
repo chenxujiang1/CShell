@@ -1,0 +1,74 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/desktop",
+    "cli",
+    "daemon",
+    "crates/cshell-application",
+    "crates/cshell-domain",
+    "crates/cshell-ipc",
+    "crates/cshell-local",
+    "crates/cshell-output-store",
+    "crates/cshell-render",
+    "crates/cshell-ssh",
+    "crates/cshell-terminal",
+    "crates/cshell-ui",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+ab_glyph = "=0.2.32"
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+async-trait = "0.1"
+bytemuck = { version = "=1.25.2", features = ["derive"] }
+bytes = "1"
+crc32fast = "1"
+cosmic-text = "=0.19.0"
+egui = "=0.36.1"
+egui-wgpu = "=0.36.1"
+egui-winit = "=0.36.1"
+epaint_default_fonts = "=0.36.1"
+guillotiere = "=0.7.0"
+libc = "=0.2.189"
+memchr = "2"
+portable-pty = "=0.9.0"
+prost = "=0.14.4"
+rand = "=0.10.2"
+russh = { version = "=0.63.1", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive", "rc"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "=1.26.0", features = ["serde", "v7"] }
+unicode-segmentation = "=1.13.3"
+unicode-width = "=0.2.2"
+wgpu = "=30.0.1"
+winit = "=0.30.13"
+windows-sys = "=0.61.2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+await_holding_lock = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+debug = true

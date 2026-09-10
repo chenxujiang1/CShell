@@ -1,0 +1,19 @@
+[package]
+name = "cshell-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cshell-domain = { path = "../cshell-domain" }
+portable-pty.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+cshell-terminal = { path = "../cshell-terminal" }

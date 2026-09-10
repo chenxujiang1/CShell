@@ -1,0 +1,46 @@
+[package]
+name = "cshell-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["render-wgpu"]
+render-wgpu = []
+software-renderer = []
+
+[dependencies]
+ab_glyph.workspace = true
+bytemuck.workspace = true
+cshell-terminal = { path = "../cshell-terminal" }
+cosmic-text.workspace = true
+epaint_default_fonts.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+guillotiere.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+cshell-domain = { path = "../cshell-domain" }
+tokio.workspace = true
+
+[[bench]]
+name = "glyph_geometry"
+harness = false
+
+[[bench]]
+name = "log_geometry"
+harness = false
+
+[[bench]]
+name = "atlas_pressure"
+harness = false
+
+[lints]
+workspace = true

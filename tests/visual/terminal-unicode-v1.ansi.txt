@@ -1,0 +1,21 @@
+# CShell terminal visual corpus v1
+# Lines use a visible \x1b escape marker so the corpus remains reviewable text.
+\x1b[2J\x1b[H\x1b[1;36mCShell Unicode / Color Visual Corpus v1\x1b[0m
+ASCII alignment : 0123456789 | ABCDEFGHIJKLMNOPQRSTUVWXYZ | !@#$%^&*()
+CJK simplified  : 中文终端 渲染性能 服务器连接 文件传输
+CJK traditional : 中文終端 字型後備 遠端連線 檔案傳輸
+CJK Japanese    : 日本語ターミナル 接続状態 ファイル転送
+CJK Korean      : 한국어 터미널 연결 상태 파일 전송
+NFC accents     : café naïve résumé Ångström élève
+NFD combining   : café naïve résumé Ångström élève
+Combining stack : ā́ ê̈ ȭ Ẓ̇
+Wide boundary   : |中文|日本語|한국어|ＡＢＣ|１２３|
+Emoji basic     : 😀 😃 🚀 🔒 ⚠️ ✅ ❌ 🖥️ 📁
+Emoji sequences : 👨‍💻 👩‍🚀 👨‍👩‍👧‍👦 🏳️‍🌈 👍🏽 ❤️‍🔥
+Box drawing     : ┌────────┬────────┐  ╔════════╦════════╗  ░▒▓█
+\x1b[30m00\x1b[31m 01\x1b[32m 02\x1b[33m 03\x1b[34m 04\x1b[35m 05\x1b[36m 06\x1b[37m 07\x1b[0m
+\x1b[90m08\x1b[91m 09\x1b[92m 10\x1b[93m 11\x1b[94m 12\x1b[95m 13\x1b[96m 14\x1b[97m 15\x1b[0m
+\x1b[38;5;196m256 red\x1b[0m | \x1b[38;5;46m256 green\x1b[0m | \x1b[38;5;21m256 blue\x1b[0m | \x1b[38;5;208m256 orange\x1b[0m
+\x1b[38;2;255;80;80mTrueColor red\x1b[0m | \x1b[38;2;80;255;160mTrueColor mint\x1b[0m | \x1b[38;2;110;150;255mTrueColor blue\x1b[0m
+\x1b[1mBold 粗体 中文 Emoji 😀\x1b[0m | \x1b[3mItalic 斜体 résumé\x1b[0m | \x1b[4mUnderline 下划线\x1b[0m
+\x1b[7mInverse 反色 terminal 终端\x1b[0m
