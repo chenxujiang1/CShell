@@ -238,7 +238,7 @@ pub async fn run_headless_gpu_probe() -> Result<GpuProbeReport, GpuProbeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalSurfaceModel, ViewportPlanner, run_headless_gpu_probe};
+    use super::{GpuProbeError, TerminalSurfaceModel, ViewportPlanner, run_headless_gpu_probe};
     use cshell_terminal::{Cell, FrameSnapshot, TerminalModes};
     use std::sync::Arc;
 
@@ -297,9 +297,16 @@ mod tests {
 
     #[tokio::test]
     async fn headless_gpu_submits_a_render_pass() {
-        let report = run_headless_gpu_probe()
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
+        let report = match run_headless_gpu_probe().await {
+            Ok(report) => report,
+            Err(GpuProbeError::Adapter(error))
+                if std::env::var_os("CSHELL_REQUIRE_GPU").is_none() =>
+            {
+                eprintln!("skipping GPU probe because this runner has no adapter: {error}");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
         assert!(!report.adapter_name.is_empty());
         eprintln!(
             "wgpu adapter: {} ({}, {})",

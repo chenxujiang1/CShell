@@ -18,7 +18,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: bash .github/scripts/run-with-diagnostics.sh cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-targets --all-features
+      - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features
       - run: cargo test --workspace --doc --all-features
       - uses: EmbarkStudios/cargo-deny-action@v2
 
