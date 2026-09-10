@@ -516,6 +516,7 @@ mod tests {
             .wait_for_generation(1, Duration::from_secs(2))
             .unwrap();
         assert_eq!(snapshot.row(0).unwrap()[0].character, 'h');
+        pipeline.shutdown().unwrap();
         let stats = telemetry.snapshot();
         assert_eq!(stats.accepted_output_bytes, 7);
         assert_eq!(stats.processed_output_bytes, 7);
@@ -523,7 +524,6 @@ mod tests {
         assert_eq!(stats.processed_output_messages, 1);
         assert_eq!(stats.in_flight_messages, 0);
         assert_eq!(stats.peak_in_flight_messages, 1);
-        pipeline.shutdown().unwrap();
 
         let report = scan(path, false).unwrap();
         assert_eq!(report.records.len(), 1);
@@ -582,10 +582,10 @@ mod tests {
             .wait_for_generation(1, Duration::from_secs(2))
             .unwrap();
         assert_eq!((snapshot.rows, snapshot.cols), (40, 120));
+        pipeline.shutdown().unwrap();
         let stats = telemetry.snapshot();
         assert_eq!(stats.accepted_resizes, 1);
         assert_eq!(stats.processed_resizes, 1);
         assert_eq!(stats.in_flight_messages, 0);
-        pipeline.shutdown().unwrap();
     }
 }
