@@ -10,6 +10,7 @@ mod platform {
     pub struct LocalListener(UnixListener);
 
     pub type LocalStream = UnixStream;
+    pub type ClientStream = UnixStream;
 
     impl LocalListener {
         pub fn bind(path: &Path) -> io::Result<Self> {

@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(windows)]
     let listener = LocalListener::bind(endpoint.to_string_lossy().into_owned())?;
     #[cfg(unix)]
-    let listener = LocalListener::bind(&PathBuf::from(endpoint))?;
+    let listener = LocalListener::bind(&PathBuf::from(&endpoint))?;
 
     let server = SessionIpcServer::new(
         listener,
