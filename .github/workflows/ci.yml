@@ -16,11 +16,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo fmt --all -- --check
       - run: bash .github/scripts/run-with-diagnostics.sh cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features
       - run: cargo test --workspace --doc --all-features
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - run: bash .github/scripts/run-with-diagnostics.sh cargo deny check
 
   platform-test:
     strategy:
