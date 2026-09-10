@@ -42,6 +42,7 @@ pub enum CellWidth {
 }
 
 pub const MAX_ZERO_WIDTH_CHARS_PER_CELL: usize = 64;
+pub const MAX_HYPERLINK_URI_BYTES: usize = 4 * 1024;
 
 #[must_use]
 pub fn is_zero_width_character(character: char) -> bool {
@@ -52,6 +53,7 @@ pub fn is_zero_width_character(character: char) -> bool {
 pub struct Cell {
     pub character: char,
     zerowidth: Option<Arc<[char]>>,
+    hyperlink_uri: Option<Arc<str>>,
     pub width: CellWidth,
     pub style: Style,
 }
@@ -61,6 +63,7 @@ impl Default for Cell {
         Self {
             character: ' ',
             zerowidth: None,
+            hyperlink_uri: None,
             width: CellWidth::Single,
             style: Style::default(),
         }
@@ -73,6 +76,7 @@ impl Cell {
         Self {
             character,
             zerowidth: None,
+            hyperlink_uri: None,
             width,
             style,
         }
@@ -93,9 +97,23 @@ impl Cell {
         Self {
             character,
             zerowidth: (!characters.is_empty()).then(|| Arc::from(characters)),
+            hyperlink_uri: None,
             width,
             style,
         }
+    }
+
+    #[must_use]
+    pub fn with_hyperlink_uri(mut self, uri: impl Into<Arc<str>>) -> Self {
+        let uri = uri.into();
+        self.hyperlink_uri =
+            (!uri.is_empty() && uri.len() <= MAX_HYPERLINK_URI_BYTES).then_some(uri);
+        self
+    }
+
+    #[must_use]
+    pub fn hyperlink_uri(&self) -> Option<&str> {
+        self.hyperlink_uri.as_deref()
     }
 
     #[must_use]

@@ -7,6 +7,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{self, Color as AlacrittyColor, NamedColor};
 use cshell_domain::TerminalSize;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug)]
@@ -142,6 +143,7 @@ impl TerminalEngine for AlacrittyTerminalEngine {
         let rows = self.size.rows.max(1);
         let cols = self.size.cols.max(1);
         let mut cells = vec![Cell::default(); usize::from(rows) * usize::from(cols)];
+        let mut hyperlink_uris = HashMap::<Arc<str>, ()>::new();
         for indexed in content.display_iter {
             let Ok(row) = usize::try_from(indexed.point.line.0) else {
                 continue;
@@ -160,8 +162,13 @@ impl TerminalEngine for AlacrittyTerminalEngine {
             } else {
                 CellWidth::Single
             };
-            cells[row * usize::from(cols) + col] = Cell::with_zerowidth(
-                source.c,
+            // Alacritty retains a horizontal-tab marker in the grid cell where
+            // the control character was received. It is terminal bookkeeping,
+            // not a printable glyph; publishing it would make renderer output
+            // depend on font-specific handling of U+0009.
+            let character = if source.c == '\t' { ' ' } else { source.c };
+            let mut cell = Cell::with_zerowidth(
+                character,
                 source.zerowidth().into_iter().flatten().copied(),
                 width,
                 Style {
@@ -173,6 +180,21 @@ impl TerminalEngine for AlacrittyTerminalEngine {
                     inverse: source.flags.contains(Flags::INVERSE),
                 },
             );
+            if let Some(hyperlink) = source.hyperlink() {
+                let uri = hyperlink.uri();
+                if !uri.is_empty() && uri.len() <= crate::MAX_HYPERLINK_URI_BYTES {
+                    let shared_uri =
+                        if let Some((shared_uri, ())) = hyperlink_uris.get_key_value(uri) {
+                            shared_uri.clone()
+                        } else {
+                            let shared_uri = Arc::<str>::from(uri);
+                            hyperlink_uris.insert(shared_uri.clone(), ());
+                            shared_uri
+                        };
+                    cell = cell.with_hyperlink_uri(shared_uri);
+                }
+            }
+            cells[row * usize::from(cols) + col] = cell;
         }
         FrameSnapshot {
             generation: self.generation,
@@ -274,5 +296,30 @@ mod tests {
         assert_eq!(row[2].character, 'e');
         assert_eq!(row[2].zerowidth(), &['\u{301}']);
         assert_eq!(row[2].characters().collect::<String>(), "e\u{301}");
+    }
+
+    #[test]
+    fn preserves_osc_8_hyperlinks_without_leaking_upstream_types() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(2, 8));
+        terminal.feed(b"\x1b]8;id=docs;https://example.test/a\x1b\\A\x1b]8;;\x1b\\B");
+        let snapshot = terminal.snapshot();
+        let row = snapshot.row(0).unwrap_or_default();
+        assert_eq!(row[0].hyperlink_uri(), Some("https://example.test/a"));
+        assert_eq!(row[1].hyperlink_uri(), None);
+    }
+
+    #[test]
+    fn discards_unbounded_osc_8_hyperlinks_before_snapshot_publication() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(2, 8));
+        let uri = format!(
+            "https://example.test/{}",
+            "x".repeat(crate::MAX_HYPERLINK_URI_BYTES)
+        );
+        let input = format!("\u{1b}]8;;{uri}\u{1b}\u{5c}A\u{1b}]8;;\u{1b}\u{5c}");
+        terminal.feed(input.as_bytes());
+        assert_eq!(
+            terminal.snapshot().row(0).unwrap_or_default()[0].hyperlink_uri(),
+            None
+        );
     }
 }

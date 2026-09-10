@@ -2,8 +2,8 @@ use cshell_domain::{
     ControlAction, InputAction, KeyCode, KeyEvent, Modifiers, SessionId, TerminalSize,
 };
 use cshell_terminal::{
-    Cell, CellWidth, Color, FrameSnapshot, MAX_ZERO_WIDTH_CHARS_PER_CELL, Style, TerminalModes,
-    is_zero_width_character,
+    Cell, CellWidth, Color, FrameSnapshot, MAX_HYPERLINK_URI_BYTES, MAX_ZERO_WIDTH_CHARS_PER_CELL,
+    Style, TerminalModes, is_zero_width_character,
 };
 use prost::{Enumeration, Message};
 use std::collections::HashSet;
@@ -11,8 +11,9 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 4;
+pub const PROTOCOL_MINOR: u32 = 5;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
+pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
 pub const MAX_LOG_PAGE_TEXT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_LOG_PAGE_STYLE_SPANS: usize = 16 * 1024;
@@ -94,6 +95,8 @@ pub struct TerminalCell {
     pub zerowidth_scalars: Vec<u32>,
     #[prost(enumeration = "TerminalCellWidth", tag = "4")]
     pub width: i32,
+    #[prost(string, tag = "5")]
+    pub hyperlink_uri: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -163,6 +166,8 @@ pub enum SnapshotCodecError {
     UnknownCellWidth(i32),
     #[error("terminal cell combining scalar U+{0:04X} has non-zero display width")]
     NonZeroWidthCombiningScalar(u32),
+    #[error("terminal cell hyperlink URI contains {actual} bytes; maximum is {maximum}")]
+    HyperlinkUriTooLong { actual: usize, maximum: usize },
     #[error("terminal color kind {0} is unknown")]
     UnknownColorKind(i32),
     #[error("indexed terminal color {0} exceeds 255")]
@@ -265,6 +270,7 @@ impl From<&Cell> for TerminalCell {
                 CellWidth::LeadingWideSpacer => TerminalCellWidth::LeadingWideSpacer,
             } as i32,
             style: Some(TerminalStyle::from(cell.style)),
+            hyperlink_uri: cell.hyperlink_uri().unwrap_or_default().to_owned(),
         }
     }
 }
@@ -304,7 +310,17 @@ impl TryFrom<TerminalCell> for Cell {
         let style = cell
             .style
             .map_or_else(|| Ok(Style::default()), Style::try_from)?;
-        Ok(Self::with_zerowidth(character, zerowidth, width, style))
+        if cell.hyperlink_uri.len() > MAX_TERMINAL_HYPERLINK_URI_BYTES {
+            return Err(SnapshotCodecError::HyperlinkUriTooLong {
+                actual: cell.hyperlink_uri.len(),
+                maximum: MAX_TERMINAL_HYPERLINK_URI_BYTES,
+            });
+        }
+        let mut decoded = Self::with_zerowidth(character, zerowidth, width, style);
+        if !cell.hyperlink_uri.is_empty() {
+            decoded = decoded.with_hyperlink_uri(cell.hyperlink_uri);
+        }
+        Ok(decoded)
     }
 }
 
@@ -1371,7 +1387,8 @@ mod tests {
                         underline: true,
                         inverse: true,
                     },
-                ),
+                )
+                .with_hyperlink_uri("https://example.test/docs"),
                 Cell::new(' ', CellWidth::WideSpacer, Style::default()),
                 Cell::new('\u{3bb}', CellWidth::Single, Style::default()),
                 Cell::new('\u{754c}', CellWidth::LeadingWideSpacer, Style::default()),
@@ -1432,6 +1449,7 @@ mod tests {
             style: None,
             zerowidth_scalars: vec![0x301; 65],
             width: TerminalCellWidth::Single as i32,
+            hyperlink_uri: String::new(),
         });
         assert!(matches!(
             excessive.decode_terminal_snapshot(),
@@ -1446,6 +1464,7 @@ mod tests {
             style: None,
             zerowidth_scalars: Vec::new(),
             width: 99,
+            hyperlink_uri: String::new(),
         });
         assert!(matches!(
             unknown_width.decode_terminal_snapshot(),
@@ -1457,11 +1476,27 @@ mod tests {
             style: None,
             zerowidth_scalars: vec![u32::from('X')],
             width: TerminalCellWidth::Single as i32,
+            hyperlink_uri: String::new(),
         });
         assert!(matches!(
             nonzero_combining.decode_terminal_snapshot(),
             Err(SnapshotCodecError::NonZeroWidthCombiningScalar(value))
                 if value == u32::from('X')
+        ));
+
+        let oversized_hyperlink = frame_for(TerminalCell {
+            scalar: u32::from('A'),
+            style: None,
+            zerowidth_scalars: Vec::new(),
+            width: TerminalCellWidth::Single as i32,
+            hyperlink_uri: "x".repeat(super::MAX_TERMINAL_HYPERLINK_URI_BYTES + 1),
+        });
+        assert!(matches!(
+            oversized_hyperlink.decode_terminal_snapshot(),
+            Err(SnapshotCodecError::HyperlinkUriTooLong {
+                actual: 4097,
+                maximum: 4096
+            })
         ));
     }
 
@@ -1484,6 +1519,9 @@ mod tests {
         current.terminal_modes.bracketed_paste = true;
         current.cells[1].character = 'A';
         current.cells[9].character = '界';
+        current.cells[9] = current.cells[9]
+            .clone()
+            .with_hyperlink_uri("https://example.test/delta");
 
         let delta = FrameDelta::between_terminal_snapshots(session_id, &base, &current).unwrap();
         assert_eq!(delta.base_generation, 7);

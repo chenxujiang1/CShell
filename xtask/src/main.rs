@@ -11,6 +11,7 @@ fn main() -> ExitCode {
         "atlas-pressure-bench" => atlas_pressure_bench(),
         "journal-capacity-bench" => journal_capacity_bench(),
         "journal-crash-matrix" => journal_crash_matrix(),
+        "terminal-corpus" => terminal_corpus(),
         "visual-corpus" => visual_corpus(),
         "log-corpus" => log_corpus(),
         "log-window-e2e" => log_window_e2e(),
@@ -161,6 +162,20 @@ fn journal_crash_matrix() -> Result<(), String> {
     )
 }
 
+fn terminal_corpus() -> Result<(), String> {
+    run(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "cshell-terminal",
+            "--test",
+            "xterm_cell_corpus",
+            "--all-features",
+        ],
+    )
+}
+
 fn visual_corpus() -> Result<(), String> {
     run(
         "cargo",
@@ -223,6 +238,7 @@ fn print_help() {
     println!("  cargo xtask atlas-pressure-bench run the full dynamic glyph-atlas gate");
     println!("  cargo xtask journal-capacity-bench run the 100-GiB journal capacity gate");
     println!("  cargo xtask journal-crash-matrix run forced-termination recovery cases");
+    println!("  cargo xtask terminal-corpus run fragmented ANSI/OSC/xterm cell golden cases");
     println!("  cargo xtask visual-corpus launch the terminal Unicode/color visual corpus");
     println!("  cargo xtask log-corpus    launch the GPU LogSurface visual corpus");
     println!("  cargo xtask log-window-e2e run automated scroll/resize/window-present gate");
