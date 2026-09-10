@@ -22,7 +22,9 @@ if (( status != 0 )); then
   node - "$log_file" <<'NODE'
 const fs = require("fs");
 const path = process.argv[2];
-const lines = fs.readFileSync(path, "utf8").split(/\r?\n/).slice(-80);
+const plain = fs.readFileSync(path, "utf8")
+  .replace(/\x1b\[[0-9;]*m/g, "");
+const lines = plain.split(/\r?\n/).slice(-50);
 const message = lines.join("\n")
   .replaceAll("%", "%25")
   .replaceAll("\r", "%0D")

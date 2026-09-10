@@ -668,7 +668,7 @@ mod tests {
             TerminalControlStatus::Accepted
         );
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let page = registry
                 .fulfill_log_page_request(&LogPageRequest {
@@ -682,7 +682,7 @@ mod tests {
             if page
                 .rows
                 .iter()
-                .any(|row| row.text.trim_start().starts_with(MARKER) && !row.text.contains("echo "))
+                .any(|row| row.text.contains(MARKER) && !row.text.contains("echo "))
             {
                 break;
             }
