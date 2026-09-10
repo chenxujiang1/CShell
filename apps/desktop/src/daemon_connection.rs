@@ -1043,6 +1043,9 @@ mod tests {
     #[tokio::test]
     async fn desktop_worker_input_executes_in_a_real_pty_and_updates_its_snapshot() {
         const MARKER: &str = "CSHELL_DESKTOP_EXECUTED";
+        // Native CI runners can spend several seconds starting the shell and
+        // publishing its first PTY frame, especially on Intel macOS hosts.
+        const PTY_E2E_TIMEOUT: Duration = Duration::from_secs(10);
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("temporary runtime must be created: {error}"));
         let registry = Arc::new(
@@ -1096,7 +1099,7 @@ mod tests {
         })
         .unwrap_or_else(|error| panic!("desktop connection worker must start: {error}"));
 
-        let connected_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let connected_deadline = tokio::time::Instant::now() + PTY_E2E_TIMEOUT;
         while !connection.view().connected {
             assert!(
                 tokio::time::Instant::now() < connected_deadline,
@@ -1107,7 +1110,7 @@ mod tests {
         }
         assert!(connection.send_input(InputAction::Text(format!("echo {MARKER}\r"))));
 
-        let output_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let output_deadline = tokio::time::Instant::now() + PTY_E2E_TIMEOUT;
         loop {
             let view = connection.view();
             if view
