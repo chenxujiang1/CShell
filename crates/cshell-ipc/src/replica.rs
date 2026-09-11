@@ -216,6 +216,7 @@ mod tests {
             cols: 3,
             cursor_row: 0,
             cursor_col: 0,
+            cursor_appearance: Default::default(),
             terminal_modes: TerminalModes::default(),
             cells: vec![Cell::default(); 6],
         };

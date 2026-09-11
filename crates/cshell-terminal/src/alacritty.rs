@@ -1,12 +1,15 @@
 use crate::{
-    Cell, CellWidth, Color, FrameDelta, FrameSnapshot, Style, TerminalEngine, TerminalModes,
+    Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameDelta, FrameSnapshot, Style,
+    TerminalEngine, TerminalModes,
 };
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi::{self, Color as AlacrittyColor, NamedColor};
+use alacritty_terminal::vte::ansi::{
+    self, Color as AlacrittyColor, CursorShape as AlacrittyCursorShape, NamedColor,
+};
 use cshell_domain::TerminalSize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -141,6 +144,12 @@ impl TerminalEngine for AlacrittyTerminalEngine {
         let content = self.terminal.renderable_content();
         let cursor_row = content.cursor.point.line.0.clamp(0, i32::from(u16::MAX)) as u16;
         let cursor_col = content.cursor.point.column.0.min(usize::from(u16::MAX)) as u16;
+        let cursor_shape = map_cursor_shape(content.cursor.shape);
+        let cursor_appearance = CursorAppearance {
+            shape: cursor_shape,
+            blinking: cursor_shape != CursorShape::Hidden && self.terminal.cursor_style().blinking,
+            color: content.colors[NamedColor::Cursor].map(|rgb| Color::Rgb(rgb.r, rgb.g, rgb.b)),
+        };
         let rows = self.size.rows.max(1);
         let cols = self.size.cols.max(1);
         let mut cells = vec![Cell::default(); usize::from(rows) * usize::from(cols)];
@@ -203,9 +212,20 @@ impl TerminalEngine for AlacrittyTerminalEngine {
             cols,
             cursor_row: cursor_row.min(rows.saturating_sub(1)),
             cursor_col: cursor_col.min(cols.saturating_sub(1)),
+            cursor_appearance,
             terminal_modes: self.modes(),
             cells,
         }
+    }
+}
+
+fn map_cursor_shape(shape: AlacrittyCursorShape) -> CursorShape {
+    match shape {
+        AlacrittyCursorShape::Block => CursorShape::Block,
+        AlacrittyCursorShape::Underline => CursorShape::Underline,
+        AlacrittyCursorShape::Beam => CursorShape::Beam,
+        AlacrittyCursorShape::HollowBlock => CursorShape::HollowBlock,
+        AlacrittyCursorShape::Hidden => CursorShape::Hidden,
     }
 }
 
@@ -239,7 +259,7 @@ fn map_named_color(color: NamedColor) -> Color {
 #[cfg(test)]
 mod tests {
     use super::AlacrittyTerminalEngine;
-    use crate::{CellWidth, Color, TerminalEngine};
+    use crate::{CellWidth, Color, CursorAppearance, CursorShape, TerminalEngine};
     use cshell_domain::TerminalSize;
 
     #[test]
@@ -341,6 +361,43 @@ mod tests {
         let cell = &snapshot.row(0).unwrap_or_default()[1];
         assert_eq!(cell.style.foreground, Color::Rgb(4, 5, 6));
         assert_eq!(cell.style.background, Color::Rgb(7, 8, 9));
+    }
+
+    #[test]
+    fn preserves_fragmented_cursor_shape_visibility_blinking_and_osc_12_color() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(2, 8));
+        let input = b"\x1b]12;rgb:0a/14/1e\x07\x1b[5 q";
+        for chunk in input.chunks(2) {
+            terminal.feed(chunk);
+        }
+        assert_eq!(
+            terminal.snapshot().cursor_appearance,
+            CursorAppearance {
+                shape: CursorShape::Beam,
+                blinking: true,
+                color: Some(Color::Rgb(10, 20, 30)),
+            }
+        );
+
+        terminal.feed(b"\x1b[?25l");
+        assert_eq!(
+            terminal.snapshot().cursor_appearance,
+            CursorAppearance {
+                shape: CursorShape::Hidden,
+                blinking: false,
+                color: Some(Color::Rgb(10, 20, 30)),
+            }
+        );
+
+        terminal.feed(b"\x1b[?25h\x1b[4 q\x1b]112\x07");
+        assert_eq!(
+            terminal.snapshot().cursor_appearance,
+            CursorAppearance {
+                shape: CursorShape::Underline,
+                blinking: false,
+                color: None,
+            }
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use cshell_domain::TerminalSize;
 use cshell_terminal::{
-    AlacrittyTerminalEngine, Cell, CellWidth, Color, FrameSnapshot, Style, TerminalEngine,
+    AlacrittyTerminalEngine, Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameSnapshot,
+    Style, TerminalEngine,
 };
 
 #[derive(Clone, Debug)]
@@ -282,4 +283,36 @@ fn xterm_cell_golden_corpus_survives_fragmented_input() {
         }
         assert_case(&case, &terminal.snapshot());
     }
+}
+
+#[test]
+fn xterm_cursor_appearance_survives_fragmented_input() {
+    let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(2, 8));
+    let input = b"\x1b]12;rgb:0a/14/1e\x07\x1b[5 q";
+    for chunk in input.chunks(2) {
+        terminal.feed(chunk);
+    }
+    assert_eq!(
+        terminal.snapshot().cursor_appearance,
+        CursorAppearance {
+            shape: CursorShape::Beam,
+            blinking: true,
+            color: Some(Color::Rgb(10, 20, 30)),
+        }
+    );
+
+    terminal.feed(b"\x1b[?25l");
+    assert_eq!(
+        terminal.snapshot().cursor_appearance.shape,
+        CursorShape::Hidden
+    );
+    terminal.feed(b"\x1b[?25h\x1b[4 q\x1b]112\x07");
+    assert_eq!(
+        terminal.snapshot().cursor_appearance,
+        CursorAppearance {
+            shape: CursorShape::Underline,
+            blinking: false,
+            color: None,
+        }
+    );
 }

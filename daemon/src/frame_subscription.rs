@@ -135,6 +135,7 @@ mod tests {
             cols: 4,
             cursor_row: 1,
             cursor_col: 2,
+            cursor_appearance: Default::default(),
             terminal_modes: TerminalModes::default(),
             cells,
         }

@@ -250,6 +250,7 @@ mod tests {
             cols: 80,
             cursor_row: 0,
             cursor_col: 0,
+            cursor_appearance: Default::default(),
             terminal_modes: TerminalModes::default(),
             cells: vec![Cell::default(); 8_000],
         };
@@ -267,6 +268,7 @@ mod tests {
                 cols: 80,
                 cursor_row: 0,
                 cursor_col: 0,
+                cursor_appearance: Default::default(),
                 terminal_modes: TerminalModes::default(),
                 cells: vec![Cell::default(); 1_920],
             })

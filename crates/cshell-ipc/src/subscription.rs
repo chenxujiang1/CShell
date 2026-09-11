@@ -88,6 +88,7 @@ mod tests {
             cols: 2,
             cursor_row: 0,
             cursor_col: 1,
+            cursor_appearance: Default::default(),
             terminal_modes: TerminalModes::default(),
             cells,
         }

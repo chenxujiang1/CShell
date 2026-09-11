@@ -4,7 +4,7 @@ use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as FontStyle, SwashCache,
     SwashContent, Weight, Wrap, fontdb,
 };
-use cshell_terminal::{CellWidth, Color, FrameSnapshot, Style};
+use cshell_terminal::{CellWidth, Color, CursorShape, FrameSnapshot, Style};
 use guillotiere::{AllocId, AtlasAllocator, size2};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1340,14 +1340,28 @@ fn build_vertices(
             if x >= viewport.x.saturating_add(viewport.width) as f32 {
                 break;
             }
-            let is_cursor =
+            let is_cursor_cell =
                 row == snapshot.cursor_row && column == usize::from(snapshot.cursor_col);
+            let cursor_shape = is_cursor_cell.then_some(snapshot.cursor_appearance.shape);
             let (mut foreground, mut background) = (
                 resolve_color(cell.style.foreground, true),
                 resolve_color(cell.style.background, false),
             );
-            if cell.style.inverse || is_cursor {
+            if cell.style.inverse {
                 std::mem::swap(&mut foreground, &mut background);
+            }
+            if cursor_shape == Some(CursorShape::Block) {
+                if let Some(color) = snapshot.cursor_appearance.color {
+                    let cursor_color = resolve_color(color, true);
+                    foreground = if background[3] > 0.0 {
+                        background
+                    } else {
+                        [0.0, 0.0, 0.0, 1.0]
+                    };
+                    background = cursor_color;
+                } else {
+                    std::mem::swap(&mut foreground, &mut background);
+                }
             }
             if background[3] > 0.0 {
                 push_quad(
@@ -1399,9 +1413,97 @@ fn build_vertices(
                     [width, height],
                 );
             }
+            if let Some(
+                shape @ (CursorShape::Underline | CursorShape::Beam | CursorShape::HollowBlock),
+            ) = cursor_shape
+            {
+                let color = snapshot
+                    .cursor_appearance
+                    .color
+                    .map_or(foreground, |color| resolve_color(color, true));
+                push_cursor_decoration(
+                    &mut vertices,
+                    shape,
+                    [x, y],
+                    [atlas.cell_width, atlas.cell_height],
+                    color,
+                    [width, height],
+                );
+            }
         }
     }
     vertices
+}
+
+fn push_cursor_decoration(
+    vertices: &mut Vec<Vertex>,
+    shape: CursorShape,
+    origin: [f32; 2],
+    cell_size: [f32; 2],
+    color: [f32; 4],
+    surface_size: [u32; 2],
+) {
+    let [x, y] = origin;
+    let [cell_width, cell_height] = cell_size;
+    match shape {
+        CursorShape::Underline => push_quad(
+            vertices,
+            [x, y + cell_height - 2.0],
+            [cell_width, 2.0],
+            white_uv(),
+            color,
+            false,
+            surface_size,
+        ),
+        CursorShape::Beam => push_quad(
+            vertices,
+            [x, y],
+            [2.0, cell_height],
+            white_uv(),
+            color,
+            false,
+            surface_size,
+        ),
+        CursorShape::HollowBlock => {
+            push_quad(
+                vertices,
+                [x, y],
+                [cell_width, 1.0],
+                white_uv(),
+                color,
+                false,
+                surface_size,
+            );
+            push_quad(
+                vertices,
+                [x, y + cell_height - 1.0],
+                [cell_width, 1.0],
+                white_uv(),
+                color,
+                false,
+                surface_size,
+            );
+            push_quad(
+                vertices,
+                [x, y],
+                [1.0, cell_height],
+                white_uv(),
+                color,
+                false,
+                surface_size,
+            );
+            push_quad(
+                vertices,
+                [x + cell_width - 1.0, y],
+                [1.0, cell_height],
+                white_uv(),
+                color,
+                false,
+                surface_size,
+            );
+        }
+        CursorShape::Block | CursorShape::Hidden => {}
+    }
 }
 
 fn build_log_vertices(
@@ -1664,7 +1766,9 @@ mod tests {
         LogPage, LogRow, LogSourceId, LogStyleSpan, LogSurfaceFrame, LogSurfaceModel, LogVisualRow,
     };
     use cosmic_text::{CacheKey, CacheKeyFlags, SwashContent, Weight, fontdb};
-    use cshell_terminal::{Cell, CellWidth, Color, FrameSnapshot, Style, TerminalModes};
+    use cshell_terminal::{
+        Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameSnapshot, Style, TerminalModes,
+    };
     use guillotiere::{AtlasAllocator, size2};
     use std::sync::Arc;
 
@@ -1698,6 +1802,7 @@ mod tests {
             cols: 2,
             cursor_row: 0,
             cursor_col: 1,
+            cursor_appearance: Default::default(),
             terminal_modes: TerminalModes::default(),
             cells: vec![
                 Cell::new(
@@ -1733,6 +1838,67 @@ mod tests {
                 && vertex.position[1] >= -1.0
                 && vertex.position[1] <= 1.0
         }));
+    }
+
+    #[test]
+    fn cursor_shapes_generate_bounded_geometry_and_apply_explicit_color() {
+        let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
+        let mut snapshot = FrameSnapshot {
+            generation: 1,
+            rows: 1,
+            cols: 1,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_appearance: CursorAppearance::default(),
+            terminal_modes: TerminalModes::default(),
+            cells: vec![Cell::default()],
+        };
+        let viewport = TerminalViewport {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let mut render = |appearance| {
+            snapshot.cursor_appearance = appearance;
+            build_vertices(&snapshot, &mut atlas, 100, 100, viewport, 0..1)
+        };
+
+        assert_eq!(render(CursorAppearance::default()).len(), 6);
+        assert_eq!(
+            render(CursorAppearance {
+                shape: CursorShape::Hidden,
+                ..CursorAppearance::default()
+            })
+            .len(),
+            0
+        );
+        assert_eq!(
+            render(CursorAppearance {
+                shape: CursorShape::Underline,
+                ..CursorAppearance::default()
+            })
+            .len(),
+            6
+        );
+        assert_eq!(
+            render(CursorAppearance {
+                shape: CursorShape::HollowBlock,
+                ..CursorAppearance::default()
+            })
+            .len(),
+            24
+        );
+        let beam = render(CursorAppearance {
+            shape: CursorShape::Beam,
+            blinking: true,
+            color: Some(Color::Rgb(255, 0, 0)),
+        });
+        assert_eq!(beam.len(), 6);
+        assert!(
+            beam.iter()
+                .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0])
+        );
     }
 
     #[test]

@@ -27,9 +27,9 @@ pub use message::{
     SessionCreateResponse, SessionListRequest, SessionListResponse, SessionSummary,
     SnapshotCodecError, SnapshotRequest, TerminalCell, TerminalCellWidth, TerminalColor,
     TerminalControlAction, TerminalControlCodecError, TerminalControlResponse,
-    TerminalControlStatus, TerminalDeltaPayload, TerminalFramePayload, TerminalInputRequest,
-    TerminalKeyEvent, TerminalKeyKind, TerminalPaste, TerminalResizeRequest, TerminalRowPatch,
-    TerminalStyle, envelope, features,
+    TerminalControlStatus, TerminalCursorAppearance, TerminalCursorShape, TerminalDeltaPayload,
+    TerminalFramePayload, TerminalInputRequest, TerminalKeyEvent, TerminalKeyKind, TerminalPaste,
+    TerminalResizeRequest, TerminalRowPatch, TerminalStyle, envelope, features,
 };
 pub use replica::{
     ApplyResult, ReplicaError, ReplicaState, TerminalReplicaError, TerminalReplicaState,

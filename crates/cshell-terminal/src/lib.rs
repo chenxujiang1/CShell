@@ -41,6 +41,23 @@ pub enum CellWidth {
     LeadingWideSpacer,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Underline,
+    Beam,
+    HollowBlock,
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CursorAppearance {
+    pub shape: CursorShape,
+    pub blinking: bool,
+    pub color: Option<Color>,
+}
+
 pub const MAX_ZERO_WIDTH_CHARS_PER_CELL: usize = 64;
 pub const MAX_HYPERLINK_URI_BYTES: usize = 4 * 1024;
 
@@ -142,6 +159,7 @@ pub struct FrameSnapshot {
     pub cols: u16,
     pub cursor_row: u16,
     pub cursor_col: u16,
+    pub cursor_appearance: CursorAppearance,
     pub terminal_modes: TerminalModes,
     pub cells: Vec<Cell>,
 }
@@ -465,6 +483,7 @@ impl TerminalEngine for ProbeTerminalEngine {
             cols: self.size.cols,
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
+            cursor_appearance: CursorAppearance::default(),
             terminal_modes: self.modes,
             cells: self.cells.clone(),
         }

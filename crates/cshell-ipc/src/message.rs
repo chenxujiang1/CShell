@@ -2,8 +2,8 @@ use cshell_domain::{
     ControlAction, InputAction, KeyCode, KeyEvent, Modifiers, SessionId, TerminalSize,
 };
 use cshell_terminal::{
-    Cell, CellWidth, Color, FrameSnapshot, MAX_HYPERLINK_URI_BYTES, MAX_ZERO_WIDTH_CHARS_PER_CELL,
-    Style, TerminalModes, is_zero_width_character,
+    Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameSnapshot, MAX_HYPERLINK_URI_BYTES,
+    MAX_ZERO_WIDTH_CHARS_PER_CELL, Style, TerminalModes, is_zero_width_character,
 };
 use prost::{Enumeration, Message};
 use std::collections::HashSet;
@@ -11,7 +11,7 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 5;
+pub const PROTOCOL_MINOR: u32 = 6;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -83,6 +83,8 @@ pub struct TerminalFramePayload {
     pub bracketed_paste: bool,
     #[prost(message, repeated, tag = "8")]
     pub cells: Vec<TerminalCell>,
+    #[prost(message, optional, tag = "9")]
+    pub cursor_appearance: Option<TerminalCursorAppearance>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -106,6 +108,26 @@ pub enum TerminalCellWidth {
     Wide = 1,
     WideSpacer = 2,
     LeadingWideSpacer = 3,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct TerminalCursorAppearance {
+    #[prost(enumeration = "TerminalCursorShape", tag = "1")]
+    pub shape: i32,
+    #[prost(bool, tag = "2")]
+    pub blinking: bool,
+    #[prost(message, optional, tag = "3")]
+    pub color: Option<TerminalColor>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
+#[repr(i32)]
+pub enum TerminalCursorShape {
+    Block = 0,
+    Underline = 1,
+    Beam = 2,
+    HollowBlock = 3,
+    Hidden = 4,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -168,6 +190,8 @@ pub enum SnapshotCodecError {
     NonZeroWidthCombiningScalar(u32),
     #[error("terminal cell hyperlink URI contains {actual} bytes; maximum is {maximum}")]
     HyperlinkUriTooLong { actual: usize, maximum: usize },
+    #[error("terminal cursor shape {0} is unknown")]
+    UnknownCursorShape(i32),
     #[error("terminal color kind {0} is unknown")]
     UnknownColorKind(i32),
     #[error("indexed terminal color {0} exceeds 255")]
@@ -188,6 +212,7 @@ impl FullFrame {
             application_cursor: snapshot.terminal_modes.application_cursor,
             bracketed_paste: snapshot.terminal_modes.bracketed_paste,
             cells: snapshot.cells.iter().map(TerminalCell::from).collect(),
+            cursor_appearance: Some(TerminalCursorAppearance::from(snapshot.cursor_appearance)),
         };
         Self {
             session_id: session_id.as_uuid().as_bytes().to_vec(),
@@ -245,6 +270,10 @@ impl FullFrame {
             cols: payload.cols as u16,
             cursor_row: payload.cursor_row as u16,
             cursor_col: payload.cursor_col as u16,
+            cursor_appearance: payload.cursor_appearance.map_or_else(
+                || Ok(CursorAppearance::default()),
+                CursorAppearance::try_from,
+            )?,
             terminal_modes: TerminalModes {
                 application_cursor: payload.application_cursor,
                 bracketed_paste: payload.bracketed_paste,
@@ -254,6 +283,43 @@ impl FullFrame {
                 .into_iter()
                 .map(Cell::try_from)
                 .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl From<CursorAppearance> for TerminalCursorAppearance {
+    fn from(appearance: CursorAppearance) -> Self {
+        Self {
+            shape: match appearance.shape {
+                CursorShape::Block => TerminalCursorShape::Block,
+                CursorShape::Underline => TerminalCursorShape::Underline,
+                CursorShape::Beam => TerminalCursorShape::Beam,
+                CursorShape::HollowBlock => TerminalCursorShape::HollowBlock,
+                CursorShape::Hidden => TerminalCursorShape::Hidden,
+            } as i32,
+            blinking: appearance.blinking,
+            color: appearance.color.map(TerminalColor::from),
+        }
+    }
+}
+
+impl TryFrom<TerminalCursorAppearance> for CursorAppearance {
+    type Error = SnapshotCodecError;
+
+    fn try_from(appearance: TerminalCursorAppearance) -> Result<Self, Self::Error> {
+        let shape = match TerminalCursorShape::try_from(appearance.shape)
+            .map_err(|_| SnapshotCodecError::UnknownCursorShape(appearance.shape))?
+        {
+            TerminalCursorShape::Block => CursorShape::Block,
+            TerminalCursorShape::Underline => CursorShape::Underline,
+            TerminalCursorShape::Beam => CursorShape::Beam,
+            TerminalCursorShape::HollowBlock => CursorShape::HollowBlock,
+            TerminalCursorShape::Hidden => CursorShape::Hidden,
+        };
+        Ok(Self {
+            shape,
+            blinking: appearance.blinking,
+            color: appearance.color.map(Color::try_from).transpose()?,
         })
     }
 }
@@ -426,6 +492,8 @@ pub struct TerminalDeltaPayload {
     pub bracketed_paste: bool,
     #[prost(message, repeated, tag = "8")]
     pub rows_changed: Vec<TerminalRowPatch>,
+    #[prost(message, optional, tag = "9")]
+    pub cursor_appearance: Option<TerminalCursorAppearance>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -514,6 +582,7 @@ impl FrameDelta {
             application_cursor: current.terminal_modes.application_cursor,
             bracketed_paste: current.terminal_modes.bracketed_paste,
             rows_changed,
+            cursor_appearance: Some(TerminalCursorAppearance::from(current.cursor_appearance)),
         };
         Ok(Self {
             session_id: session_id.as_uuid().as_bytes().to_vec(),
@@ -581,6 +650,10 @@ impl FrameDelta {
         snapshot.generation = self.generation;
         snapshot.cursor_row = payload.cursor_row as u16;
         snapshot.cursor_col = payload.cursor_col as u16;
+        snapshot.cursor_appearance = payload.cursor_appearance.map_or_else(
+            || Ok(CursorAppearance::default()),
+            CursorAppearance::try_from,
+        )?;
         snapshot.terminal_modes = TerminalModes {
             application_cursor: payload.application_cursor,
             bracketed_paste: payload.bracketed_paste,
@@ -1321,10 +1394,13 @@ mod tests {
         DeltaCodecError, Envelope, FrameDelta, FullFrame, LogPage, LogPageCodecError,
         LogPageRequest, LogRow, LogStyleSpan, MAX_LOG_PAGE_ROWS, MAX_TERMINAL_INPUT_BYTES,
         SnapshotCodecError, TERMINAL_FRAME_SCHEMA_VERSION, TerminalCell, TerminalCellWidth,
-        TerminalFramePayload, TerminalInputRequest, TerminalResizeRequest, TerminalStyle, envelope,
+        TerminalCursorAppearance, TerminalFramePayload, TerminalInputRequest,
+        TerminalResizeRequest, TerminalStyle, envelope,
     };
     use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers, SessionId, TerminalSize};
-    use cshell_terminal::{Cell, CellWidth, Color, FrameSnapshot, Style, TerminalModes};
+    use cshell_terminal::{
+        Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameSnapshot, Style, TerminalModes,
+    };
     use prost::Message;
 
     #[test]
@@ -1370,6 +1446,11 @@ mod tests {
             cols: 2,
             cursor_row: 1,
             cursor_col: 1,
+            cursor_appearance: CursorAppearance {
+                shape: CursorShape::Beam,
+                blinking: true,
+                color: Some(Color::Rgb(10, 20, 30)),
+            },
             terminal_modes: TerminalModes {
                 application_cursor: true,
                 bracketed_paste: true,
@@ -1401,6 +1482,37 @@ mod tests {
     }
 
     #[test]
+    fn terminal_full_frame_defaults_cursor_appearance_when_the_field_is_absent() {
+        let payload = TerminalFramePayload {
+            schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
+            rows: 1,
+            cols: 1,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_appearance: None,
+            application_cursor: false,
+            bracketed_paste: false,
+            cells: vec![TerminalCell {
+                scalar: u32::from('A'),
+                style: None,
+                zerowidth_scalars: Vec::new(),
+                width: TerminalCellWidth::Single as i32,
+                hyperlink_uri: String::new(),
+            }],
+        };
+        let frame = FullFrame {
+            session_id: vec![0; 16],
+            generation: 1,
+            payload: payload.encode_to_vec(),
+        };
+
+        assert_eq!(
+            frame.decode_terminal_snapshot().unwrap().cursor_appearance,
+            CursorAppearance::default()
+        );
+    }
+
+    #[test]
     fn malformed_terminal_full_frame_is_rejected_before_use() {
         let payload = TerminalFramePayload {
             schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
@@ -1408,6 +1520,7 @@ mod tests {
             cols: 80,
             cursor_row: 0,
             cursor_col: 0,
+            cursor_appearance: None,
             application_cursor: false,
             bracketed_paste: false,
             cells: Vec::new(),
@@ -1438,6 +1551,7 @@ mod tests {
                 cols: 1,
                 cursor_row: 0,
                 cursor_col: 0,
+                cursor_appearance: None,
                 application_cursor: false,
                 bracketed_paste: false,
                 cells: vec![cell],
@@ -1498,6 +1612,37 @@ mod tests {
                 maximum: 4096
             })
         ));
+
+        let unknown_cursor_shape = FullFrame {
+            session_id: vec![0; 16],
+            generation: 1,
+            payload: TerminalFramePayload {
+                schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
+                rows: 1,
+                cols: 1,
+                cursor_row: 0,
+                cursor_col: 0,
+                cursor_appearance: Some(TerminalCursorAppearance {
+                    shape: 99,
+                    blinking: false,
+                    color: None,
+                }),
+                application_cursor: false,
+                bracketed_paste: false,
+                cells: vec![TerminalCell {
+                    scalar: u32::from('A'),
+                    style: None,
+                    zerowidth_scalars: Vec::new(),
+                    width: TerminalCellWidth::Single as i32,
+                    hyperlink_uri: String::new(),
+                }],
+            }
+            .encode_to_vec(),
+        };
+        assert!(matches!(
+            unknown_cursor_shape.decode_terminal_snapshot(),
+            Err(SnapshotCodecError::UnknownCursorShape(99))
+        ));
     }
 
     #[test]
@@ -1509,6 +1654,7 @@ mod tests {
             cols: 4,
             cursor_row: 0,
             cursor_col: 0,
+            cursor_appearance: CursorAppearance::default(),
             terminal_modes: TerminalModes::default(),
             cells: vec![Cell::default(); 12],
         };
@@ -1516,6 +1662,11 @@ mod tests {
         current.generation = 12;
         current.cursor_row = 2;
         current.cursor_col = 3;
+        current.cursor_appearance = CursorAppearance {
+            shape: CursorShape::HollowBlock,
+            blinking: false,
+            color: Some(Color::Indexed(14)),
+        };
         current.terminal_modes.bracketed_paste = true;
         current.cells[1].character = 'A';
         current.cells[9].character = '界';
