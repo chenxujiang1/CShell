@@ -25,6 +25,13 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 const SESSION_LOG_ARGUMENT: &str = "--session-log";
+const TERMINAL_MULTI_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[derive(Default)]
+struct TerminalClickState {
+    last: Option<(std::time::Instant, TerminalCellPoint)>,
+    count: u8,
+}
 
 #[derive(Default)]
 struct DesktopApp {
@@ -51,6 +58,7 @@ struct DesktopApp {
     viewport_rows: u16,
     cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
     terminal_selecting: bool,
+    terminal_click: TerminalClickState,
     wheel_row_accumulator: f64,
     modifiers: ModifiersState,
     cursor_blink: CursorBlinkState,
@@ -360,11 +368,18 @@ impl ApplicationHandler for DesktopApp {
                     if let Some(position) = self.cursor_position
                         && let Some(point) = self.terminal_point_at(position)
                     {
+                        let click_count = register_terminal_click(
+                            &mut self.terminal_click,
+                            point,
+                            std::time::Instant::now(),
+                        );
                         self.terminal_decorations.selection = Some(TerminalSelection {
                             anchor: point,
                             focus: point,
                             mode: if self.modifiers.alt_key() {
                                 TerminalSelectionMode::Block
+                            } else if click_count == 3 {
+                                TerminalSelectionMode::Line
                             } else {
                                 TerminalSelectionMode::Character
                             },
@@ -795,6 +810,23 @@ fn truncate_utf8_bytes(text: &mut String, maximum: usize) {
     text.truncate(boundary);
 }
 
+fn register_terminal_click(
+    state: &mut TerminalClickState,
+    point: TerminalCellPoint,
+    now: std::time::Instant,
+) -> u8 {
+    let continues = state.last.is_some_and(|(last_at, last_point)| {
+        last_point == point && now.duration_since(last_at) <= TERMINAL_MULTI_CLICK_INTERVAL
+    });
+    state.count = if continues && state.count < 3 {
+        state.count + 1
+    } else {
+        1
+    };
+    state.last = Some((now, point));
+    state.count
+}
+
 fn position_terminal_ime(
     window: &Window,
     viewport: TerminalViewport,
@@ -1020,9 +1052,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LogScrollbarAction, TerminalCellPoint, TerminalViewport, log_scrollbar_action,
-        terminal_point_at, truncate_utf8_bytes,
+        LogScrollbarAction, TERMINAL_MULTI_CLICK_INTERVAL, TerminalCellPoint, TerminalClickState,
+        TerminalViewport, log_scrollbar_action, register_terminal_click, terminal_point_at,
+        truncate_utf8_bytes,
     };
+    use std::time::{Duration, Instant};
     use winit::dpi::PhysicalPosition;
 
     #[test]
@@ -1081,5 +1115,41 @@ mod tests {
         assert_eq!(query, "ab");
         truncate_utf8_bytes(&mut query, 1);
         assert_eq!(query, "a");
+    }
+
+    #[test]
+    fn triple_click_requires_the_same_cell_and_a_bounded_interval() {
+        let mut state = TerminalClickState::default();
+        let started = Instant::now();
+        let point = TerminalCellPoint { row: 2, column: 3 };
+        assert_eq!(register_terminal_click(&mut state, point, started), 1);
+        assert_eq!(
+            register_terminal_click(&mut state, point, started + Duration::from_millis(100)),
+            2
+        );
+        assert_eq!(
+            register_terminal_click(&mut state, point, started + Duration::from_millis(200)),
+            3
+        );
+        assert_eq!(
+            register_terminal_click(&mut state, point, started + Duration::from_millis(300)),
+            1
+        );
+        assert_eq!(
+            register_terminal_click(
+                &mut state,
+                TerminalCellPoint { row: 2, column: 4 },
+                started + Duration::from_millis(350),
+            ),
+            1
+        );
+        assert_eq!(
+            register_terminal_click(
+                &mut state,
+                TerminalCellPoint { row: 2, column: 4 },
+                started + TERMINAL_MULTI_CLICK_INTERVAL + Duration::from_millis(400),
+            ),
+            1
+        );
     }
 }
