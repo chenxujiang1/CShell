@@ -6,7 +6,8 @@ mod window_e2e;
 use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};
 use cshell_render::{
     EguiFrame, LogReflowLayout, LogReflowRequest, LogScrollbarState, LogSourceId, LogSurfaceError,
-    LogSurfaceModel, TerminalDecorations, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
+    LogSurfaceModel, TerminalCellPoint, TerminalDecorations, TerminalSelection,
+    TerminalSelectionMode, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
 };
 use cshell_ui::WorkbenchViewModel;
 use cursor_blink::CursorBlinkState;
@@ -15,7 +16,7 @@ use std::error::Error;
 use std::sync::Arc;
 use tracing::info;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -39,6 +40,7 @@ struct DesktopApp {
     terminal_viewport: Option<TerminalViewport>,
     viewport_rows: u16,
     cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
+    terminal_selecting: bool,
     wheel_row_accumulator: f64,
     modifiers: ModifiersState,
     cursor_blink: CursorBlinkState,
@@ -289,7 +291,44 @@ impl ApplicationHandler for DesktopApp {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
+                if self.terminal_selecting
+                    && let Some(point) = self.terminal_point_at(position)
+                    && let Some(selection) = &mut self.terminal_decorations.selection
+                    && selection.focus != point
+                {
+                    selection.focus = point;
+                    self.terminal_decorations.revision =
+                        self.terminal_decorations.revision.wrapping_add(1);
+                    window.request_redraw();
+                }
             }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } if self.log_surface.is_none() => match state {
+                ElementState::Pressed if !egui_consumed => {
+                    if let Some(position) = self.cursor_position
+                        && let Some(point) = self.terminal_point_at(position)
+                    {
+                        self.terminal_decorations.selection = Some(TerminalSelection {
+                            anchor: point,
+                            focus: point,
+                            mode: if self.modifiers.alt_key() {
+                                TerminalSelectionMode::Block
+                            } else {
+                                TerminalSelectionMode::Character
+                            },
+                        });
+                        self.terminal_decorations.revision =
+                            self.terminal_decorations.revision.wrapping_add(1);
+                        self.terminal_selecting = true;
+                        window.request_redraw();
+                    }
+                }
+                ElementState::Released => self.terminal_selecting = false,
+                ElementState::Pressed => {}
+            },
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
@@ -305,6 +344,21 @@ impl ApplicationHandler for DesktopApp {
             WindowEvent::KeyboardInput { event, .. }
                 if !egui_consumed && self.log_surface.is_none() =>
             {
+                if is_terminal_copy_shortcut(&event, self.modifiers) {
+                    if let (Some(selection), Some(snapshot)) = (
+                        self.terminal_decorations.selection,
+                        self.terminal_surface.latest_snapshot(),
+                    ) {
+                        match selection.text(snapshot) {
+                            Ok(text) => self.egui_context.copy_text(text),
+                            Err(error) => {
+                                tracing::warn!(%error, "terminal selection copy rejected")
+                            }
+                        }
+                    }
+                    window.request_redraw();
+                    return;
+                }
                 if let Some(action) = terminal_key_action(&event, self.modifiers)
                     && let Some(daemon) = &self.daemon
                 {
@@ -483,6 +537,46 @@ impl ApplicationHandler for DesktopApp {
             _ => {}
         }
     }
+}
+
+impl DesktopApp {
+    fn terminal_point_at(
+        &self,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) -> Option<TerminalCellPoint> {
+        let viewport = self.terminal_viewport?;
+        let snapshot = self.terminal_surface.latest_snapshot()?;
+        terminal_point_at(position, viewport, snapshot.rows, snapshot.cols)
+    }
+}
+
+fn terminal_point_at(
+    position: winit::dpi::PhysicalPosition<f64>,
+    viewport: TerminalViewport,
+    rows: u16,
+    cols: u16,
+) -> Option<TerminalCellPoint> {
+    if rows == 0
+        || cols == 0
+        || position.x < f64::from(viewport.x)
+        || position.y < f64::from(viewport.y)
+        || position.x >= f64::from(viewport.x.saturating_add(viewport.width))
+        || position.y >= f64::from(viewport.y.saturating_add(viewport.height))
+    {
+        return None;
+    }
+    let x = position.x - f64::from(viewport.x);
+    let y = position.y - f64::from(viewport.y);
+    Some(TerminalCellPoint {
+        row: ((y * f64::from(rows) / f64::from(viewport.height.max(1))) as u16).min(rows - 1),
+        column: ((x * f64::from(cols) / f64::from(viewport.width.max(1))) as u16).min(cols - 1),
+    })
+}
+
+fn is_terminal_copy_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
+    event.state == ElementState::Pressed
+        && (modifiers.super_key() || (modifiers.control_key() && modifiers.shift_key()))
+        && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
 }
 
 fn position_terminal_ime(
@@ -708,7 +802,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogScrollbarAction, log_scrollbar_action};
+    use super::{
+        LogScrollbarAction, TerminalCellPoint, TerminalViewport, log_scrollbar_action,
+        terminal_point_at,
+    };
+    use winit::dpi::PhysicalPosition;
 
     #[test]
     fn scrollbar_maps_track_positions_to_stable_line_ids_and_tail_mode() {
@@ -723,6 +821,39 @@ mod tests {
         assert_eq!(
             log_scrollbar_action(1.0, 1_000),
             LogScrollbarAction::FollowTail
+        );
+    }
+
+    #[test]
+    fn terminal_pointer_mapping_is_bounded_and_rejects_viewport_edges() {
+        let viewport = TerminalViewport {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 400,
+        };
+        assert_eq!(
+            terminal_point_at(PhysicalPosition::new(10.0, 20.0), viewport, 20, 80),
+            Some(TerminalCellPoint { row: 0, column: 0 })
+        );
+        assert_eq!(
+            terminal_point_at(PhysicalPosition::new(809.9, 419.9), viewport, 20, 80),
+            Some(TerminalCellPoint {
+                row: 19,
+                column: 79,
+            })
+        );
+        assert_eq!(
+            terminal_point_at(PhysicalPosition::new(810.0, 100.0), viewport, 20, 80),
+            None
+        );
+        assert_eq!(
+            terminal_point_at(PhysicalPosition::new(100.0, 420.0), viewport, 20, 80),
+            None
+        );
+        assert_eq!(
+            terminal_point_at(PhysicalPosition::new(100.0, 100.0), viewport, 0, 80),
+            None
         );
     }
 }

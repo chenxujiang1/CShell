@@ -76,6 +76,11 @@ impl TerminalSurfaceModel {
     }
 
     #[must_use]
+    pub fn latest_snapshot(&self) -> Option<&Arc<FrameSnapshot>> {
+        self.latest.as_ref()
+    }
+
+    #[must_use]
     pub fn prepare_frame(
         &mut self,
         first_visible_row: u16,
