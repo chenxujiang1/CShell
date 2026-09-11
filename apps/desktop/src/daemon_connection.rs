@@ -979,7 +979,12 @@ mod tests {
         return LocalProfile {
             name: "Desktop connection input probe".to_owned(),
             program: PathBuf::from("cmd.exe"),
-            args: vec!["/D".to_owned(), "/Q".to_owned()],
+            args: vec![
+                "/D".to_owned(),
+                "/Q".to_owned(),
+                "/K".to_owned(),
+                "echo CSHELL_DESKTOP_READY".to_owned(),
+            ],
             cwd_policy: WorkingDirectoryPolicy::Inherit,
             env_overrides: BTreeMap::new(),
         };
@@ -988,7 +993,11 @@ mod tests {
         LocalProfile {
             name: "Desktop connection input probe".to_owned(),
             program: PathBuf::from("/bin/sh"),
-            args: vec![],
+            args: vec![
+                "-lc".to_owned(),
+                "printf 'CSHELL_DESKTOP_READY\\n'; IFS= read -r command; eval $command; sleep 2"
+                    .to_owned(),
+            ],
             cwd_policy: WorkingDirectoryPolicy::Inherit,
             env_overrides: BTreeMap::new(),
         }
@@ -1042,6 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn desktop_worker_input_executes_in_a_real_pty_and_updates_its_snapshot() {
+        const READY_MARKER: &str = "CSHELL_DESKTOP_READY";
         const MARKER: &str = "CSHELL_DESKTOP_EXECUTED";
         // Native CI runners can spend several seconds starting the shell and
         // publishing its first PTY frame, especially on Intel macOS hosts.
@@ -1105,6 +1115,23 @@ mod tests {
                 tokio::time::Instant::now() < connected_deadline,
                 "desktop worker did not connect: {}",
                 connection.view().detail
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let ready_deadline = tokio::time::Instant::now() + PTY_E2E_TIMEOUT;
+        loop {
+            let view = connection.view();
+            if view
+                .snapshot
+                .as_deref()
+                .is_some_and(|snapshot| snapshot_has_executed_line(snapshot, READY_MARKER))
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < ready_deadline,
+                "desktop worker shell did not publish its readiness marker: {}",
+                view.detail
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
