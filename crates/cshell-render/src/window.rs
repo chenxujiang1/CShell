@@ -1,4 +1,4 @@
-use crate::{LogSurfaceFrame, TerminalSurfaceFrame};
+use crate::{LogSurfaceFrame, TerminalDecorations, TerminalSurfaceFrame};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as FontStyle, SwashCache,
@@ -480,6 +480,7 @@ pub fn benchmark_terminal_geometry(
         viewport.height,
         viewport,
         0..snapshot.rows,
+        &TerminalDecorations::default(),
         true,
     );
     std::hint::black_box(&vertices);
@@ -498,6 +499,7 @@ pub fn benchmark_terminal_geometry(
             viewport.height,
             viewport,
             0..snapshot.rows,
+            &TerminalDecorations::default(),
             true,
         ));
     }
@@ -776,6 +778,7 @@ pub struct EguiFrame<'a> {
 enum GeometryKey {
     Terminal {
         generation: u64,
+        decorations_revision: u64,
         cursor_visible: bool,
         surface_width: u32,
         surface_height: u32,
@@ -800,6 +803,7 @@ enum GeometryKey {
 enum GeometryFrame<'a> {
     Terminal {
         frame: Option<&'a TerminalSurfaceFrame>,
+        decorations: &'a TerminalDecorations,
         cursor_visible: bool,
     },
     Log(Option<&'a LogSurfaceFrame>),
@@ -1071,12 +1075,14 @@ impl WindowRenderer {
         &mut self,
         frame: Option<&TerminalSurfaceFrame>,
         viewport: TerminalViewport,
+        decorations: &TerminalDecorations,
         cursor_visible: bool,
         egui_frame: Option<EguiFrame<'_>>,
     ) -> Result<RenderOutcome, WindowRendererError> {
         self.render_inner(
             GeometryFrame::Terminal {
                 frame,
+                decorations,
                 cursor_visible,
             },
             viewport,
@@ -1123,8 +1129,9 @@ impl WindowRenderer {
         match frame {
             GeometryFrame::Terminal {
                 frame: Some(frame),
+                decorations,
                 cursor_visible,
-            } => self.update_geometry(frame, viewport, cursor_visible),
+            } => self.update_geometry(frame, viewport, decorations, cursor_visible),
             GeometryFrame::Log(Some(frame)) => self.update_log_geometry(frame, viewport),
             GeometryFrame::Terminal { frame: None, .. } | GeometryFrame::Log(None) => {
                 self.vertex_count = 0;
@@ -1237,10 +1244,12 @@ impl WindowRenderer {
         &mut self,
         frame: &TerminalSurfaceFrame,
         viewport: TerminalViewport,
+        decorations: &TerminalDecorations,
         cursor_visible: bool,
     ) {
         let key = GeometryKey::Terminal {
             generation: frame.snapshot.generation,
+            decorations_revision: decorations.revision,
             cursor_visible,
             surface_width: self.config.width,
             surface_height: self.config.height,
@@ -1258,6 +1267,7 @@ impl WindowRenderer {
             self.config.height,
             viewport,
             frame.plan.visible_rows.clone(),
+            decorations,
             cursor_visible,
         );
         self.upload_geometry(vertices, key);
@@ -1336,6 +1346,9 @@ impl WindowRenderer {
     }
 }
 
+// Keeping the complete render context explicit here makes the allocation-free hot path easier to
+// audit at each call site than hiding these values behind mutable renderer state.
+#[allow(clippy::too_many_arguments)]
 fn build_vertices(
     snapshot: &FrameSnapshot,
     atlas: &mut GlyphAtlas,
@@ -1343,15 +1356,38 @@ fn build_vertices(
     height: u32,
     viewport: TerminalViewport,
     rows: std::ops::Range<u16>,
+    decorations: &TerminalDecorations,
     cursor_visible: bool,
 ) -> Vec<Vertex> {
     atlas.begin_frame();
+    let first_row = rows.start;
+    let row_count = usize::from(rows.end.saturating_sub(rows.start));
+    let column_count = usize::from(snapshot.cols);
+    let mut search_layers = vec![0_u8; row_count.saturating_mul(column_count)];
+    for (match_index, search_match) in decorations.search.matches.iter().enumerate() {
+        if search_match.start.row < rows.start || search_match.start.row >= rows.end {
+            continue;
+        }
+        let row_offset = usize::from(search_match.start.row - rows.start) * column_count;
+        let first_column = search_match
+            .start
+            .column
+            .min(snapshot.cols.saturating_sub(1));
+        let last_column = search_match.end.column.min(snapshot.cols.saturating_sub(1));
+        let layer = if decorations.active_search_match == Some(match_index) {
+            2
+        } else {
+            1
+        };
+        for column in first_column..=last_column {
+            search_layers[row_offset + usize::from(column)] = layer;
+        }
+    }
     let mut vertices = Vec::with_capacity(
         usize::from(rows.end.saturating_sub(rows.start))
             .saturating_mul(usize::from(snapshot.cols))
             .saturating_mul(12),
     );
-    let first_row = rows.start;
     for row in rows {
         let Some(cells) = snapshot.row(row) else {
             continue;
@@ -1376,19 +1412,18 @@ fn build_vertices(
             if cell.style.inverse {
                 std::mem::swap(&mut foreground, &mut background);
             }
-            if cursor_shape == Some(CursorShape::Block) {
-                if let Some(color) = snapshot.cursor_appearance.color {
-                    let cursor_color = resolve_color(color, true);
-                    foreground = if background[3] > 0.0 {
-                        background
-                    } else {
-                        [0.0, 0.0, 0.0, 1.0]
-                    };
-                    background = cursor_color;
+            let cursor_background = (cursor_shape == Some(CursorShape::Block)).then(|| {
+                let cursor_color = snapshot
+                    .cursor_appearance
+                    .color
+                    .map_or(foreground, |color| resolve_color(color, true));
+                foreground = if background[3] > 0.0 {
+                    background
                 } else {
-                    std::mem::swap(&mut foreground, &mut background);
-                }
-            }
+                    [0.0, 0.0, 0.0, 1.0]
+                };
+                cursor_color
+            });
             if background[3] > 0.0 {
                 push_quad(
                     &mut vertices,
@@ -1397,6 +1432,42 @@ fn build_vertices(
                     white_uv(),
                     background,
                     false,
+                    [width, height],
+                );
+            }
+            let overlay_index = usize::from(row - first_row) * column_count + column;
+            let search_color = match search_layers[overlay_index] {
+                1 => Some([0.95, 0.55, 0.10, 0.35]),
+                2 => Some([1.00, 0.75, 0.15, 0.55]),
+                _ => None,
+            };
+            if let Some(color) = search_color {
+                push_cell_overlay(
+                    &mut vertices,
+                    [x, y],
+                    [atlas.cell_width, atlas.cell_height],
+                    color,
+                    [width, height],
+                );
+            }
+            if decorations
+                .selection
+                .is_some_and(|selection| selection.contains(snapshot, row, column as u16))
+            {
+                push_cell_overlay(
+                    &mut vertices,
+                    [x, y],
+                    [atlas.cell_width, atlas.cell_height],
+                    [0.20, 0.45, 0.90, 0.50],
+                    [width, height],
+                );
+            }
+            if let Some(color) = cursor_background {
+                push_cell_overlay(
+                    &mut vertices,
+                    [x, y],
+                    [atlas.cell_width, atlas.cell_height],
+                    color,
                     [width, height],
                 );
             }
@@ -1459,6 +1530,24 @@ fn build_vertices(
         }
     }
     vertices
+}
+
+fn push_cell_overlay(
+    vertices: &mut Vec<Vertex>,
+    origin: [f32; 2],
+    size: [f32; 2],
+    color: [f32; 4],
+    surface_size: [u32; 2],
+) {
+    push_quad(
+        vertices,
+        origin,
+        size,
+        white_uv(),
+        color,
+        false,
+        surface_size,
+    );
 }
 
 fn push_cursor_decoration(
@@ -1790,6 +1879,8 @@ mod tests {
     };
     use crate::{
         LogPage, LogRow, LogSourceId, LogStyleSpan, LogSurfaceFrame, LogSurfaceModel, LogVisualRow,
+        TerminalCellPoint, TerminalDecorations, TerminalSearchMatch, TerminalSearchResult,
+        TerminalSelection, TerminalSelectionMode,
     };
     use cosmic_text::{CacheKey, CacheKeyFlags, SwashContent, Weight, fontdb};
     use cshell_terminal::{
@@ -1856,6 +1947,7 @@ mod tests {
                 height: 90,
             },
             0..1,
+            &TerminalDecorations::default(),
             true,
         );
         assert_eq!(vertices.len(), 24);
@@ -1895,6 +1987,7 @@ mod tests {
                 100,
                 viewport,
                 0..1,
+                &TerminalDecorations::default(),
                 cursor_visible,
             )
         };
@@ -1946,6 +2039,71 @@ mod tests {
         assert!(
             beam.iter()
                 .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn search_selection_and_cursor_overlays_follow_the_documented_layer_order() {
+        let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
+        let point = TerminalCellPoint { row: 0, column: 0 };
+        let snapshot = FrameSnapshot {
+            generation: 1,
+            rows: 1,
+            cols: 1,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_appearance: CursorAppearance::default(),
+            terminal_modes: TerminalModes::default(),
+            cells: vec![Cell::default()],
+        };
+        let decorations = TerminalDecorations {
+            revision: 1,
+            selection: Some(TerminalSelection {
+                anchor: point,
+                focus: point,
+                mode: TerminalSelectionMode::Character,
+            }),
+            search: TerminalSearchResult {
+                matches: Arc::from([TerminalSearchMatch {
+                    start: point,
+                    end: point,
+                }]),
+                truncated: false,
+            },
+            active_search_match: Some(0),
+        };
+        let vertices = build_vertices(
+            &snapshot,
+            &mut atlas,
+            100,
+            100,
+            TerminalViewport {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            0..1,
+            &decorations,
+            true,
+        );
+
+        assert_eq!(vertices.len(), 18);
+        assert!(
+            vertices[..6]
+                .iter()
+                .all(|vertex| vertex.color == [1.0, 0.75, 0.15, 0.55])
+        );
+        assert!(
+            vertices[6..12]
+                .iter()
+                .all(|vertex| vertex.color == [0.20, 0.45, 0.90, 0.50])
+        );
+        let cursor_color = super::resolve_color(Color::Default, true);
+        assert!(
+            vertices[12..]
+                .iter()
+                .all(|vertex| vertex.color == cursor_color)
         );
     }
 

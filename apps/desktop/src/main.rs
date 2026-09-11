@@ -6,7 +6,7 @@ mod window_e2e;
 use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};
 use cshell_render::{
     EguiFrame, LogReflowLayout, LogReflowRequest, LogScrollbarState, LogSourceId, LogSurfaceError,
-    LogSurfaceModel, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
+    LogSurfaceModel, TerminalDecorations, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
 };
 use cshell_ui::WorkbenchViewModel;
 use cursor_blink::CursorBlinkState;
@@ -32,6 +32,7 @@ struct DesktopApp {
     view_model: WorkbenchViewModel,
     daemon: Option<DesktopDaemonConnection>,
     terminal_surface: TerminalSurfaceModel,
+    terminal_decorations: TerminalDecorations,
     log_surface: Option<LogSurfaceModel>,
     submitted_log_page: Option<(LogSourceId, u64)>,
     log_reflow: Option<LogReflowWorker>,
@@ -454,6 +455,7 @@ impl ApplicationHandler for DesktopApp {
                     renderer.render(
                         frame.as_ref(),
                         viewport,
+                        &self.terminal_decorations,
                         self.cursor_blink.visible(),
                         Some(egui_frame),
                     )

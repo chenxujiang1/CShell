@@ -1,6 +1,7 @@
 //! Renderer-side viewport planning. Network, storage and parsing are intentionally absent.
 
 mod log_surface;
+mod terminal_interaction;
 mod window;
 
 use cshell_terminal::FrameSnapshot;
@@ -13,6 +14,12 @@ pub use log_surface::{
     LogPage, LogPageRequest, LogReflowLayout, LogReflowRequest, LogRow, LogScrollbarState,
     LogSourceId, LogStyleSpan, LogSurfaceError, LogSurfaceFrame, LogSurfaceModel, LogVisualRow,
     MAX_LOG_PAGE_ROWS, MAX_LOG_PAGE_STYLE_SPANS, MAX_LOG_PAGE_TEXT_BYTES, MAX_LOG_REFLOW_ROWS,
+};
+pub use terminal_interaction::{
+    MAX_TERMINAL_SEARCH_MATCHES, MAX_TERMINAL_SEARCH_QUERY_BYTES, MAX_TERMINAL_SELECTION_BYTES,
+    TerminalCellPoint, TerminalDecorations, TerminalInteractionError, TerminalSearchMatch,
+    TerminalSearchOptions, TerminalSearchResult, TerminalSelection, TerminalSelectionMode,
+    search_terminal_snapshot,
 };
 pub use window::{
     AtlasPressureBenchmarkReport, EguiFrame, LogGeometryBenchmarkReport, RenderOutcome,
