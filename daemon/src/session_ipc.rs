@@ -1010,7 +1010,7 @@ mod tests {
         let session_id = attachment.session_id();
         drop(attachment);
         let service = SessionIpcService::new(Arc::clone(&registry));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             let response = service
                 .handle_request(Envelope {

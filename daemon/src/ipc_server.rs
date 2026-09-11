@@ -387,7 +387,7 @@ mod tests {
         // native runners enough time to start the shell and emit the paced
         // four-second flood. The separate two-second control deadline remains
         // the isolation requirement this test is intended to enforce.
-        const FLOOD_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+        const FLOOD_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
         let directory = tempfile::tempdir().unwrap();
         let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 256).unwrap());
         let attachment = registry

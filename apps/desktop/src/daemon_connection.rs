@@ -1045,7 +1045,7 @@ mod tests {
         const MARKER: &str = "CSHELL_DESKTOP_EXECUTED";
         // Native CI runners can spend several seconds starting the shell and
         // publishing its first PTY frame, especially on Intel macOS hosts.
-        const PTY_E2E_TIMEOUT: Duration = Duration::from_secs(10);
+        const PTY_E2E_TIMEOUT: Duration = Duration::from_secs(30);
         let directory = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("temporary runtime must be created: {error}"));
         let registry = Arc::new(
