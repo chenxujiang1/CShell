@@ -1,3 +1,4 @@
+mod cursor_blink;
 mod daemon_connection;
 mod visual_corpus;
 mod window_e2e;
@@ -8,6 +9,7 @@ use cshell_render::{
     LogSurfaceModel, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
 };
 use cshell_ui::WorkbenchViewModel;
+use cursor_blink::CursorBlinkState;
 use daemon_connection::{DesktopConnectionConfig, DesktopDaemonConnection};
 use std::error::Error;
 use std::sync::Arc;
@@ -38,6 +40,8 @@ struct DesktopApp {
     cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
     wheel_row_accumulator: f64,
     modifiers: ModifiersState,
+    cursor_blink: CursorBlinkState,
+    window_active: bool,
     window_e2e: Option<window_e2e::WindowE2e>,
 }
 
@@ -101,6 +105,7 @@ impl ApplicationHandler for DesktopApp {
         ) {
             Ok(window) => {
                 let window = Arc::new(window);
+                self.window_active = true;
                 info!(window_id = ?window.id(), "desktop shell created");
                 self.egui_state = Some(egui_winit::State::new(
                     self.egui_context.clone(),
@@ -126,11 +131,14 @@ impl ApplicationHandler for DesktopApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = std::time::Instant::now();
+        let mut redraw_needed = false;
         if let (Some(reflow), Some(surface)) = (&self.log_reflow, &mut self.log_surface) {
             while let Ok(result) = reflow.results.try_recv() {
                 match result {
                     Ok(layout) => {
                         let promoted = surface.submit_reflow(layout);
+                        redraw_needed |= promoted;
                         if let Some(e2e) = &mut self.window_e2e {
                             e2e.note_reflow(promoted);
                         }
@@ -144,18 +152,28 @@ impl ApplicationHandler for DesktopApp {
         }
         if let Some(daemon) = &self.daemon {
             let view = daemon.view();
+            redraw_needed |= self.view_model.daemon_connected != view.connected;
+            redraw_needed |= self.view_model.daemon_status_detail != view.detail;
+            redraw_needed |= self.view_model.terminal_generation
+                != view.snapshot.as_ref().map(|snapshot| snapshot.generation);
             self.view_model.daemon_connected = view.connected;
             self.view_model.daemon_status_detail = view.detail;
             self.view_model.terminal_generation =
                 view.snapshot.as_ref().map(|snapshot| snapshot.generation);
             if let Some(snapshot) = view.snapshot {
-                self.terminal_surface.submit_snapshot(snapshot);
+                redraw_needed |= self.cursor_blink.synchronize(
+                    Some(snapshot.as_ref()),
+                    self.window_active && view.connected,
+                    now,
+                );
+                redraw_needed |= self.terminal_surface.submit_snapshot(snapshot);
             }
             if let Some(page) = view.log_page {
                 let key = (page.source_id, page.revision);
                 if self.submitted_log_page != Some(key)
                     && let Some(log_surface) = &mut self.log_surface
                 {
+                    redraw_needed = true;
                     if let Err(error) = log_surface.submit_page(page) {
                         tracing::error!(%error, "daemon log page rejected by render model");
                     }
@@ -173,8 +191,10 @@ impl ApplicationHandler for DesktopApp {
                     .iter_mut()
                     .find(|session| session.id == session_id)
                 {
+                    redraw_needed |= session.connected != view.connected;
                     session.connected = view.connected;
                 } else {
+                    redraw_needed = true;
                     self.view_model
                         .sessions
                         .push(cshell_ui::SessionTabViewModel {
@@ -189,6 +209,9 @@ impl ApplicationHandler for DesktopApp {
                 }
             }
         }
+        if self.log_surface.is_some() {
+            redraw_needed |= self.cursor_blink.synchronize(None, false, now);
+        }
         if self.renderer.is_none()
             && self
                 .last_renderer_attempt
@@ -197,11 +220,14 @@ impl ApplicationHandler for DesktopApp {
         {
             self.last_renderer_attempt = Some(std::time::Instant::now());
             match initialize_renderer(Arc::clone(window)) {
-                Ok(renderer) => self.renderer = Some(renderer),
+                Ok(renderer) => {
+                    self.renderer = Some(renderer);
+                    redraw_needed = true;
+                }
                 Err(error) => tracing::error!(%error, "terminal renderer recovery failed"),
             }
         }
-        if let Some(window) = &self.window {
+        if redraw_needed && let Some(window) = &self.window {
             window.request_redraw();
         }
         if self
@@ -211,9 +237,22 @@ impl ApplicationHandler for DesktopApp {
         {
             event_loop.exit();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(16),
-        ));
+        if self.window_e2e.is_some()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+        let poll_interval = if self.view_model.daemon_connected {
+            std::time::Duration::from_millis(16)
+        } else {
+            std::time::Duration::from_millis(100)
+        };
+        let poll_deadline = now + poll_interval;
+        let wake_deadline = self
+            .cursor_blink
+            .next_toggle()
+            .map_or(poll_deadline, |deadline| deadline.min(poll_deadline));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake_deadline));
     }
 
     fn window_event(
@@ -253,23 +292,41 @@ impl ApplicationHandler for DesktopApp {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
+            WindowEvent::Focused(active) => {
+                self.window_active = active;
+                if self.cursor_blink.set_window_active(
+                    active && self.view_model.daemon_connected,
+                    std::time::Instant::now(),
+                ) {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if !egui_consumed && self.log_surface.is_none() =>
             {
                 if let Some(action) = terminal_key_action(&event, self.modifiers)
                     && let Some(daemon) = &self.daemon
-                    && !daemon.send_input(action)
                 {
-                    tracing::warn!("terminal input was not accepted by the daemon client");
+                    if daemon.send_input(action) {
+                        if self.cursor_blink.note_activity(std::time::Instant::now()) {
+                            window.request_redraw();
+                        }
+                    } else {
+                        tracing::warn!("terminal input was not accepted by the daemon client");
+                    }
                 }
             }
             WindowEvent::Ime(Ime::Commit(text))
                 if !egui_consumed && self.log_surface.is_none() && !text.is_empty() =>
             {
-                if let Some(daemon) = &self.daemon
-                    && !daemon.send_input(InputAction::Text(text))
-                {
-                    tracing::warn!("IME commit was not accepted by the daemon client");
+                if let Some(daemon) = &self.daemon {
+                    if daemon.send_input(InputAction::Text(text)) {
+                        if self.cursor_blink.note_activity(std::time::Instant::now()) {
+                            window.request_redraw();
+                        }
+                    } else {
+                        tracing::warn!("IME commit was not accepted by the daemon client");
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -394,7 +451,12 @@ impl ApplicationHandler for DesktopApp {
                     if let Some(frame) = &frame {
                         position_terminal_ime(&window, viewport, &frame.snapshot);
                     }
-                    renderer.render(frame.as_ref(), viewport, Some(egui_frame))
+                    renderer.render(
+                        frame.as_ref(),
+                        viewport,
+                        self.cursor_blink.visible(),
+                        Some(egui_frame),
+                    )
                 };
                 // A surface/device failure can return before GPU texture upload. The next
                 // renderer recreates egui's font texture; clear this frame's abandoned deltas.

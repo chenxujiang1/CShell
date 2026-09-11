@@ -480,6 +480,7 @@ pub fn benchmark_terminal_geometry(
         viewport.height,
         viewport,
         0..snapshot.rows,
+        true,
     );
     std::hint::black_box(&vertices);
     let cold = cold_started.elapsed();
@@ -497,6 +498,7 @@ pub fn benchmark_terminal_geometry(
             viewport.height,
             viewport,
             0..snapshot.rows,
+            true,
         ));
     }
     let warm_per_iteration = warm_started.elapsed() / iterations;
@@ -774,6 +776,7 @@ pub struct EguiFrame<'a> {
 enum GeometryKey {
     Terminal {
         generation: u64,
+        cursor_visible: bool,
         surface_width: u32,
         surface_height: u32,
         viewport: TerminalViewport,
@@ -795,7 +798,10 @@ enum GeometryKey {
 }
 
 enum GeometryFrame<'a> {
-    Terminal(Option<&'a TerminalSurfaceFrame>),
+    Terminal {
+        frame: Option<&'a TerminalSurfaceFrame>,
+        cursor_visible: bool,
+    },
     Log(Option<&'a LogSurfaceFrame>),
 }
 
@@ -1065,9 +1071,17 @@ impl WindowRenderer {
         &mut self,
         frame: Option<&TerminalSurfaceFrame>,
         viewport: TerminalViewport,
+        cursor_visible: bool,
         egui_frame: Option<EguiFrame<'_>>,
     ) -> Result<RenderOutcome, WindowRendererError> {
-        self.render_inner(GeometryFrame::Terminal(frame), viewport, egui_frame)
+        self.render_inner(
+            GeometryFrame::Terminal {
+                frame,
+                cursor_visible,
+            },
+            viewport,
+            egui_frame,
+        )
     }
 
     pub fn render_log(
@@ -1107,9 +1121,12 @@ impl WindowRenderer {
         }
         let viewport = viewport.clamp(self.config.width, self.config.height);
         match frame {
-            GeometryFrame::Terminal(Some(frame)) => self.update_geometry(frame, viewport),
+            GeometryFrame::Terminal {
+                frame: Some(frame),
+                cursor_visible,
+            } => self.update_geometry(frame, viewport, cursor_visible),
             GeometryFrame::Log(Some(frame)) => self.update_log_geometry(frame, viewport),
-            GeometryFrame::Terminal(None) | GeometryFrame::Log(None) => {
+            GeometryFrame::Terminal { frame: None, .. } | GeometryFrame::Log(None) => {
                 self.vertex_count = 0;
                 self.geometry_key = None;
             }
@@ -1216,9 +1233,15 @@ impl WindowRenderer {
         }
     }
 
-    fn update_geometry(&mut self, frame: &TerminalSurfaceFrame, viewport: TerminalViewport) {
+    fn update_geometry(
+        &mut self,
+        frame: &TerminalSurfaceFrame,
+        viewport: TerminalViewport,
+        cursor_visible: bool,
+    ) {
         let key = GeometryKey::Terminal {
             generation: frame.snapshot.generation,
+            cursor_visible,
             surface_width: self.config.width,
             surface_height: self.config.height,
             viewport,
@@ -1235,6 +1258,7 @@ impl WindowRenderer {
             self.config.height,
             viewport,
             frame.plan.visible_rows.clone(),
+            cursor_visible,
         );
         self.upload_geometry(vertices, key);
     }
@@ -1319,6 +1343,7 @@ fn build_vertices(
     height: u32,
     viewport: TerminalViewport,
     rows: std::ops::Range<u16>,
+    cursor_visible: bool,
 ) -> Vec<Vertex> {
     atlas.begin_frame();
     let mut vertices = Vec::with_capacity(
@@ -1342,7 +1367,8 @@ fn build_vertices(
             }
             let is_cursor_cell =
                 row == snapshot.cursor_row && column == usize::from(snapshot.cursor_col);
-            let cursor_shape = is_cursor_cell.then_some(snapshot.cursor_appearance.shape);
+            let cursor_shape =
+                (cursor_visible && is_cursor_cell).then_some(snapshot.cursor_appearance.shape);
             let (mut foreground, mut background) = (
                 resolve_color(cell.style.foreground, true),
                 resolve_color(cell.style.background, false),
@@ -1830,6 +1856,7 @@ mod tests {
                 height: 90,
             },
             0..1,
+            true,
         );
         assert_eq!(vertices.len(), 24);
         assert!(vertices.iter().all(|vertex| {
@@ -1859,41 +1886,62 @@ mod tests {
             width: 100,
             height: 100,
         };
-        let mut render = |appearance| {
+        let mut render = |appearance, cursor_visible| {
             snapshot.cursor_appearance = appearance;
-            build_vertices(&snapshot, &mut atlas, 100, 100, viewport, 0..1)
+            build_vertices(
+                &snapshot,
+                &mut atlas,
+                100,
+                100,
+                viewport,
+                0..1,
+                cursor_visible,
+            )
         };
 
-        assert_eq!(render(CursorAppearance::default()).len(), 6);
+        assert_eq!(render(CursorAppearance::default(), true).len(), 6);
+        assert_eq!(render(CursorAppearance::default(), false).len(), 0);
         assert_eq!(
-            render(CursorAppearance {
-                shape: CursorShape::Hidden,
-                ..CursorAppearance::default()
-            })
+            render(
+                CursorAppearance {
+                    shape: CursorShape::Hidden,
+                    ..CursorAppearance::default()
+                },
+                true
+            )
             .len(),
             0
         );
         assert_eq!(
-            render(CursorAppearance {
-                shape: CursorShape::Underline,
-                ..CursorAppearance::default()
-            })
+            render(
+                CursorAppearance {
+                    shape: CursorShape::Underline,
+                    ..CursorAppearance::default()
+                },
+                true
+            )
             .len(),
             6
         );
         assert_eq!(
-            render(CursorAppearance {
-                shape: CursorShape::HollowBlock,
-                ..CursorAppearance::default()
-            })
+            render(
+                CursorAppearance {
+                    shape: CursorShape::HollowBlock,
+                    ..CursorAppearance::default()
+                },
+                true
+            )
             .len(),
             24
         );
-        let beam = render(CursorAppearance {
-            shape: CursorShape::Beam,
-            blinking: true,
-            color: Some(Color::Rgb(255, 0, 0)),
-        });
+        let beam = render(
+            CursorAppearance {
+                shape: CursorShape::Beam,
+                blinking: true,
+                color: Some(Color::Rgb(255, 0, 0)),
+            },
+            true,
+        );
         assert_eq!(beam.len(), 6);
         assert!(
             beam.iter()
