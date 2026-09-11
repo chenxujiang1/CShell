@@ -1,19 +1,22 @@
 mod cursor_blink;
 mod daemon_connection;
+mod terminal_search;
 mod visual_corpus;
 mod window_e2e;
 
 use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};
 use cshell_render::{
     EguiFrame, LogReflowLayout, LogReflowRequest, LogScrollbarState, LogSourceId, LogSurfaceError,
-    LogSurfaceModel, TerminalCellPoint, TerminalDecorations, TerminalSelection,
-    TerminalSelectionMode, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
+    LogSurfaceModel, MAX_TERMINAL_SEARCH_QUERY_BYTES, TerminalCellPoint, TerminalDecorations,
+    TerminalSelection, TerminalSelectionMode, TerminalSurfaceModel, TerminalViewport,
+    WindowRenderer,
 };
 use cshell_ui::WorkbenchViewModel;
 use cursor_blink::CursorBlinkState;
 use daemon_connection::{DesktopConnectionConfig, DesktopDaemonConnection};
 use std::error::Error;
 use std::sync::Arc;
+use terminal_search::{TerminalSearchRequest, TerminalSearchWorker};
 use tracing::info;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -34,6 +37,13 @@ struct DesktopApp {
     daemon: Option<DesktopDaemonConnection>,
     terminal_surface: TerminalSurfaceModel,
     terminal_decorations: TerminalDecorations,
+    terminal_search: Option<TerminalSearchWorker>,
+    terminal_search_open: bool,
+    terminal_search_focus_requested: bool,
+    terminal_search_query: String,
+    terminal_search_options: cshell_render::TerminalSearchOptions,
+    terminal_search_revision: u64,
+    terminal_search_requested_generation: Option<u64>,
     log_surface: Option<LogSurfaceModel>,
     submitted_log_page: Option<(LogSourceId, u64)>,
     log_reflow: Option<LogReflowWorker>,
@@ -153,6 +163,35 @@ impl ApplicationHandler for DesktopApp {
                 }
             }
         }
+        let search_response = self
+            .terminal_search
+            .as_ref()
+            .and_then(TerminalSearchWorker::take_latest);
+        if let Some(response) = search_response {
+            let current_generation = self
+                .terminal_surface
+                .latest_snapshot()
+                .map(|snapshot| snapshot.generation);
+            if response.revision == self.terminal_search_revision
+                && current_generation == Some(response.snapshot_generation)
+            {
+                match response.result {
+                    Ok(result) => {
+                        let previous_active =
+                            self.terminal_decorations.active_search_match.unwrap_or(0);
+                        self.terminal_decorations.search = result;
+                        self.terminal_decorations.active_search_match =
+                            (!self.terminal_decorations.search.matches.is_empty()).then_some(
+                                previous_active
+                                    .min(self.terminal_decorations.search.matches.len() - 1),
+                            );
+                        self.bump_terminal_decorations();
+                        redraw_needed = true;
+                    }
+                    Err(error) => tracing::warn!(%error, "terminal search rejected"),
+                }
+            }
+        }
         if let Some(daemon) = &self.daemon {
             let view = daemon.view();
             redraw_needed |= self.view_model.daemon_connected != view.connected;
@@ -214,6 +253,16 @@ impl ApplicationHandler for DesktopApp {
         }
         if self.log_surface.is_some() {
             redraw_needed |= self.cursor_blink.synchronize(None, false, now);
+        }
+        let current_generation = self
+            .terminal_surface
+            .latest_snapshot()
+            .map(|snapshot| snapshot.generation);
+        if self.terminal_search_open
+            && !self.terminal_search_query.is_empty()
+            && current_generation != self.terminal_search_requested_generation
+        {
+            self.schedule_terminal_search(false);
         }
         if self.renderer.is_none()
             && self
@@ -342,6 +391,22 @@ impl ApplicationHandler for DesktopApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. }
+                if self.log_surface.is_none()
+                    && is_terminal_search_shortcut(&event, self.modifiers) =>
+            {
+                self.terminal_search_open = true;
+                self.terminal_search_focus_requested = true;
+                window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if self.terminal_search_open
+                    && event.state == ElementState::Pressed
+                    && event.logical_key == Key::Named(NamedKey::Escape) =>
+            {
+                self.close_terminal_search();
+                window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { event, .. }
                 if !egui_consumed && self.log_surface.is_none() =>
             {
                 if is_terminal_copy_shortcut(&event, self.modifiers) {
@@ -419,9 +484,6 @@ impl ApplicationHandler for DesktopApp {
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                let Some(renderer) = &mut self.renderer else {
-                    return;
-                };
                 let Some(egui_state) = &mut self.egui_state else {
                     return;
                 };
@@ -432,10 +494,77 @@ impl ApplicationHandler for DesktopApp {
                     .as_ref()
                     .and_then(|surface| surface.scrollbar_state(self.viewport_rows.max(1)));
                 let mut scrollbar_action = None;
-                let full_output = self.egui_context.run_ui(raw_input, |ui| {
+                let context = self.egui_context.clone();
+                let mut search_changed = false;
+                let mut search_navigation = 0_i8;
+                let mut close_search = false;
+                let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
                     if let Some(state) = scrollbar_state {
                         scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
+                    }
+                    if self.terminal_search_open && self.log_surface.is_none() {
+                        egui::Window::new("查找终端")
+                            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
+                            .collapsible(false)
+                            .resizable(false)
+                            .show(ui.ctx(), |ui| {
+                                ui.horizontal(|ui| {
+                                    let response = ui.add(
+                                        egui::TextEdit::singleline(&mut self.terminal_search_query)
+                                            .desired_width(260.0)
+                                            .char_limit(MAX_TERMINAL_SEARCH_QUERY_BYTES)
+                                            .hint_text("查找当前终端内容"),
+                                    );
+                                    if self.terminal_search_focus_requested {
+                                        response.request_focus();
+                                        self.terminal_search_focus_requested = false;
+                                    }
+                                    if response.changed() {
+                                        truncate_utf8_bytes(
+                                            &mut self.terminal_search_query,
+                                            MAX_TERMINAL_SEARCH_QUERY_BYTES,
+                                        );
+                                        search_changed = true;
+                                    }
+                                    if ui.button("上一个").clicked() {
+                                        search_navigation = -1;
+                                    }
+                                    if ui.button("下一个").clicked() {
+                                        search_navigation = 1;
+                                    }
+                                    if ui.button("关闭").clicked() {
+                                        close_search = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    search_changed |= ui
+                                        .checkbox(
+                                            &mut self.terminal_search_options.case_sensitive,
+                                            "区分大小写",
+                                        )
+                                        .changed();
+                                    search_changed |= ui
+                                        .checkbox(
+                                            &mut self.terminal_search_options.whole_word,
+                                            "全词匹配",
+                                        )
+                                        .changed();
+                                    let count = self.terminal_decorations.search.matches.len();
+                                    let active = self
+                                        .terminal_decorations
+                                        .active_search_match
+                                        .map_or(0, |index| index + 1);
+                                    ui.label(format!("{active}/{count}"));
+                                });
+                                if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                                    search_navigation = if ui.input(|input| input.modifiers.shift) {
+                                        -1
+                                    } else {
+                                        1
+                                    };
+                                }
+                            });
                     }
                 });
                 if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
@@ -458,6 +587,19 @@ impl ApplicationHandler for DesktopApp {
                     event_loop,
                     platform_output,
                 );
+                if close_search {
+                    self.close_terminal_search();
+                } else {
+                    if search_changed {
+                        self.schedule_terminal_search(true);
+                    }
+                    if search_navigation != 0 {
+                        self.navigate_terminal_search(search_navigation);
+                    }
+                }
+                let Some(renderer) = &mut self.renderer else {
+                    return;
+                };
                 let paint_jobs = self.egui_context.tessellate(shapes, pixels_per_point);
                 let viewport = TerminalViewport::from_logical_rect(terminal_rect, pixels_per_point);
                 let viewport_rows = renderer.viewport_rows(viewport);
@@ -540,6 +682,63 @@ impl ApplicationHandler for DesktopApp {
 }
 
 impl DesktopApp {
+    fn bump_terminal_decorations(&mut self) {
+        self.terminal_decorations.revision = self.terminal_decorations.revision.wrapping_add(1);
+    }
+
+    fn schedule_terminal_search(&mut self, reset_active: bool) {
+        self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
+        self.terminal_decorations.search = Default::default();
+        if reset_active {
+            self.terminal_decorations.active_search_match = None;
+        }
+        self.bump_terminal_decorations();
+        let Some(snapshot) = self.terminal_surface.latest_snapshot().cloned() else {
+            self.terminal_search_requested_generation = None;
+            return;
+        };
+        self.terminal_search_requested_generation = Some(snapshot.generation);
+        if self.terminal_search_query.is_empty() {
+            return;
+        }
+        if let Some(search) = &self.terminal_search {
+            search.submit(TerminalSearchRequest {
+                revision: self.terminal_search_revision,
+                snapshot,
+                query: self.terminal_search_query.clone(),
+                options: self.terminal_search_options,
+            });
+        }
+    }
+
+    fn navigate_terminal_search(&mut self, direction: i8) {
+        let count = self.terminal_decorations.search.matches.len();
+        if count == 0 {
+            return;
+        }
+        let current = self
+            .terminal_decorations
+            .active_search_match
+            .unwrap_or(0)
+            .min(count - 1);
+        self.terminal_decorations.active_search_match = Some(if direction < 0 {
+            current.checked_sub(1).unwrap_or(count - 1)
+        } else {
+            (current + 1) % count
+        });
+        self.bump_terminal_decorations();
+    }
+
+    fn close_terminal_search(&mut self) {
+        self.terminal_search_open = false;
+        self.terminal_search_focus_requested = false;
+        self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
+        self.terminal_search_requested_generation = None;
+        self.terminal_decorations.search = Default::default();
+        self.terminal_decorations.active_search_match = None;
+        self.bump_terminal_decorations();
+    }
+
     fn terminal_point_at(
         &self,
         position: winit::dpi::PhysicalPosition<f64>,
@@ -577,6 +776,23 @@ fn is_terminal_copy_shortcut(event: &winit::event::KeyEvent, modifiers: Modifier
     event.state == ElementState::Pressed
         && (modifiers.super_key() || (modifiers.control_key() && modifiers.shift_key()))
         && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+}
+
+fn is_terminal_search_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
+    event.state == ElementState::Pressed
+        && (modifiers.super_key() || modifiers.control_key())
+        && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("f"))
+}
+
+fn truncate_utf8_bytes(text: &mut String, maximum: usize) {
+    if text.len() <= maximum {
+        return;
+    }
+    let mut boundary = maximum;
+    while !text.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    text.truncate(boundary);
 }
 
 fn position_terminal_ime(
@@ -765,6 +981,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let mut app = DesktopApp {
         daemon,
+        terminal_search: Some(TerminalSearchWorker::start()?),
         ..DesktopApp::default()
     };
     if show_visual_corpus {
@@ -804,7 +1021,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         LogScrollbarAction, TerminalCellPoint, TerminalViewport, log_scrollbar_action,
-        terminal_point_at,
+        terminal_point_at, truncate_utf8_bytes,
     };
     use winit::dpi::PhysicalPosition;
 
@@ -855,5 +1072,14 @@ mod tests {
             terminal_point_at(PhysicalPosition::new(100.0, 100.0), viewport, 0, 80),
             None
         );
+    }
+
+    #[test]
+    fn search_query_byte_limit_never_splits_utf8() {
+        let mut query = "ab界cd".to_owned();
+        truncate_utf8_bytes(&mut query, 4);
+        assert_eq!(query, "ab");
+        truncate_utf8_bytes(&mut query, 1);
+        assert_eq!(query, "a");
     }
 }
