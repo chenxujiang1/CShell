@@ -343,7 +343,16 @@ mod tests {
                 russh::server::run_stream(Arc::new(server_config), stream, ProtocolTestServer)
                     .await
                     .unwrap();
-            running.await.unwrap();
+            if let Err(error) = running.await {
+                assert!(
+                    matches!(
+                        error,
+                        russh::Error::IO(ref error)
+                            if error.kind() == std::io::ErrorKind::ConnectionReset
+                    ),
+                    "unexpected SSH test server failure: {error}"
+                );
+            }
         });
 
         let client = RusshClient::connect_password(
