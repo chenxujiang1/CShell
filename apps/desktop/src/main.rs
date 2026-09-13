@@ -439,7 +439,13 @@ impl ApplicationHandler for DesktopApp {
                     window.request_redraw();
                     return;
                 }
-                if let Some(action) = terminal_key_action(&event, self.modifiers)
+                let terminal_modes = self
+                    .terminal_surface
+                    .latest_snapshot()
+                    .map_or_else(cshell_terminal::TerminalModes::default, |snapshot| {
+                        snapshot.terminal_modes
+                    });
+                if let Some(action) = terminal_key_action(&event, self.modifiers, terminal_modes)
                     && let Some(daemon) = &self.daemon
                 {
                     if daemon.send_input(action) {
@@ -851,8 +857,12 @@ fn position_terminal_ime(
 fn terminal_key_action(
     event: &winit::event::KeyEvent,
     modifiers: ModifiersState,
+    modes: cshell_terminal::TerminalModes,
 ) -> Option<InputAction> {
-    if event.state != ElementState::Pressed || modifiers.super_key() {
+    let pressed = event.state == ElementState::Pressed;
+    let report_events = modes.kitty_enabled(cshell_terminal::TerminalModes::KITTY_REPORT_EVENTS);
+    let report_all = modes.kitty_enabled(cshell_terminal::TerminalModes::KITTY_REPORT_ALL_KEYS);
+    if (!pressed && !report_events) || (modifiers.super_key() && modes.kitty_keyboard_flags == 0) {
         return None;
     }
     let modifiers = Modifiers {
@@ -862,10 +872,12 @@ fn terminal_key_action(
         super_key: modifiers.super_key(),
     };
     let code = match &event.logical_key {
-        Key::Character(text) if modifiers.ctrl || modifiers.alt => {
+        Key::Character(text)
+            if modifiers.ctrl || modifiers.alt || modifiers.super_key || report_all =>
+        {
             KeyCode::Character(text.to_string())
         }
-        Key::Character(_) => {
+        Key::Character(_) if pressed => {
             return event
                 .text
                 .as_ref()
@@ -886,7 +898,8 @@ fn terminal_key_action(
     Some(InputAction::Key(KeyEvent {
         code,
         modifiers,
-        pressed: true,
+        pressed,
+        repeated: event.repeat,
     }))
 }
 

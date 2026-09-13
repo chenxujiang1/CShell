@@ -50,6 +50,8 @@ pub struct KeyEvent {
     pub code: KeyCode,
     pub modifiers: Modifiers,
     pub pressed: bool,
+    #[serde(default)]
+    pub repeated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

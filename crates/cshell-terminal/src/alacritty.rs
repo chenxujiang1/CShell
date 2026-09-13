@@ -56,6 +56,91 @@ impl ResponseSink {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::mem::take(&mut *responses)
     }
+
+    fn push(&self, response: Vec<u8>) {
+        self.responses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(response);
+    }
+}
+
+#[derive(Debug, Default)]
+struct XtermKeyboardModes {
+    modify_other_keys: u8,
+    format_other_keys: bool,
+    pending: Vec<u8>,
+}
+
+impl XtermKeyboardModes {
+    fn observe(&mut self, bytes: &[u8]) -> Vec<(usize, Vec<u8>)> {
+        let mut responses = Vec::new();
+        for (offset, &byte) in bytes.iter().enumerate() {
+            if self.pending.is_empty() {
+                if byte == 0x1b {
+                    self.pending.push(byte);
+                }
+                continue;
+            }
+            if self.pending == [0x1b] {
+                if byte == b'[' {
+                    self.pending.push(byte);
+                } else {
+                    self.pending.clear();
+                    if byte == 0x1b {
+                        self.pending.push(byte);
+                    }
+                }
+                continue;
+            }
+            if self.pending.len() >= 32 || !(0x20..=0x7e).contains(&byte) {
+                self.pending.clear();
+                continue;
+            }
+            self.pending.push(byte);
+            if (0x40..=0x7e).contains(&byte) {
+                if let Some(response) = self.finish_sequence() {
+                    responses.push((offset, response));
+                }
+                self.pending.clear();
+            }
+        }
+        responses
+    }
+
+    fn finish_sequence(&mut self) -> Option<Vec<u8>> {
+        let Ok(sequence) = std::str::from_utf8(&self.pending[2..]) else {
+            return None;
+        };
+        match sequence {
+            ">4m" => self.modify_other_keys = 0,
+            ">4n" => self.modify_other_keys = 0,
+            ">4f" => self.format_other_keys = false,
+            "?4m" => {
+                return Some(format!("\x1b[>4;{}m", self.modify_other_keys).into_bytes());
+            }
+            "?4g" => {
+                return Some(format!("\x1b[>4;{}f", u8::from(self.format_other_keys)).into_bytes());
+            }
+            _ => {
+                if let Some(value) = sequence
+                    .strip_prefix(">4;")
+                    .and_then(|value| value.strip_suffix('m'))
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .filter(|value| *value <= 3)
+                {
+                    self.modify_other_keys = value;
+                } else if let Some(value) = sequence
+                    .strip_prefix(">4;")
+                    .and_then(|value| value.strip_suffix('f'))
+                    .and_then(|value| value.parse::<u8>().ok())
+                {
+                    self.format_other_keys = value != 0;
+                }
+            }
+        }
+        None
+    }
 }
 
 impl EventListener for ResponseSink {
@@ -73,6 +158,7 @@ pub struct AlacrittyTerminalEngine {
     terminal: Term<ResponseSink>,
     parser: ansi::Processor,
     response_sink: ResponseSink,
+    xterm_keyboard: XtermKeyboardModes,
     size: TerminalSize,
     generation: u64,
 }
@@ -92,7 +178,11 @@ impl AlacrittyTerminalEngine {
     pub fn new(size: TerminalSize) -> Self {
         let response_sink = ResponseSink::default();
         let dimensions = TerminalDimensions::from(size);
-        let mut terminal = Term::new(Config::default(), &dimensions, response_sink.clone());
+        let config = Config {
+            kitty_keyboard: true,
+            ..Config::default()
+        };
+        let mut terminal = Term::new(config, &dimensions, response_sink.clone());
         // The initial empty snapshot is published by the pipeline before any
         // output arrives, so subsequent deltas only need actual VT damage.
         terminal.reset_damage();
@@ -100,6 +190,7 @@ impl AlacrittyTerminalEngine {
             terminal,
             parser: ansi::Processor::new(),
             response_sink,
+            xterm_keyboard: XtermKeyboardModes::default(),
             size,
             generation: 0,
         }
@@ -109,7 +200,14 @@ impl AlacrittyTerminalEngine {
 impl TerminalEngine for AlacrittyTerminalEngine {
     fn feed(&mut self, bytes: &[u8]) -> FrameDelta {
         let base_generation = self.generation;
-        self.parser.advance(&mut self.terminal, bytes);
+        let mut consumed = 0;
+        for (offset, response) in self.xterm_keyboard.observe(bytes) {
+            self.parser
+                .advance(&mut self.terminal, &bytes[consumed..=offset]);
+            self.response_sink.push(response);
+            consumed = offset + 1;
+        }
+        self.parser.advance(&mut self.terminal, &bytes[consumed..]);
         self.generation = self.generation.saturating_add(1);
         let dirty_rows = match self.terminal.damage() {
             TermDamage::Full => (0..self.size.rows).collect(),
@@ -134,9 +232,28 @@ impl TerminalEngine for AlacrittyTerminalEngine {
 
     fn modes(&self) -> TerminalModes {
         let modes = self.terminal.mode();
+        let mut kitty_keyboard_flags = 0;
+        if modes.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+            kitty_keyboard_flags |= TerminalModes::KITTY_DISAMBIGUATE;
+        }
+        if modes.contains(TermMode::REPORT_EVENT_TYPES) {
+            kitty_keyboard_flags |= TerminalModes::KITTY_REPORT_EVENTS;
+        }
+        if modes.contains(TermMode::REPORT_ALTERNATE_KEYS) {
+            kitty_keyboard_flags |= TerminalModes::KITTY_REPORT_ALTERNATE_KEYS;
+        }
+        if modes.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+            kitty_keyboard_flags |= TerminalModes::KITTY_REPORT_ALL_KEYS;
+        }
+        if modes.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
+            kitty_keyboard_flags |= TerminalModes::KITTY_REPORT_ASSOCIATED_TEXT;
+        }
         TerminalModes {
             application_cursor: modes.contains(TermMode::APP_CURSOR),
             bracketed_paste: modes.contains(TermMode::BRACKETED_PASTE),
+            kitty_keyboard_flags,
+            modify_other_keys: self.xterm_keyboard.modify_other_keys,
+            format_other_keys: self.xterm_keyboard.format_other_keys,
         }
     }
 
@@ -292,6 +409,43 @@ mod tests {
         assert_eq!(terminal.snapshot().terminal_modes, modes);
 
         terminal.feed(b"\x1b[?1l\x1b[?2004l");
+        assert_eq!(terminal.modes(), crate::TerminalModes::default());
+    }
+
+    #[test]
+    fn negotiates_and_reports_kitty_keyboard_modes() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(24, 80));
+        terminal.feed(b"\x1b[>31u");
+        assert_eq!(terminal.modes().kitty_keyboard_flags, 31);
+
+        let query = terminal.feed(b"\x1b[?u");
+        assert_eq!(query.terminal_responses, vec![b"\x1b[?31u".to_vec()]);
+
+        terminal.feed(b"\x1b[<u");
+        assert_eq!(terminal.modes().kitty_keyboard_flags, 0);
+    }
+
+    #[test]
+    fn tracks_fragmented_xterm_other_key_modes_and_answers_queries() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(24, 80));
+        terminal.feed(b"\x1b[>4;");
+        terminal.feed(b"2m\x1b[>4;1f");
+        let modes = terminal.modes();
+        assert_eq!(modes.modify_other_keys, 2);
+        assert!(modes.format_other_keys);
+
+        let query = terminal.feed(b"\x1b[6n\x1b[?4m\x1b[?4g\x1b[6n");
+        assert_eq!(
+            query.terminal_responses,
+            vec![
+                b"\x1b[1;1R".to_vec(),
+                b"\x1b[>4;2m".to_vec(),
+                b"\x1b[>4;1f".to_vec(),
+                b"\x1b[1;1R".to_vec(),
+            ]
+        );
+
+        terminal.feed(b"\x1b[>4n\x1b[>4f");
         assert_eq!(terminal.modes(), crate::TerminalModes::default());
     }
 

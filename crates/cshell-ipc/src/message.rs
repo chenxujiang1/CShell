@@ -11,7 +11,7 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 6;
+pub const PROTOCOL_MINOR: u32 = 7;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -85,6 +85,12 @@ pub struct TerminalFramePayload {
     pub cells: Vec<TerminalCell>,
     #[prost(message, optional, tag = "9")]
     pub cursor_appearance: Option<TerminalCursorAppearance>,
+    #[prost(uint32, tag = "10")]
+    pub kitty_keyboard_flags: u32,
+    #[prost(uint32, tag = "11")]
+    pub modify_other_keys: u32,
+    #[prost(bool, tag = "12")]
+    pub format_other_keys: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -213,6 +219,9 @@ impl FullFrame {
             bracketed_paste: snapshot.terminal_modes.bracketed_paste,
             cells: snapshot.cells.iter().map(TerminalCell::from).collect(),
             cursor_appearance: Some(TerminalCursorAppearance::from(snapshot.cursor_appearance)),
+            kitty_keyboard_flags: u32::from(snapshot.terminal_modes.kitty_keyboard_flags),
+            modify_other_keys: u32::from(snapshot.terminal_modes.modify_other_keys),
+            format_other_keys: snapshot.terminal_modes.format_other_keys,
         };
         Self {
             session_id: session_id.as_uuid().as_bytes().to_vec(),
@@ -277,6 +286,16 @@ impl FullFrame {
             terminal_modes: TerminalModes {
                 application_cursor: payload.application_cursor,
                 bracketed_paste: payload.bracketed_paste,
+                kitty_keyboard_flags: (payload.kitty_keyboard_flags
+                    & u32::from(
+                        TerminalModes::KITTY_DISAMBIGUATE
+                            | TerminalModes::KITTY_REPORT_EVENTS
+                            | TerminalModes::KITTY_REPORT_ALTERNATE_KEYS
+                            | TerminalModes::KITTY_REPORT_ALL_KEYS
+                            | TerminalModes::KITTY_REPORT_ASSOCIATED_TEXT,
+                    )) as u8,
+                modify_other_keys: payload.modify_other_keys.min(3) as u8,
+                format_other_keys: payload.format_other_keys,
             },
             cells: payload
                 .cells
@@ -494,6 +513,12 @@ pub struct TerminalDeltaPayload {
     pub rows_changed: Vec<TerminalRowPatch>,
     #[prost(message, optional, tag = "9")]
     pub cursor_appearance: Option<TerminalCursorAppearance>,
+    #[prost(uint32, tag = "10")]
+    pub kitty_keyboard_flags: u32,
+    #[prost(uint32, tag = "11")]
+    pub modify_other_keys: u32,
+    #[prost(bool, tag = "12")]
+    pub format_other_keys: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -583,6 +608,9 @@ impl FrameDelta {
             bracketed_paste: current.terminal_modes.bracketed_paste,
             rows_changed,
             cursor_appearance: Some(TerminalCursorAppearance::from(current.cursor_appearance)),
+            kitty_keyboard_flags: u32::from(current.terminal_modes.kitty_keyboard_flags),
+            modify_other_keys: u32::from(current.terminal_modes.modify_other_keys),
+            format_other_keys: current.terminal_modes.format_other_keys,
         };
         Ok(Self {
             session_id: session_id.as_uuid().as_bytes().to_vec(),
@@ -657,6 +685,16 @@ impl FrameDelta {
         snapshot.terminal_modes = TerminalModes {
             application_cursor: payload.application_cursor,
             bracketed_paste: payload.bracketed_paste,
+            kitty_keyboard_flags: (payload.kitty_keyboard_flags
+                & u32::from(
+                    TerminalModes::KITTY_DISAMBIGUATE
+                        | TerminalModes::KITTY_REPORT_EVENTS
+                        | TerminalModes::KITTY_REPORT_ALTERNATE_KEYS
+                        | TerminalModes::KITTY_REPORT_ALL_KEYS
+                        | TerminalModes::KITTY_REPORT_ASSOCIATED_TEXT,
+                )) as u8,
+            modify_other_keys: payload.modify_other_keys.min(3) as u8,
+            format_other_keys: payload.format_other_keys,
         };
         Ok(snapshot)
     }
@@ -749,6 +787,8 @@ pub struct TerminalKeyEvent {
     pub super_key: bool,
     #[prost(bool, tag = "8")]
     pub pressed: bool,
+    #[prost(bool, tag = "9")]
+    pub repeated: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -965,6 +1005,7 @@ impl TryFrom<&KeyEvent> for TerminalKeyEvent {
             shift: event.modifiers.shift,
             super_key: event.modifiers.super_key,
             pressed: event.pressed,
+            repeated: event.repeated,
         })
     }
 }
@@ -1021,6 +1062,7 @@ impl TryFrom<&TerminalKeyEvent> for KeyEvent {
                 super_key: event.super_key,
             },
             pressed: event.pressed,
+            repeated: event.repeated,
         })
     }
 }
@@ -1415,6 +1457,7 @@ mod tests {
                 super_key: false,
             },
             pressed: true,
+            repeated: true,
         });
         let request = TerminalInputRequest::from_action(session_id, &action).unwrap();
         assert_eq!(request.decode_action().unwrap(), action);
@@ -1454,6 +1497,10 @@ mod tests {
             terminal_modes: TerminalModes {
                 application_cursor: true,
                 bracketed_paste: true,
+                kitty_keyboard_flags: TerminalModes::KITTY_DISAMBIGUATE
+                    | TerminalModes::KITTY_REPORT_EVENTS,
+                modify_other_keys: 2,
+                format_other_keys: true,
             },
             cells: vec![
                 Cell::with_zerowidth(
@@ -1492,6 +1539,9 @@ mod tests {
             cursor_appearance: None,
             application_cursor: false,
             bracketed_paste: false,
+            kitty_keyboard_flags: 0,
+            modify_other_keys: 0,
+            format_other_keys: false,
             cells: vec![TerminalCell {
                 scalar: u32::from('A'),
                 style: None,
@@ -1523,6 +1573,9 @@ mod tests {
             cursor_appearance: None,
             application_cursor: false,
             bracketed_paste: false,
+            kitty_keyboard_flags: 0,
+            modify_other_keys: 0,
+            format_other_keys: false,
             cells: Vec::new(),
         };
         let frame = FullFrame {
@@ -1554,6 +1607,9 @@ mod tests {
                 cursor_appearance: None,
                 application_cursor: false,
                 bracketed_paste: false,
+                kitty_keyboard_flags: 0,
+                modify_other_keys: 0,
+                format_other_keys: false,
                 cells: vec![cell],
             }
             .encode_to_vec(),
@@ -1629,6 +1685,9 @@ mod tests {
                 }),
                 application_cursor: false,
                 bracketed_paste: false,
+                kitty_keyboard_flags: 0,
+                modify_other_keys: 0,
+                format_other_keys: false,
                 cells: vec![TerminalCell {
                     scalar: u32::from('A'),
                     style: None,
