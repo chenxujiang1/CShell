@@ -1,4 +1,4 @@
-use crate::{LogSurfaceFrame, TerminalDecorations, TerminalSurfaceFrame};
+use crate::{LogDecorations, LogSurfaceFrame, TerminalDecorations, TerminalSurfaceFrame};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style as FontStyle, SwashCache,
@@ -686,8 +686,16 @@ pub fn benchmark_log_geometry(
         height: height.max(1),
     };
 
+    let decorations = LogDecorations::default();
     let cold_started = Instant::now();
-    let vertices = build_log_vertices(frame, &mut atlas, viewport.width, viewport.height, viewport);
+    let vertices = build_log_vertices(
+        frame,
+        &mut atlas,
+        viewport.width,
+        viewport.height,
+        viewport,
+        &decorations,
+    );
     std::hint::black_box(&vertices);
     let cold = cold_started.elapsed();
     let atlas_upload_bytes = atlas
@@ -703,6 +711,7 @@ pub fn benchmark_log_geometry(
             viewport.width,
             viewport.height,
             viewport,
+            &decorations,
         ));
     }
     let warm_per_iteration = warm_started.elapsed() / iterations;
@@ -789,6 +798,7 @@ enum GeometryKey {
     Log {
         source_id: u64,
         revision: u64,
+        decorations_revision: u64,
         surface_width: u32,
         surface_height: u32,
         viewport: TerminalViewport,
@@ -806,7 +816,10 @@ enum GeometryFrame<'a> {
         decorations: &'a TerminalDecorations,
         cursor_visible: bool,
     },
-    Log(Option<&'a LogSurfaceFrame>),
+    Log {
+        frame: Option<&'a LogSurfaceFrame>,
+        decorations: &'a LogDecorations,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -1094,9 +1107,14 @@ impl WindowRenderer {
         &mut self,
         frame: Option<&LogSurfaceFrame>,
         viewport: TerminalViewport,
+        decorations: &LogDecorations,
         egui_frame: Option<EguiFrame<'_>>,
     ) -> Result<RenderOutcome, WindowRendererError> {
-        self.render_inner(GeometryFrame::Log(frame), viewport, egui_frame)
+        self.render_inner(
+            GeometryFrame::Log { frame, decorations },
+            viewport,
+            egui_frame,
+        )
     }
 
     fn render_inner(
@@ -1132,8 +1150,12 @@ impl WindowRenderer {
                 decorations,
                 cursor_visible,
             } => self.update_geometry(frame, viewport, decorations, cursor_visible),
-            GeometryFrame::Log(Some(frame)) => self.update_log_geometry(frame, viewport),
-            GeometryFrame::Terminal { frame: None, .. } | GeometryFrame::Log(None) => {
+            GeometryFrame::Log {
+                frame: Some(frame),
+                decorations,
+            } => self.update_log_geometry(frame, viewport, decorations),
+            GeometryFrame::Terminal { frame: None, .. }
+            | GeometryFrame::Log { frame: None, .. } => {
                 self.vertex_count = 0;
                 self.geometry_key = None;
             }
@@ -1273,10 +1295,16 @@ impl WindowRenderer {
         self.upload_geometry(vertices, key);
     }
 
-    fn update_log_geometry(&mut self, frame: &LogSurfaceFrame, viewport: TerminalViewport) {
+    fn update_log_geometry(
+        &mut self,
+        frame: &LogSurfaceFrame,
+        viewport: TerminalViewport,
+        decorations: &LogDecorations,
+    ) {
         let key = GeometryKey::Log {
             source_id: frame.page.source_id.0,
             revision: frame.page.revision,
+            decorations_revision: decorations.revision,
             surface_width: self.config.width,
             surface_height: self.config.height,
             viewport,
@@ -1295,6 +1323,7 @@ impl WindowRenderer {
             self.config.width,
             self.config.height,
             viewport,
+            decorations,
         );
         self.upload_geometry(vertices, key);
     }
@@ -1627,6 +1656,7 @@ fn build_log_vertices(
     width: u32,
     height: u32,
     viewport: TerminalViewport,
+    decorations: &LogDecorations,
 ) -> Vec<Vertex> {
     atlas.begin_frame();
     let rows = frame.visible_rows.clone();
@@ -1664,12 +1694,17 @@ fn build_log_vertices(
         let Some(text) = row.text.get(start_byte..end_byte) else {
             continue;
         };
+        let active_search = decorations
+            .active_search_match
+            .as_ref()
+            .filter(|matched| matched.line_id == row.line_id);
         let mut cell_column = visual_row.start_cell;
         let mut style_index = row
             .style_spans
             .partition_point(|span| span.byte_range.end as usize <= start_byte);
         for (relative_byte_index, grapheme) in text.grapheme_indices(true) {
             let byte_index = start_byte + relative_byte_index;
+            let grapheme_end = byte_index.saturating_add(grapheme.len());
             while row
                 .style_spans
                 .get(style_index)
@@ -1707,6 +1742,13 @@ fn build_log_vertices(
             let mut background = resolve_color(style.background, false);
             if style.inverse {
                 std::mem::swap(&mut foreground, &mut background);
+            }
+            if active_search.is_some_and(|matched| {
+                (matched.byte_range.start as usize) < grapheme_end
+                    && byte_index < matched.byte_range.end as usize
+            }) {
+                foreground = [0.05, 0.05, 0.05, 1.0];
+                background = [1.0, 0.72, 0.12, 0.92];
             }
             let span_width = atlas.cell_width * columns as f32;
             if background[3] > 0.0 {
@@ -1878,9 +1920,9 @@ mod tests {
         build_log_vertices, build_vertices, xterm_color,
     };
     use crate::{
-        LogPage, LogRow, LogSourceId, LogStyleSpan, LogSurfaceFrame, LogSurfaceModel, LogVisualRow,
-        TerminalCellPoint, TerminalDecorations, TerminalSearchMatch, TerminalSearchResult,
-        TerminalSelection, TerminalSelectionMode,
+        LogDecorations, LogPage, LogRow, LogSearchMatch, LogSourceId, LogStyleSpan,
+        LogSurfaceFrame, LogSurfaceModel, LogVisualRow, TerminalCellPoint, TerminalDecorations,
+        TerminalSearchMatch, TerminalSearchResult, TerminalSelection, TerminalSelectionMode,
     };
     use cosmic_text::{CacheKey, CacheKeyFlags, SwashContent, Weight, fontdb};
     use cshell_terminal::{
@@ -2154,14 +2196,48 @@ mod tests {
             new_lines_available: 0,
         };
 
-        let vertices = build_log_vertices(&frame, &mut atlas, 200, 100, viewport);
+        let vertices = build_log_vertices(
+            &frame,
+            &mut atlas,
+            200,
+            100,
+            viewport,
+            &LogDecorations::default(),
+        );
         assert_eq!(vertices.len(), 24);
+
+        let highlighted = build_log_vertices(
+            &frame,
+            &mut atlas,
+            200,
+            100,
+            viewport,
+            &LogDecorations {
+                revision: 1,
+                active_search_match: Some(LogSearchMatch {
+                    line_id: 9,
+                    byte_range: 1..4,
+                }),
+            },
+        );
+        assert_eq!(highlighted.len(), 30);
+        assert!(highlighted.chunks_exact(6).any(|quad| {
+            quad.iter()
+                .all(|vertex| vertex.color == [1.0, 0.72, 0.12, 0.92])
+        }));
 
         let clipped = LogSurfaceFrame {
             cell_offset: 1,
             ..frame
         };
-        let vertices = build_log_vertices(&clipped, &mut atlas, 200, 100, viewport);
+        let vertices = build_log_vertices(
+            &clipped,
+            &mut atlas,
+            200,
+            100,
+            viewport,
+            &LogDecorations::default(),
+        );
         assert_eq!(vertices.len(), 6);
     }
 
@@ -2201,6 +2277,7 @@ mod tests {
                 width: 200,
                 height: 100,
             },
+            &LogDecorations::default(),
         );
         assert_eq!(vertices.len(), 24);
     }

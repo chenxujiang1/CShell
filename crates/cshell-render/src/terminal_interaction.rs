@@ -217,6 +217,22 @@ pub fn search_terminal_snapshot(
     })
 }
 
+pub fn validate_terminal_search_query(
+    query: &str,
+    options: TerminalSearchOptions,
+) -> Result<(), TerminalInteractionError> {
+    if query.len() > MAX_TERMINAL_SEARCH_QUERY_BYTES {
+        return Err(TerminalInteractionError::SearchQueryTooLong {
+            actual: query.len(),
+            maximum: MAX_TERMINAL_SEARCH_QUERY_BYTES,
+        });
+    }
+    if !query.is_empty() {
+        let _matcher = build_search_regex(query, options)?;
+    }
+    Ok(())
+}
+
 fn build_search_regex(
     query: &str,
     options: TerminalSearchOptions,

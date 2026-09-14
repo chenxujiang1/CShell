@@ -11,15 +11,16 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub use log_surface::{
-    LogPage, LogPageRequest, LogReflowLayout, LogReflowRequest, LogRow, LogScrollbarState,
-    LogSourceId, LogStyleSpan, LogSurfaceError, LogSurfaceFrame, LogSurfaceModel, LogVisualRow,
-    MAX_LOG_PAGE_ROWS, MAX_LOG_PAGE_STYLE_SPANS, MAX_LOG_PAGE_TEXT_BYTES, MAX_LOG_REFLOW_ROWS,
+    LogDecorations, LogPage, LogPageRequest, LogReflowLayout, LogReflowRequest, LogRow,
+    LogScrollbarState, LogSearchMatch, LogSourceId, LogStyleSpan, LogSurfaceError, LogSurfaceFrame,
+    LogSurfaceModel, LogVisualRow, MAX_LOG_PAGE_ROWS, MAX_LOG_PAGE_STYLE_SPANS,
+    MAX_LOG_PAGE_TEXT_BYTES, MAX_LOG_REFLOW_ROWS,
 };
 pub use terminal_interaction::{
     MAX_TERMINAL_SEARCH_MATCHES, MAX_TERMINAL_SEARCH_QUERY_BYTES, MAX_TERMINAL_SELECTION_BYTES,
     TerminalCellPoint, TerminalDecorations, TerminalInteractionError, TerminalSearchMatch,
     TerminalSearchOptions, TerminalSearchResult, TerminalSelection, TerminalSelectionMode,
-    search_terminal_snapshot,
+    search_terminal_snapshot, validate_terminal_search_query,
 };
 pub use window::{
     AtlasPressureBenchmarkReport, EguiFrame, LogGeometryBenchmarkReport, RenderOutcome,

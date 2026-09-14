@@ -28,6 +28,18 @@ pub struct LogStyleSpan {
     pub style: Style,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LogDecorations {
+    pub revision: u64,
+    pub active_search_match: Option<LogSearchMatch>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogSearchMatch {
+    pub line_id: u64,
+    pub byte_range: Range<u32>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogPage {
     pub source_id: LogSourceId,
@@ -112,6 +124,7 @@ pub struct LogSurfaceModel {
     pending_scroll_rows: i32,
     last_viewport_rows: u16,
     pending_page_anchor: Option<(u64, u32)>,
+    pending_search_anchor: Option<(u64, u32)>,
     page_request_dirty: bool,
     last_page_request: Option<LogPageRequest>,
 }
@@ -137,6 +150,7 @@ impl LogSurfaceModel {
             pending_scroll_rows: 0,
             last_viewport_rows: 0,
             pending_page_anchor: None,
+            pending_search_anchor: None,
             page_request_dirty: false,
             last_page_request: None,
         }
@@ -159,6 +173,7 @@ impl LogSurfaceModel {
         self.new_lines_available = 0;
         self.pending_scroll_rows = 0;
         self.pending_page_anchor = None;
+        self.pending_search_anchor = None;
     }
 
     pub fn anchor(&mut self, line_id: u64, cell_offset: u32) {
@@ -171,6 +186,7 @@ impl LogSurfaceModel {
         self.new_lines_available = 0;
         self.pending_scroll_rows = 0;
         self.pending_page_anchor = None;
+        self.pending_search_anchor = None;
     }
 
     /// Requests an arbitrary logical line without blanking the currently
@@ -199,11 +215,31 @@ impl LogSurfaceModel {
         true
     }
 
+    /// Jumps to the wrapped visual segment containing a UTF-8 byte offset.
+    /// If the line is not loaded yet, paging first anchors the logical line and
+    /// the byte position is promoted after the current-width reflow arrives.
+    pub fn jump_to_byte(&mut self, line_id: u64, byte_offset: u32) -> bool {
+        if let Some(cell_offset) = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.cell_offset_for_byte(line_id, byte_offset))
+        {
+            self.anchor(line_id, cell_offset);
+            return true;
+        }
+        let accepted = self.jump_to_line(line_id, 0);
+        if accepted {
+            self.pending_search_anchor = Some((line_id, byte_offset));
+        }
+        accepted
+    }
+
     /// Moves the top of the viewport by visual rows. Positive values move
     /// toward the tail; negative values move into history.
     pub fn scroll_visual_rows(&mut self, delta: i32, viewport_rows: u16) -> bool {
         self.last_viewport_rows = viewport_rows;
         self.pending_page_anchor = None;
+        self.pending_search_anchor = None;
         if delta == 0 {
             return false;
         }
@@ -385,6 +421,19 @@ impl LogSurfaceModel {
                 cell_offset,
             };
             self.pending_page_anchor = None;
+            self.new_lines_available = 0;
+        }
+        if let Some((line_id, byte_offset)) = self.pending_search_anchor
+            && let Some(cell_offset) = self
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.cell_offset_for_byte(line_id, byte_offset))
+        {
+            self.mode = ScrollMode::Anchored {
+                line_id,
+                cell_offset,
+            };
+            self.pending_search_anchor = None;
             self.new_lines_available = 0;
         }
         let pending_scroll = std::mem::take(&mut self.pending_scroll_rows);
@@ -641,6 +690,23 @@ impl LogReflowLayout {
             })
             .map(|position| range.start + position)
             .or_else(|| range.end.checked_sub(1))
+    }
+
+    fn cell_offset_for_byte(&self, line_id: u64, byte_offset: u32) -> Option<u32> {
+        let logical_row = self
+            .page
+            .rows
+            .binary_search_by_key(&line_id, |row| row.line_id)
+            .ok()? as u32;
+        let range = self
+            .visual_rows
+            .partition_point(|row| row.logical_row_index < logical_row)
+            ..self
+                .visual_rows
+                .partition_point(|row| row.logical_row_index <= logical_row);
+        self.visual_rows.get(range)?.iter().find_map(|row| {
+            (row.start_byte <= byte_offset && byte_offset < row.end_byte).then_some(row.start_cell)
+        })
     }
 }
 
@@ -1110,6 +1176,34 @@ mod tests {
         let frame = surface.prepare_frame(5).unwrap();
         assert_eq!(frame.page.revision, 2);
         assert_eq!(surface.scrollbar_state(5).unwrap().top_line_id, 900);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn search_byte_jump_promotes_the_wrapped_segment_after_page_and_reflow_arrive() {
+        let mut surface = LogSurfaceModel::new(0);
+        surface.submit_page(page(1, 1..11, 100)).unwrap();
+        let initial = surface.request_reflow(4).unwrap().execute().unwrap();
+        assert!(surface.submit_reflow(initial));
+
+        assert!(surface.jump_to_byte(50, 6));
+        let request = surface.take_page_request(2).unwrap();
+        assert_eq!(request.anchor_line_id, 50);
+        assert_eq!(request.cell_offset, 0);
+
+        let target = page(2, 50..51, 100);
+        surface.submit_page(target).unwrap();
+        let reflow = surface.request_reflow(4).unwrap().execute().unwrap();
+        assert!(surface.submit_reflow(reflow));
+        assert_eq!(
+            surface.mode(),
+            ScrollMode::Anchored {
+                line_id: 50,
+                cell_offset: 4,
+            }
+        );
+        let frame = surface.prepare_frame(2).unwrap();
+        assert_eq!(frame.cell_offset, 4);
     }
 
     #[test]

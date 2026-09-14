@@ -1,11 +1,12 @@
 use cshell_domain::{InputAction, SessionId, TerminalSize};
 use cshell_ipc::{
-    ClientFrameUpdate, DiscoveryRecord, Envelope, Handshake, LogPage as IpcLogPage,
-    LogPageCodecError, LogPageRequest as IpcLogPageRequest, RuntimePaths, SnapshotCodecError,
-    SubscriptionClientError, TerminalControlCodecError, TerminalControlResponse,
-    TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest,
-    TerminalSubscriptionReplica, client_handshake, envelope, features, read_envelope, transport,
-    write_envelope,
+    ClientFrameUpdate, DiscoveryRecord, Envelope, Handshake, HistorySearchCodecError,
+    HistorySearchDirection, HistorySearchRequest as IpcHistorySearchRequest,
+    HistorySearchResult as IpcHistorySearchResult, LogPage as IpcLogPage, LogPageCodecError,
+    LogPageRequest as IpcLogPageRequest, RuntimePaths, SnapshotCodecError, SubscriptionClientError,
+    TerminalControlCodecError, TerminalControlResponse, TerminalControlStatus,
+    TerminalInputRequest, TerminalResizeRequest, TerminalSubscriptionReplica, client_handshake,
+    envelope, features, read_envelope, transport, write_envelope,
 };
 use cshell_render::{
     LogPage as RenderLogPage, LogPageRequest as RenderLogPageRequest, LogRow as RenderLogRow,
@@ -49,6 +50,7 @@ pub struct DesktopDaemonView {
     pub session_title: Option<String>,
     pub log_page: Option<Arc<RenderLogPage>>,
     pub control_error: Option<String>,
+    pub history_search: Option<Arc<DesktopHistorySearchResponse>>,
 }
 
 #[derive(Debug)]
@@ -56,6 +58,7 @@ pub struct DesktopDaemonConnection {
     shared: Arc<Mutex<DesktopDaemonView>>,
     shutdown: tokio::sync::watch::Sender<bool>,
     log_requests: tokio::sync::watch::Sender<Option<DesktopLogPageRequest>>,
+    history_search_requests: tokio::sync::watch::Sender<Option<DesktopHistorySearchRequest>>,
     input_requests: tokio::sync::mpsc::Sender<InputAction>,
     resize_requests: tokio::sync::watch::Sender<Option<TerminalSize>>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -67,6 +70,30 @@ struct DesktopLogPageRequest {
     cell_offset: u32,
     rows_before: u16,
     rows_after: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopHistorySearchRequest {
+    pub revision: u64,
+    pub query: String,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+    pub direction: HistorySearchDirection,
+    pub cursor: Option<(u64, u32)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DesktopHistorySearchResponse {
+    pub revision: u64,
+    pub result: IpcHistorySearchResult,
+}
+
+struct DesktopRequestReceivers<'a> {
+    log_pages: &'a mut tokio::sync::watch::Receiver<Option<DesktopLogPageRequest>>,
+    history_search: &'a mut tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
+    input: &'a mut tokio::sync::mpsc::Receiver<InputAction>,
+    resize: &'a mut tokio::sync::watch::Receiver<Option<TerminalSize>>,
 }
 
 #[derive(Debug, Error)]
@@ -91,12 +118,16 @@ pub enum DesktopConnectionError {
     InvalidSessionId,
     #[error("daemon did not negotiate bounded log paging")]
     LogPagingNotNegotiated,
+    #[error("daemon did not negotiate bounded history search")]
+    HistorySearchNotNegotiated,
     #[error("daemon did not negotiate terminal input and resize control")]
     TerminalControlNotNegotiated,
     #[error("terminal control request is invalid: {0}")]
     InvalidTerminalControl(#[from] TerminalControlCodecError),
     #[error("daemon returned an invalid log page: {0}")]
     InvalidLogPage(#[from] LogPageCodecError),
+    #[error("daemon returned an invalid history search result: {0}")]
+    InvalidHistorySearch(#[from] HistorySearchCodecError),
     #[error("daemon returned an invalid log style: {0}")]
     InvalidLogStyle(#[from] SnapshotCodecError),
     #[error("cannot discover the per-user daemon: {0}")]
@@ -218,6 +249,8 @@ impl DesktopDaemonConnection {
         }));
         let (shutdown, worker_shutdown) = tokio::sync::watch::channel(false);
         let (log_requests, worker_log_requests) = tokio::sync::watch::channel(None);
+        let (history_search_requests, worker_history_search_requests) =
+            tokio::sync::watch::channel(None);
         let (input_requests, worker_input_requests) = tokio::sync::mpsc::channel(256);
         let (resize_requests, worker_resize_requests) = tokio::sync::watch::channel(None);
         let worker_shared = Arc::clone(&shared);
@@ -233,6 +266,7 @@ impl DesktopDaemonConnection {
                         worker_shared,
                         worker_shutdown,
                         worker_log_requests,
+                        worker_history_search_requests,
                         worker_input_requests,
                         worker_resize_requests,
                     )),
@@ -244,6 +278,7 @@ impl DesktopDaemonConnection {
             shared,
             shutdown,
             log_requests,
+            history_search_requests,
             input_requests,
             resize_requests,
             worker: Some(worker),
@@ -274,6 +309,28 @@ impl DesktopDaemonConnection {
                 false
             } else {
                 *current = Some(request);
+                true
+            }
+        })
+    }
+
+    pub fn request_history_search(&self, request: DesktopHistorySearchRequest) -> bool {
+        self.history_search_requests.send_if_modified(|current| {
+            if *current == Some(request.clone()) {
+                false
+            } else {
+                *current = Some(request);
+                true
+            }
+        })
+    }
+
+    pub fn cancel_history_search(&self) -> bool {
+        self.history_search_requests.send_if_modified(|current| {
+            if current.is_none() {
+                false
+            } else {
+                *current = None;
                 true
             }
         })
@@ -334,6 +391,7 @@ async fn reconnect_loop(
     shared: Arc<Mutex<DesktopDaemonView>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     mut log_requests: tokio::sync::watch::Receiver<Option<DesktopLogPageRequest>>,
+    mut history_search_requests: tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
     mut input_requests: tokio::sync::mpsc::Receiver<InputAction>,
     mut resize_requests: tokio::sync::watch::Receiver<Option<TerminalSize>>,
 ) {
@@ -352,10 +410,13 @@ async fn reconnect_loop(
             &config,
             &shared,
             &mut shutdown,
-            &mut log_requests,
             &mut log_delivery_revision,
-            &mut input_requests,
-            &mut resize_requests,
+            DesktopRequestReceivers {
+                log_pages: &mut log_requests,
+                history_search: &mut history_search_requests,
+                input: &mut input_requests,
+                resize: &mut resize_requests,
+            },
         )
         .await;
         if *shutdown.borrow() {
@@ -414,12 +475,10 @@ async fn connect_once(
     config: &DesktopConnectionConfig,
     shared: &Arc<Mutex<DesktopDaemonView>>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
-    log_requests: &mut tokio::sync::watch::Receiver<Option<DesktopLogPageRequest>>,
     log_delivery_revision: &mut u64,
-    input_requests: &mut tokio::sync::mpsc::Receiver<InputAction>,
-    resize_requests: &mut tokio::sync::watch::Receiver<Option<TerminalSize>>,
+    requests: DesktopRequestReceivers<'_>,
 ) -> Result<(), DesktopConnectionError> {
-    while input_requests.try_recv().is_ok() {}
+    while requests.input.try_recv().is_ok() {}
     let resolved = config.resolve()?;
     #[cfg(windows)]
     let mut stream = transport::connect(&resolved.endpoint)
@@ -455,7 +514,7 @@ async fn connect_once(
     let mut replica = TerminalSubscriptionReplica::new(session_id);
     write_snapshot_request(&mut stream, request_id, replica.snapshot_request()).await?;
     request_id = request_id.saturating_add(1);
-    if let Some(size) = *resize_requests.borrow_and_update() {
+    if let Some(size) = *requests.resize.borrow_and_update() {
         write_resize_request(&mut stream, request_id, session_id, size).await?;
         request_id = request_id.saturating_add(1);
     }
@@ -467,24 +526,34 @@ async fn connect_once(
         session_id,
         shared,
         log_shutdown,
-        log_requests,
+        requests.log_pages,
         log_delivery_revision,
     );
     tokio::pin!(log_pages);
+    let history_search = serve_history_search_if_enabled(
+        config.request_log_pages,
+        &resolved,
+        session_id,
+        shared,
+        shutdown.clone(),
+        requests.history_search,
+    );
+    tokio::pin!(history_search);
     loop {
         let envelope = tokio::select! {
             envelope = read_envelope(&mut stream) => envelope?,
             result = &mut log_pages => return result,
-            Some(action) = input_requests.recv() => {
+            result = &mut history_search => return result,
+            Some(action) = requests.input.recv() => {
                 write_input_request(&mut stream, request_id, session_id, &action).await?;
                 request_id = request_id.saturating_add(1);
                 continue;
             }
-            changed = resize_requests.changed() => {
+            changed = requests.resize.changed() => {
                 if changed.is_err() {
                     return Ok(());
                 }
-                if let Some(size) = *resize_requests.borrow_and_update() {
+                if let Some(size) = *requests.resize.borrow_and_update() {
                     write_resize_request(&mut stream, request_id, session_id, size).await?;
                     request_id = request_id.saturating_add(1);
                 }
@@ -627,6 +696,136 @@ async fn serve_log_pages_if_enabled(
         attempt = attempt.saturating_add(1);
         tokio::select! {
             () = tokio::time::sleep(Duration::from_millis(delay)) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+async fn serve_history_search_if_enabled(
+    enabled: bool,
+    resolved: &ResolvedDesktopEndpoint,
+    session_id: SessionId,
+    shared: &Arc<Mutex<DesktopDaemonView>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    requests: &mut tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
+) -> Result<(), DesktopConnectionError> {
+    if !enabled {
+        return std::future::pending().await;
+    }
+    let delays = [100_u64, 250, 500, 1_000, 2_000, 5_000];
+    let mut attempt = 0_usize;
+    loop {
+        let result =
+            history_search_loop(resolved, session_id, shared, shutdown.clone(), requests).await;
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        if let Err(error) = result {
+            tracing::warn!(%error, "dedicated history search connection failed; retrying");
+        } else {
+            attempt = 0;
+        }
+        let delay = delays[attempt.min(delays.len() - 1)];
+        attempt = attempt.saturating_add(1);
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(delay)) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+async fn history_search_loop(
+    resolved: &ResolvedDesktopEndpoint,
+    session_id: SessionId,
+    shared: &Arc<Mutex<DesktopDaemonView>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    requests: &mut tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
+) -> Result<(), DesktopConnectionError> {
+    #[cfg(windows)]
+    let mut stream = transport::connect(&resolved.endpoint)
+        .await
+        .map_err(DesktopConnectionError::Connect)?;
+    #[cfg(unix)]
+    let mut stream = transport::connect(&resolved.endpoint)
+        .await
+        .map_err(DesktopConnectionError::Connect)?;
+    let mut handshake = Handshake::new(
+        resolved.daemon_instance_id.to_vec(),
+        resolved.instance_token.to_vec(),
+    );
+    handshake.feature_bits = features::HISTORY_SEARCH;
+    let negotiated = client_handshake(&mut stream, 1, handshake).await?;
+    if negotiated.feature_bits & features::HISTORY_SEARCH == 0 {
+        return Err(DesktopConnectionError::HistorySearchNotNegotiated);
+    }
+
+    let mut request_id = 2_u64;
+    loop {
+        let desired = loop {
+            if let Some(request) = requests.borrow_and_update().clone() {
+                break request;
+            }
+            tokio::select! {
+                changed = requests.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return Ok(());
+                    }
+                }
+            }
+        };
+        write_history_search_request(&mut stream, request_id, session_id, &desired).await?;
+        let mut response = tokio::select! {
+            response = read_envelope(&mut stream) => response?,
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        if response.request_id != request_id {
+            return Err(DesktopConnectionError::UnexpectedControlResponse);
+        }
+        let Some(envelope::Payload::HistorySearchResult(result)) = response.payload.take() else {
+            return Err(DesktopConnectionError::UnexpectedControlResponse);
+        };
+        result.validate()?;
+        if result.session_id.as_slice() != session_id.as_uuid().as_bytes() {
+            return Err(DesktopConnectionError::InvalidSessionId);
+        }
+        if requests
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| current.revision == desired.revision)
+        {
+            update_history_search(
+                shared,
+                DesktopHistorySearchResponse {
+                    revision: desired.revision,
+                    result,
+                },
+            );
+        }
+        request_id = request_id.saturating_add(1);
+        tokio::select! {
+            changed = requests.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+            }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     return Ok(());
@@ -824,6 +1023,43 @@ where
     .await
 }
 
+async fn write_history_search_request<S>(
+    stream: &mut S,
+    request_id: u64,
+    session_id: SessionId,
+    request: &DesktopHistorySearchRequest,
+) -> Result<(), DesktopConnectionError>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let (cursor_line_id, cursor_byte_offset) = request
+        .cursor
+        .map_or((None, None), |cursor| (Some(cursor.0), Some(cursor.1)));
+    let request = IpcHistorySearchRequest {
+        session_id: session_id.as_uuid().as_bytes().to_vec(),
+        query: request.query.clone(),
+        case_sensitive: request.case_sensitive,
+        whole_word: request.whole_word,
+        regex: request.regex,
+        direction: request.direction as i32,
+        cursor_line_id,
+        cursor_byte_offset,
+        max_scan_lines: cshell_ipc::MAX_HISTORY_SEARCH_SCAN_LINES as u32,
+        max_matches: 1,
+    };
+    request.validate()?;
+    write_envelope(
+        stream,
+        &Envelope {
+            request_id,
+            deadline_unix_ms: 0,
+            payload: Some(envelope::Payload::HistorySearchRequest(request)),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 fn convert_log_page(
     page: IpcLogPage,
     delivery_revision: u64,
@@ -904,6 +1140,16 @@ fn update_log_page(shared: &Arc<Mutex<DesktopDaemonView>>, page: Arc<RenderLogPa
         .log_page = Some(page);
 }
 
+fn update_history_search(
+    shared: &Arc<Mutex<DesktopDaemonView>>,
+    response: DesktopHistorySearchResponse,
+) {
+    shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .history_search = Some(Arc::new(response));
+}
+
 fn update_terminal_control(
     shared: &Arc<Mutex<DesktopDaemonView>>,
     session_id: SessionId,
@@ -956,15 +1202,17 @@ fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
 mod tests {
     use super::{
         DesktopConnectionConfig, DesktopDaemonConnection, DesktopEndpointSource,
-        DesktopLogPageRequest, ResolvedDesktopEndpoint, convert_log_page, decode_hex,
-        discover_or_create_session, log_page_loop, update_terminal_control,
+        DesktopHistorySearchRequest, DesktopLogPageRequest, ResolvedDesktopEndpoint,
+        convert_log_page, decode_hex, discover_or_create_session, history_search_loop,
+        log_page_loop, update_terminal_control,
     };
     use cshell_domain::{InputAction, SessionId, TerminalSize};
     use cshell_ipc::{
-        DiscoveryPublication, DiscoveryRecord, Envelope, HandshakePolicy, LogPage, LogRow,
-        LogStyleSpan, RuntimePaths, SessionCreateResponse, SessionListResponse, SessionSummary,
-        TerminalControlResponse, TerminalControlStatus, TerminalStyle, envelope, features,
-        read_envelope, server_handshake, transport, write_envelope,
+        DiscoveryPublication, DiscoveryRecord, Envelope, HandshakePolicy, HistorySearchDirection,
+        HistorySearchMatch, HistorySearchResult, LogPage, LogRow, LogStyleSpan, RuntimePaths,
+        SessionCreateResponse, SessionListResponse, SessionSummary, TerminalControlResponse,
+        TerminalControlStatus, TerminalStyle, envelope, features, read_envelope, server_handshake,
+        transport, write_envelope,
     };
     use cshell_local::{LocalProfile, WorkingDirectoryPolicy};
     use cshell_terminal::{Color, Style};
@@ -1087,7 +1335,8 @@ mod tests {
         let supported_features = features::FULL_FRAME_RECOVERY
             | features::PRIORITY_STREAMS
             | features::LOG_PAGING
-            | features::TERMINAL_CONTROL;
+            | features::TERMINAL_CONTROL
+            | features::HISTORY_SEARCH;
         let server = Arc::new(SessionIpcServer::new(
             listener,
             HandshakePolicy::with_instance_id(token, daemon_instance_id, supported_features),
@@ -1105,7 +1354,7 @@ mod tests {
                 daemon_instance_id,
             }),
             session_id: Some(session_id),
-            request_log_pages: false,
+            request_log_pages: true,
         })
         .unwrap_or_else(|error| panic!("desktop connection worker must start: {error}"));
 
@@ -1155,6 +1404,39 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+
+        assert!(
+            connection.request_history_search(DesktopHistorySearchRequest {
+                revision: 77,
+                query: MARKER.to_owned(),
+                case_sensitive: true,
+                whole_word: false,
+                regex: false,
+                direction: HistorySearchDirection::Backward,
+                cursor: None,
+            })
+        );
+        let search_deadline = tokio::time::Instant::now() + PTY_E2E_TIMEOUT;
+        loop {
+            let view = connection.view();
+            if view.history_search.as_ref().is_some_and(|response| {
+                response.revision == 77
+                    && response
+                        .result
+                        .matches
+                        .first()
+                        .is_some_and(|matched| matched.line_id > 0)
+            }) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < search_deadline,
+                "desktop history search did not find executed PTY output: {}",
+                view.detail
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(connection.cancel_history_search());
 
         drop(connection);
         server_shutdown
@@ -1417,6 +1699,168 @@ mod tests {
         server
             .await
             .unwrap_or_else(|error| panic!("log server task must join: {error}"));
+    }
+
+    #[tokio::test]
+    async fn dedicated_history_connection_drops_a_superseded_response() {
+        let session_id = SessionId::new();
+        let token = [0x6b; 32];
+        let daemon_instance_id = [0x44; 16];
+        #[cfg(windows)]
+        let listener = transport::LocalListener::bind(format!(
+            r"\\.\pipe\cshell-history-search-test-{}",
+            std::process::id()
+        ))
+        .unwrap_or_else(|error| panic!("test pipe must bind: {error}"));
+        #[cfg(windows)]
+        let resolved = ResolvedDesktopEndpoint {
+            endpoint: format!(
+                r"\\.\pipe\cshell-history-search-test-{}",
+                std::process::id()
+            ),
+            instance_token: token,
+            daemon_instance_id,
+        };
+        #[cfg(unix)]
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must be created: {error}"));
+        #[cfg(unix)]
+        let socket_path = directory.path().join("history-search.sock");
+        #[cfg(unix)]
+        let listener = transport::LocalListener::bind(&socket_path)
+            .unwrap_or_else(|error| panic!("test socket must bind: {error}"));
+        #[cfg(unix)]
+        let resolved = ResolvedDesktopEndpoint {
+            endpoint: socket_path,
+            instance_token: token,
+            daemon_instance_id,
+        };
+
+        let (first_received, mut first_observed) = tokio::sync::watch::channel(false);
+        let (release_first, mut first_release) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(async move {
+            let mut stream = listener
+                .accept()
+                .await
+                .unwrap_or_else(|error| panic!("history client must connect: {error}"));
+            server_handshake(
+                &mut stream,
+                &HandshakePolicy::with_instance_id(
+                    token,
+                    daemon_instance_id,
+                    features::HISTORY_SEARCH,
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("history handshake must pass: {error}"));
+            for (query, line_id) in [("old", 10_u64), ("new", 20_u64)] {
+                let request = read_envelope(&mut stream)
+                    .await
+                    .unwrap_or_else(|error| panic!("history request must decode: {error}"));
+                let Some(envelope::Payload::HistorySearchRequest(search)) = request.payload else {
+                    panic!("dedicated connection must carry history search requests");
+                };
+                assert_eq!(search.query, query);
+                if query == "old" {
+                    first_received
+                        .send(true)
+                        .unwrap_or_else(|_| panic!("test observer must remain available"));
+                    first_release
+                        .wait_for(|released| *released)
+                        .await
+                        .unwrap_or_else(|_| panic!("first response release must remain available"));
+                }
+                write_envelope(
+                    &mut stream,
+                    &Envelope {
+                        request_id: request.request_id,
+                        deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::HistorySearchResult(
+                            HistorySearchResult {
+                                session_id: session_id.as_uuid().as_bytes().to_vec(),
+                                revision: 9,
+                                matches: vec![HistorySearchMatch {
+                                    line_id,
+                                    byte_start: 0,
+                                    byte_end: 3,
+                                }],
+                                scanned_lines: 1,
+                                next_line_id: None,
+                                next_byte_offset: None,
+                                incomplete: false,
+                            },
+                        )),
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("history response must encode: {error}"));
+            }
+        });
+
+        let request = |revision, query: &str| DesktopHistorySearchRequest {
+            revision,
+            query: query.to_owned(),
+            case_sensitive: false,
+            whole_word: false,
+            regex: false,
+            direction: HistorySearchDirection::Forward,
+            cursor: None,
+        };
+        let (request_sender, mut request_receiver) =
+            tokio::sync::watch::channel(Some(request(1, "old")));
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
+        let shared = Arc::new(Mutex::new(super::DesktopDaemonView::default()));
+        let client_shared = Arc::clone(&shared);
+        let client = tokio::spawn(async move {
+            history_search_loop(
+                &resolved,
+                session_id,
+                &client_shared,
+                shutdown_receiver,
+                &mut request_receiver,
+            )
+            .await
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            first_observed.wait_for(|seen| *seen),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("first history request was not observed"))
+        .unwrap_or_else(|_| panic!("history request observer closed"));
+        request_sender
+            .send(Some(request(2, "new")))
+            .unwrap_or_else(|_| panic!("history request receiver must remain open"));
+        release_first
+            .send(true)
+            .unwrap_or_else(|_| panic!("history server must remain available"));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .history_search
+                    .as_ref()
+                    .is_some_and(|response| {
+                        response.revision == 2 && response.result.matches[0].line_id == 20
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("latest history result was not delivered"));
+        let _result = shutdown_sender.send(true);
+        client
+            .await
+            .unwrap_or_else(|error| panic!("history client task must join: {error}"))
+            .unwrap_or_else(|error| panic!("history client must stop cleanly: {error}"));
+        server
+            .await
+            .unwrap_or_else(|error| panic!("history server task must join: {error}"));
     }
 
     #[test]

@@ -5,15 +5,19 @@ mod visual_corpus;
 mod window_e2e;
 
 use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};
+use cshell_ipc::HistorySearchDirection;
 use cshell_render::{
-    EguiFrame, LogReflowLayout, LogReflowRequest, LogScrollbarState, LogSourceId, LogSurfaceError,
-    LogSurfaceModel, MAX_TERMINAL_SEARCH_QUERY_BYTES, TerminalCellPoint, TerminalDecorations,
-    TerminalSelection, TerminalSelectionMode, TerminalSurfaceModel, TerminalViewport,
-    WindowRenderer,
+    EguiFrame, LogDecorations, LogReflowLayout, LogReflowRequest, LogScrollbarState,
+    LogSearchMatch, LogSourceId, LogSurfaceError, LogSurfaceModel, MAX_TERMINAL_SEARCH_QUERY_BYTES,
+    TerminalCellPoint, TerminalDecorations, TerminalSelection, TerminalSelectionMode,
+    TerminalSurfaceModel, TerminalViewport, WindowRenderer, validate_terminal_search_query,
 };
 use cshell_ui::WorkbenchViewModel;
 use cursor_blink::CursorBlinkState;
-use daemon_connection::{DesktopConnectionConfig, DesktopDaemonConnection};
+use daemon_connection::{
+    DesktopConnectionConfig, DesktopDaemonConnection, DesktopHistorySearchRequest,
+    DesktopHistorySearchResponse,
+};
 use std::error::Error;
 use std::sync::Arc;
 use terminal_search::{TerminalSearchRequest, TerminalSearchWorker};
@@ -53,6 +57,9 @@ struct DesktopApp {
     terminal_search_revision: u64,
     terminal_search_requested_generation: Option<u64>,
     log_surface: Option<LogSurfaceModel>,
+    log_decorations: LogDecorations,
+    submitted_history_search: Option<Arc<DesktopHistorySearchResponse>>,
+    history_search_direction: Option<HistorySearchDirection>,
     submitted_log_page: Option<(LogSourceId, u64)>,
     log_reflow: Option<LogReflowWorker>,
     terminal_viewport: Option<TerminalViewport>,
@@ -211,6 +218,50 @@ impl ApplicationHandler for DesktopApp {
         }
         if let Some(daemon) = &self.daemon {
             let view = daemon.view();
+            if let Some(response) = view.history_search.as_ref()
+                && self
+                    .submitted_history_search
+                    .as_ref()
+                    .is_none_or(|submitted| !Arc::ptr_eq(submitted, response))
+            {
+                self.submitted_history_search = Some(Arc::clone(response));
+                if response.revision == self.terminal_search_revision && self.log_surface.is_some()
+                {
+                    if let Some(matched) = response.result.matches.first() {
+                        self.terminal_search_error = response.result.incomplete.then(|| {
+                            "history search encountered a truncated oversized line".to_owned()
+                        });
+                        self.log_decorations.revision =
+                            self.log_decorations.revision.wrapping_add(1);
+                        self.log_decorations.active_search_match = Some(LogSearchMatch {
+                            line_id: matched.line_id,
+                            byte_range: matched.byte_start..matched.byte_end,
+                        });
+                        if let Some(surface) = &mut self.log_surface {
+                            surface.jump_to_byte(matched.line_id, matched.byte_start);
+                        }
+                        redraw_needed = true;
+                    } else if let (Some(line_id), Some(byte_offset), Some(direction)) = (
+                        response.result.next_line_id,
+                        response.result.next_byte_offset,
+                        self.history_search_direction,
+                    ) {
+                        daemon.request_history_search(self.history_search_request(
+                            response.revision,
+                            direction,
+                            Some((line_id, byte_offset)),
+                        ));
+                    } else {
+                        self.terminal_search_error = Some(if response.result.incomplete {
+                            "history search is incomplete because a logical line exceeded 4 MiB"
+                                .to_owned()
+                        } else {
+                            "no history match found".to_owned()
+                        });
+                        redraw_needed = true;
+                    }
+                }
+            }
             redraw_needed |= self.view_model.daemon_connected != view.connected;
             redraw_needed |= self.view_model.daemon_status_detail != view.detail;
             redraw_needed |= self.view_model.terminal_generation
@@ -276,6 +327,7 @@ impl ApplicationHandler for DesktopApp {
             .latest_snapshot()
             .map(|snapshot| snapshot.generation);
         if self.terminal_search_open
+            && self.log_surface.is_none()
             && !self.terminal_search_query.is_empty()
             && current_generation != self.terminal_search_requested_generation
         {
@@ -415,8 +467,7 @@ impl ApplicationHandler for DesktopApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. }
-                if self.log_surface.is_none()
-                    && is_terminal_search_shortcut(&event, self.modifiers) =>
+                if is_terminal_search_shortcut(&event, self.modifiers) =>
             {
                 self.terminal_search_open = true;
                 self.terminal_search_focus_requested = true;
@@ -533,7 +584,7 @@ impl ApplicationHandler for DesktopApp {
                     if let Some(state) = scrollbar_state {
                         scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
                     }
-                    if self.terminal_search_open && self.log_surface.is_none() {
+                    if self.terminal_search_open {
                         egui::Window::new("查找终端")
                             .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
                             .collapsible(false)
@@ -586,12 +637,17 @@ impl ApplicationHandler for DesktopApp {
                                             "正则表达式",
                                         )
                                         .changed();
-                                    let count = self.terminal_decorations.search.matches.len();
-                                    let active = self
-                                        .terminal_decorations
-                                        .active_search_match
-                                        .map_or(0, |index| index + 1);
-                                    ui.label(format!("{active}/{count}"));
+                                    if let Some(matched) = &self.log_decorations.active_search_match
+                                    {
+                                        ui.label(format!("line {}", matched.line_id));
+                                    } else {
+                                        let count = self.terminal_decorations.search.matches.len();
+                                        let active = self
+                                            .terminal_decorations
+                                            .active_search_match
+                                            .map_or(0, |index| index + 1);
+                                        ui.label(format!("{active}/{count}"));
+                                    }
                                 });
                                 if let Some(error) = &self.terminal_search_error {
                                     ui.colored_label(egui::Color32::LIGHT_RED, error);
@@ -630,10 +686,22 @@ impl ApplicationHandler for DesktopApp {
                     self.close_terminal_search();
                 } else {
                     if search_changed {
-                        self.schedule_terminal_search(true);
+                        if self.log_surface.is_some() {
+                            self.schedule_history_search(
+                                HistorySearchDirection::Backward,
+                                None,
+                                true,
+                            );
+                        } else {
+                            self.schedule_terminal_search(true);
+                        }
                     }
                     if search_navigation != 0 {
-                        self.navigate_terminal_search(search_navigation);
+                        if self.log_surface.is_some() {
+                            self.navigate_history_search(search_navigation);
+                        } else {
+                            self.navigate_terminal_search(search_navigation);
+                        }
                     }
                 }
                 let Some(renderer) = &mut self.renderer else {
@@ -680,7 +748,12 @@ impl ApplicationHandler for DesktopApp {
                         }
                     }
                     let frame = log_surface.prepare_frame(viewport_rows);
-                    renderer.render_log(frame.as_ref(), viewport, Some(egui_frame))
+                    renderer.render_log(
+                        frame.as_ref(),
+                        viewport,
+                        &self.log_decorations,
+                        Some(egui_frame),
+                    )
                 } else {
                     let frame = self.terminal_surface.prepare_frame(0, viewport_rows);
                     window.set_ime_allowed(true);
@@ -769,12 +842,96 @@ impl DesktopApp {
         self.bump_terminal_decorations();
     }
 
+    fn history_search_request(
+        &self,
+        revision: u64,
+        direction: HistorySearchDirection,
+        cursor: Option<(u64, u32)>,
+    ) -> DesktopHistorySearchRequest {
+        DesktopHistorySearchRequest {
+            revision,
+            query: self.terminal_search_query.clone(),
+            case_sensitive: self.terminal_search_options.case_sensitive,
+            whole_word: self.terminal_search_options.whole_word,
+            regex: self.terminal_search_options.regex,
+            direction,
+            cursor,
+        }
+    }
+
+    fn schedule_history_search(
+        &mut self,
+        direction: HistorySearchDirection,
+        cursor: Option<(u64, u32)>,
+        reset_active: bool,
+    ) {
+        self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
+        self.terminal_search_error = None;
+        self.history_search_direction = Some(direction);
+        if reset_active {
+            self.log_decorations.revision = self.log_decorations.revision.wrapping_add(1);
+            self.log_decorations.active_search_match = None;
+        }
+        let Some(daemon) = &self.daemon else {
+            self.terminal_search_error =
+                Some("history search requires a daemon session".to_owned());
+            return;
+        };
+        if self.terminal_search_query.is_empty() {
+            daemon.cancel_history_search();
+            return;
+        }
+        if let Err(error) = validate_terminal_search_query(
+            &self.terminal_search_query,
+            self.terminal_search_options,
+        ) {
+            self.terminal_search_error = Some(error.to_string());
+            daemon.cancel_history_search();
+            return;
+        }
+        daemon.request_history_search(self.history_search_request(
+            self.terminal_search_revision,
+            direction,
+            cursor,
+        ));
+    }
+
+    fn navigate_history_search(&mut self, direction: i8) {
+        let search_direction = if direction < 0 {
+            HistorySearchDirection::Backward
+        } else {
+            HistorySearchDirection::Forward
+        };
+        let cursor = self
+            .log_decorations
+            .active_search_match
+            .as_ref()
+            .map(|matched| {
+                (
+                    matched.line_id,
+                    if direction < 0 {
+                        matched.byte_range.start
+                    } else {
+                        matched.byte_range.end
+                    },
+                )
+            });
+        self.schedule_history_search(search_direction, cursor, false);
+    }
+
     fn close_terminal_search(&mut self) {
         self.terminal_search_open = false;
         self.terminal_search_focus_requested = false;
         self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
         self.terminal_search_requested_generation = None;
         self.terminal_search_error = None;
+        self.history_search_direction = None;
+        self.submitted_history_search = None;
+        if let Some(daemon) = &self.daemon {
+            daemon.cancel_history_search();
+        }
+        self.log_decorations.revision = self.log_decorations.revision.wrapping_add(1);
+        self.log_decorations.active_search_match = None;
         self.terminal_decorations.search = Default::default();
         self.terminal_decorations.active_search_match = None;
         self.bump_terminal_decorations();
