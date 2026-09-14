@@ -3,10 +3,11 @@ use crate::{
     SubscriptionFrame, TerminalFrameSubscription,
 };
 use cshell_ipc::{
-    Envelope, IpcError, LogPage, LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse,
-    SessionCreateResponse, SessionListResponse, SessionSummary, TerminalControlCodecError,
-    TerminalControlResponse, TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest,
-    TerminalStyle, envelope, read_envelope, write_envelope,
+    Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
+    LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse, SessionCreateResponse,
+    SessionListResponse, SessionSummary, TerminalControlCodecError, TerminalControlResponse,
+    TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest, TerminalStyle, envelope,
+    read_envelope, write_envelope,
 };
 use cshell_output_store::{JournalColor, JournalStyle};
 use cshell_terminal::{Color, Style};
@@ -26,6 +27,8 @@ pub enum SessionIpcError {
     InitialFrameUnavailable,
     #[error(transparent)]
     InvalidLogPage(#[from] LogPageCodecError),
+    #[error(transparent)]
+    InvalidHistorySearch(#[from] HistorySearchCodecError),
     #[error(transparent)]
     InvalidTerminalControl(#[from] TerminalControlCodecError),
     #[error(transparent)]
@@ -218,6 +221,30 @@ impl SessionIpcService {
                 response.validate()?;
                 (envelope::Payload::LogPage(response), None)
             }
+            Some(envelope::Payload::HistorySearchRequest(request)) => {
+                let session_id = request.session_id.clone();
+                let result = self.registry.fulfill_history_search_request(&request)?;
+                let next_cursor = result.next_cursor;
+                let response = HistorySearchResult {
+                    session_id,
+                    revision: result.revision,
+                    matches: result
+                        .matches
+                        .into_iter()
+                        .map(|matched| HistorySearchMatch {
+                            line_id: matched.line_id,
+                            byte_start: matched.byte_start as u32,
+                            byte_end: matched.byte_end as u32,
+                        })
+                        .collect(),
+                    scanned_lines: result.scanned_lines as u32,
+                    next_line_id: next_cursor.map(|cursor| cursor.line_id),
+                    next_byte_offset: next_cursor.map(|cursor| cursor.byte_offset as u32),
+                    incomplete: result.incomplete,
+                };
+                response.validate()?;
+                (envelope::Payload::HistorySearchResult(response), None)
+            }
             Some(envelope::Payload::TerminalInputRequest(request)) => (
                 envelope::Payload::TerminalControlResponse(self.dispatch_terminal_input(request)),
                 None,
@@ -385,8 +412,9 @@ mod tests {
     use crate::LocalSessionRegistry;
     use cshell_domain::{InputAction, TerminalSize};
     use cshell_ipc::{
-        Envelope, LogPageRequest, SessionListRequest, SnapshotRequest, TerminalControlStatus,
-        TerminalInputRequest, TerminalResizeRequest, envelope, read_envelope, write_envelope,
+        Envelope, HistorySearchDirection, HistorySearchRequest, LogPageRequest, SessionListRequest,
+        SnapshotRequest, TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest,
+        envelope, read_envelope, write_envelope,
     };
     use cshell_local::{LocalProfile, WorkingDirectoryPolicy};
     use cshell_output_store::{JournalColor, JournalStyle};
@@ -994,6 +1022,58 @@ mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "journal index did not observe PTY output"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        registry.close(session_id).unwrap();
+    }
+
+    #[test]
+    fn history_search_crosses_registry_index_and_ipc_with_bounded_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let attachment = registry
+            .spawn_local(&streaming_profile(), TerminalSize::cells(24, 80))
+            .unwrap();
+        let session_id = attachment.session_id();
+        drop(attachment);
+        let service = SessionIpcService::new(Arc::clone(&registry));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let response = service
+                .handle_request(Envelope {
+                    request_id: 103,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::HistorySearchRequest(
+                        HistorySearchRequest {
+                            session_id: session_id.as_uuid().as_bytes().to_vec(),
+                            query: "stream_one".to_owned(),
+                            case_sensitive: false,
+                            whole_word: false,
+                            regex: false,
+                            direction: HistorySearchDirection::Forward as i32,
+                            cursor_line_id: None,
+                            cursor_byte_offset: None,
+                            max_scan_lines: 32,
+                            max_matches: 1,
+                        },
+                    )),
+                })
+                .unwrap();
+            let Some(envelope::Payload::HistorySearchResult(result)) = response.payload else {
+                panic!("expected a bounded history search result");
+            };
+            result.validate().unwrap();
+            assert!(result.scanned_lines <= 32);
+            assert!(result.matches.len() <= 1);
+            if !result.matches.is_empty() {
+                assert_eq!(response.request_id, 103);
+                assert!(result.revision > 0);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "history search did not observe PTY output"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

@@ -11,13 +11,16 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 7;
+pub const PROTOCOL_MINOR: u32 = 8;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
 pub const MAX_LOG_PAGE_TEXT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_LOG_PAGE_STYLE_SPANS: usize = 16 * 1024;
 pub const MAX_TERMINAL_INPUT_BYTES: usize = 1024 * 1024;
+pub const MAX_HISTORY_SEARCH_QUERY_BYTES: usize = 4 * 1024;
+pub const MAX_HISTORY_SEARCH_SCAN_LINES: usize = 4096;
+pub const MAX_HISTORY_SEARCH_MATCHES: usize = 4096;
 
 pub mod features {
     pub const FULL_FRAME_RECOVERY: u64 = 1 << 0;
@@ -25,6 +28,7 @@ pub mod features {
     pub const PRIORITY_STREAMS: u64 = 1 << 2;
     pub const LOG_PAGING: u64 = 1 << 3;
     pub const TERMINAL_CONTROL: u64 = 1 << 4;
+    pub const HISTORY_SEARCH: u64 = 1 << 5;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1341,6 +1345,151 @@ impl LogPage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Enumeration)]
+#[repr(i32)]
+pub enum HistorySearchDirection {
+    Forward = 0,
+    Backward = 1,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct HistorySearchRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub session_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub query: String,
+    #[prost(bool, tag = "3")]
+    pub case_sensitive: bool,
+    #[prost(bool, tag = "4")]
+    pub whole_word: bool,
+    #[prost(bool, tag = "5")]
+    pub regex: bool,
+    #[prost(enumeration = "HistorySearchDirection", tag = "6")]
+    pub direction: i32,
+    #[prost(fixed64, optional, tag = "7")]
+    pub cursor_line_id: Option<u64>,
+    #[prost(uint32, optional, tag = "8")]
+    pub cursor_byte_offset: Option<u32>,
+    #[prost(uint32, tag = "9")]
+    pub max_scan_lines: u32,
+    #[prost(uint32, tag = "10")]
+    pub max_matches: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct HistorySearchMatch {
+    #[prost(fixed64, tag = "1")]
+    pub line_id: u64,
+    #[prost(uint32, tag = "2")]
+    pub byte_start: u32,
+    #[prost(uint32, tag = "3")]
+    pub byte_end: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct HistorySearchResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub session_id: Vec<u8>,
+    #[prost(fixed64, tag = "2")]
+    pub revision: u64,
+    #[prost(message, repeated, tag = "3")]
+    pub matches: Vec<HistorySearchMatch>,
+    #[prost(uint32, tag = "4")]
+    pub scanned_lines: u32,
+    #[prost(fixed64, optional, tag = "5")]
+    pub next_line_id: Option<u64>,
+    #[prost(uint32, optional, tag = "6")]
+    pub next_byte_offset: Option<u32>,
+    #[prost(bool, tag = "7")]
+    pub incomplete: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum HistorySearchCodecError {
+    #[error("history search session ID must contain exactly 16 bytes, got {0}")]
+    InvalidSessionIdLength(usize),
+    #[error(
+        "history search query must contain between 1 and {MAX_HISTORY_SEARCH_QUERY_BYTES} bytes"
+    )]
+    InvalidQueryLength,
+    #[error("history search direction is unknown")]
+    UnknownDirection,
+    #[error(
+        "history search cursor line and byte offset must either both be present or both be absent"
+    )]
+    PartialCursor,
+    #[error("history search line cursor must not be zero")]
+    ZeroLineCursor,
+    #[error("history search scan limit must be between 1 and {MAX_HISTORY_SEARCH_SCAN_LINES}")]
+    InvalidScanLimit,
+    #[error("history search match limit must be between 1 and {MAX_HISTORY_SEARCH_MATCHES}")]
+    InvalidMatchLimit,
+    #[error("history search result contains too many matches")]
+    TooManyMatches,
+    #[error("history search match has an invalid line or byte range")]
+    InvalidMatch,
+    #[error("history search result contains an invalid continuation cursor")]
+    InvalidContinuation,
+    #[error("history search result scanned more than {MAX_HISTORY_SEARCH_SCAN_LINES} lines")]
+    InvalidScannedLines,
+}
+
+impl HistorySearchRequest {
+    pub fn validate(&self) -> Result<(), HistorySearchCodecError> {
+        validate_history_session_id(&self.session_id)?;
+        if self.query.is_empty() || self.query.len() > MAX_HISTORY_SEARCH_QUERY_BYTES {
+            return Err(HistorySearchCodecError::InvalidQueryLength);
+        }
+        HistorySearchDirection::try_from(self.direction)
+            .map_err(|_| HistorySearchCodecError::UnknownDirection)?;
+        match (self.cursor_line_id, self.cursor_byte_offset) {
+            (None, None) => {}
+            (Some(0), Some(_)) => return Err(HistorySearchCodecError::ZeroLineCursor),
+            (Some(_), Some(_)) => {}
+            _ => return Err(HistorySearchCodecError::PartialCursor),
+        }
+        if self.max_scan_lines == 0 || self.max_scan_lines as usize > MAX_HISTORY_SEARCH_SCAN_LINES
+        {
+            return Err(HistorySearchCodecError::InvalidScanLimit);
+        }
+        if self.max_matches == 0 || self.max_matches as usize > MAX_HISTORY_SEARCH_MATCHES {
+            return Err(HistorySearchCodecError::InvalidMatchLimit);
+        }
+        Ok(())
+    }
+}
+
+impl HistorySearchResult {
+    pub fn validate(&self) -> Result<(), HistorySearchCodecError> {
+        validate_history_session_id(&self.session_id)?;
+        if self.matches.len() > MAX_HISTORY_SEARCH_MATCHES {
+            return Err(HistorySearchCodecError::TooManyMatches);
+        }
+        if self.scanned_lines as usize > MAX_HISTORY_SEARCH_SCAN_LINES {
+            return Err(HistorySearchCodecError::InvalidScannedLines);
+        }
+        if self
+            .matches
+            .iter()
+            .any(|matched| matched.line_id == 0 || matched.byte_start >= matched.byte_end)
+        {
+            return Err(HistorySearchCodecError::InvalidMatch);
+        }
+        match (self.next_line_id, self.next_byte_offset) {
+            (None, None) | (Some(1..), Some(_)) => Ok(()),
+            _ => Err(HistorySearchCodecError::InvalidContinuation),
+        }
+    }
+}
+
+fn validate_history_session_id(bytes: &[u8]) -> Result<(), HistorySearchCodecError> {
+    if bytes.len() == 16 {
+        Ok(())
+    } else {
+        Err(HistorySearchCodecError::InvalidSessionIdLength(bytes.len()))
+    }
+}
+
 impl Handshake {
     pub const MAGIC: u32 = 0x4353_484C;
 
@@ -1372,17 +1521,17 @@ pub struct Envelope {
     pub deadline_unix_ms: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
     )]
     pub payload: Option<envelope::Payload>,
 }
 
 pub mod envelope {
     use super::{
-        FrameDelta, FullFrame, Handshake, HandshakeAck, LogPage, LogPageRequest,
-        SessionCloseRequest, SessionCloseResponse, SessionCreateRequest, SessionCreateResponse,
-        SessionListRequest, SessionListResponse, SnapshotRequest, TerminalControlResponse,
-        TerminalInputRequest, TerminalResizeRequest,
+        FrameDelta, FullFrame, Handshake, HandshakeAck, HistorySearchRequest, HistorySearchResult,
+        LogPage, LogPageRequest, SessionCloseRequest, SessionCloseResponse, SessionCreateRequest,
+        SessionCreateResponse, SessionListRequest, SessionListResponse, SnapshotRequest,
+        TerminalControlResponse, TerminalInputRequest, TerminalResizeRequest,
     };
     use prost::Oneof;
 
@@ -1426,6 +1575,10 @@ pub mod envelope {
         TerminalResizeRequest(TerminalResizeRequest),
         #[prost(message, tag = "28")]
         TerminalControlResponse(TerminalControlResponse),
+        #[prost(message, tag = "29")]
+        HistorySearchRequest(HistorySearchRequest),
+        #[prost(message, tag = "30")]
+        HistorySearchResult(HistorySearchResult),
     }
 }
 
@@ -1433,10 +1586,11 @@ pub mod envelope {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        DeltaCodecError, Envelope, FrameDelta, FullFrame, LogPage, LogPageCodecError,
-        LogPageRequest, LogRow, LogStyleSpan, MAX_LOG_PAGE_ROWS, MAX_TERMINAL_INPUT_BYTES,
-        SnapshotCodecError, TERMINAL_FRAME_SCHEMA_VERSION, TerminalCell, TerminalCellWidth,
-        TerminalCursorAppearance, TerminalFramePayload, TerminalInputRequest,
+        DeltaCodecError, Envelope, FrameDelta, FullFrame, HistorySearchCodecError,
+        HistorySearchDirection, HistorySearchMatch, HistorySearchRequest, HistorySearchResult,
+        LogPage, LogPageCodecError, LogPageRequest, LogRow, LogStyleSpan, MAX_LOG_PAGE_ROWS,
+        MAX_TERMINAL_INPUT_BYTES, SnapshotCodecError, TERMINAL_FRAME_SCHEMA_VERSION, TerminalCell,
+        TerminalCellWidth, TerminalCursorAppearance, TerminalFramePayload, TerminalInputRequest,
         TerminalResizeRequest, TerminalStyle, envelope,
     };
     use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers, SessionId, TerminalSize};
@@ -1786,6 +1940,56 @@ mod tests {
         };
         decoded.validate().unwrap();
         assert_eq!(decoded, page);
+    }
+
+    #[test]
+    fn bounded_history_search_round_trip_and_validation_preserve_cursor() {
+        let session_id = SessionId::new().as_uuid().as_bytes().to_vec();
+        let request = HistorySearchRequest {
+            session_id: session_id.clone(),
+            query: "错误.*42".to_owned(),
+            case_sensitive: false,
+            whole_word: true,
+            regex: true,
+            direction: HistorySearchDirection::Backward as i32,
+            cursor_line_id: Some(900),
+            cursor_byte_offset: Some(17),
+            max_scan_lines: 512,
+            max_matches: 32,
+        };
+        request.validate().unwrap();
+        let envelope = Envelope {
+            request_id: 41,
+            deadline_unix_ms: 0,
+            payload: Some(envelope::Payload::HistorySearchRequest(request.clone())),
+        };
+        let decoded = Envelope::decode(envelope.encode_to_vec().as_slice()).unwrap();
+        assert!(matches!(
+            decoded.payload,
+            Some(envelope::Payload::HistorySearchRequest(value)) if value == request
+        ));
+
+        let result = HistorySearchResult {
+            session_id,
+            revision: 8,
+            matches: vec![HistorySearchMatch {
+                line_id: 899,
+                byte_start: 7,
+                byte_end: 13,
+            }],
+            scanned_lines: 12,
+            next_line_id: Some(899),
+            next_byte_offset: Some(7),
+            incomplete: false,
+        };
+        result.validate().unwrap();
+
+        let mut malformed = request;
+        malformed.cursor_byte_offset = None;
+        assert!(matches!(
+            malformed.validate(),
+            Err(HistorySearchCodecError::PartialCursor)
+        ));
     }
 
     #[test]

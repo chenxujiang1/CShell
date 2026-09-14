@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 crc32fast.workspace = true
 memchr.workspace = true
+regex.workspace = true
 thiserror.workspace = true
 unicode-segmentation.workspace = true
 

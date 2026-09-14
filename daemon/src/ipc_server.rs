@@ -155,7 +155,10 @@ where
 {
     let negotiated = server_handshake(&mut stream, policy).await?;
     if negotiated.feature_bits
-        & (features::FULL_FRAME_RECOVERY | features::LOG_PAGING | features::TERMINAL_CONTROL)
+        & (features::FULL_FRAME_RECOVERY
+            | features::LOG_PAGING
+            | features::TERMINAL_CONTROL
+            | features::HISTORY_SEARCH)
         == 0
     {
         return Err(ConnectionError::SessionServiceRequired);

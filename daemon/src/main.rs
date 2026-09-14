@@ -87,7 +87,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             features::FULL_FRAME_RECOVERY
                 | features::PRIORITY_STREAMS
                 | features::LOG_PAGING
-                | features::TERMINAL_CONTROL,
+                | features::TERMINAL_CONTROL
+                | features::HISTORY_SEARCH,
         ),
         SessionIpcService::new(Arc::clone(&registry)),
     );

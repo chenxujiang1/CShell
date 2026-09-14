@@ -3,9 +3,16 @@ use crate::{
     TerminalFrameSubscription,
 };
 use cshell_domain::{InputAction, SessionId, TerminalSize};
-use cshell_ipc::{FullFrame, LogPageCodecError, LogPageRequest, SnapshotRequest};
+use cshell_ipc::{
+    FullFrame, HistorySearchCodecError, HistorySearchDirection as IpcHistorySearchDirection,
+    HistorySearchRequest as IpcHistorySearchRequest, LogPageCodecError, LogPageRequest,
+    SnapshotRequest,
+};
 use cshell_local::LocalProfile;
-use cshell_output_store::{JournalError, JournalStyledLogPage};
+use cshell_output_store::{
+    HistorySearchCursor, HistorySearchDirection, HistorySearchError, HistorySearchOptions,
+    HistorySearchRequest, HistorySearchResult, JournalError, JournalStyledLogPage,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -29,6 +36,10 @@ pub enum SessionRegistryError {
     Journal(#[from] JournalError),
     #[error(transparent)]
     LogPageProtocol(#[from] LogPageCodecError),
+    #[error(transparent)]
+    HistorySearchProtocol(#[from] HistorySearchCodecError),
+    #[error(transparent)]
+    HistorySearch(#[from] HistorySearchError),
 }
 
 #[derive(Debug)]
@@ -221,6 +232,48 @@ impl LocalSessionRegistry {
                 request.rows_before as usize,
                 request.rows_after as usize,
             )
+            .map_err(Into::into)
+    }
+
+    pub fn fulfill_history_search_request(
+        &self,
+        request: &IpcHistorySearchRequest,
+    ) -> Result<HistorySearchResult, SessionRegistryError> {
+        request.validate()?;
+        let session_id = Self::parse_session_id(&request.session_id)?;
+        let index = self
+            .lookup(session_id)?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .session
+            .line_index();
+        let direction = match IpcHistorySearchDirection::try_from(request.direction)
+            .map_err(|_| HistorySearchCodecError::UnknownDirection)?
+        {
+            IpcHistorySearchDirection::Forward => HistorySearchDirection::Forward,
+            IpcHistorySearchDirection::Backward => HistorySearchDirection::Backward,
+        };
+        let cursor =
+            request
+                .cursor_line_id
+                .zip(request.cursor_byte_offset)
+                .map(|(line_id, byte_offset)| HistorySearchCursor {
+                    line_id,
+                    byte_offset: byte_offset as usize,
+                });
+        index
+            .search_history(&HistorySearchRequest {
+                query: request.query.clone(),
+                options: HistorySearchOptions {
+                    case_sensitive: request.case_sensitive,
+                    whole_word: request.whole_word,
+                    regex: request.regex,
+                },
+                direction,
+                cursor,
+                max_scan_lines: request.max_scan_lines as usize,
+                max_matches: request.max_matches as usize,
+            })
             .map_err(Into::into)
     }
 

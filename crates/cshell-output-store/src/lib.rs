@@ -1,6 +1,7 @@
 //! Append-only output journal with bounded records and recoverable tail corruption.
 
 mod ansi;
+mod history_search;
 mod line_index;
 mod segmented;
 
@@ -11,6 +12,11 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub use ansi::{JournalColor, JournalStyle, JournalStyleSpan, StyledLogText};
+pub use history_search::{
+    HistorySearchCursor, HistorySearchDirection, HistorySearchError, HistorySearchMatch,
+    HistorySearchOptions, HistorySearchRequest, HistorySearchResult, MAX_HISTORY_SEARCH_MATCHES,
+    MAX_HISTORY_SEARCH_QUERY_BYTES, MAX_HISTORY_SEARCH_SCAN_LINES,
+};
 pub use line_index::{
     IndexedLogLine, JournalLineIndex, JournalLogPage, JournalStyledLogPage, MAX_LOG_PAGE_BYTES,
     MAX_LOG_PAGE_LINES, MAX_LOG_PAGE_STYLE_SPANS, StyledIndexedLogLine,
