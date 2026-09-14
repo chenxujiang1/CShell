@@ -49,6 +49,7 @@ struct DesktopApp {
     terminal_search_focus_requested: bool,
     terminal_search_query: String,
     terminal_search_options: cshell_render::TerminalSearchOptions,
+    terminal_search_error: Option<String>,
     terminal_search_revision: u64,
     terminal_search_requested_generation: Option<u64>,
     log_surface: Option<LogSurfaceModel>,
@@ -185,6 +186,7 @@ impl ApplicationHandler for DesktopApp {
             {
                 match response.result {
                     Ok(result) => {
+                        self.terminal_search_error = None;
                         let previous_active =
                             self.terminal_decorations.active_search_match.unwrap_or(0);
                         self.terminal_decorations.search = result;
@@ -196,7 +198,14 @@ impl ApplicationHandler for DesktopApp {
                         self.bump_terminal_decorations();
                         redraw_needed = true;
                     }
-                    Err(error) => tracing::warn!(%error, "terminal search rejected"),
+                    Err(error) => {
+                        self.terminal_search_error = Some(error.to_string());
+                        self.terminal_decorations.search = Default::default();
+                        self.terminal_decorations.active_search_match = None;
+                        self.bump_terminal_decorations();
+                        redraw_needed = true;
+                        tracing::warn!(%error, "terminal search rejected");
+                    }
                 }
             }
         }
@@ -571,6 +580,12 @@ impl ApplicationHandler for DesktopApp {
                                             "全词匹配",
                                         )
                                         .changed();
+                                    search_changed |= ui
+                                        .checkbox(
+                                            &mut self.terminal_search_options.regex,
+                                            "正则表达式",
+                                        )
+                                        .changed();
                                     let count = self.terminal_decorations.search.matches.len();
                                     let active = self
                                         .terminal_decorations
@@ -578,6 +593,9 @@ impl ApplicationHandler for DesktopApp {
                                         .map_or(0, |index| index + 1);
                                     ui.label(format!("{active}/{count}"));
                                 });
+                                if let Some(error) = &self.terminal_search_error {
+                                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                                }
                                 if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                                     search_navigation = if ui.input(|input| input.modifiers.shift) {
                                         -1
@@ -710,6 +728,7 @@ impl DesktopApp {
     fn schedule_terminal_search(&mut self, reset_active: bool) {
         self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
         self.terminal_decorations.search = Default::default();
+        self.terminal_search_error = None;
         if reset_active {
             self.terminal_decorations.active_search_match = None;
         }
@@ -755,6 +774,7 @@ impl DesktopApp {
         self.terminal_search_focus_requested = false;
         self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
         self.terminal_search_requested_generation = None;
+        self.terminal_search_error = None;
         self.terminal_decorations.search = Default::default();
         self.terminal_decorations.active_search_match = None;
         self.bump_terminal_decorations();

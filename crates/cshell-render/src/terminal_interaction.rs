@@ -1,9 +1,11 @@
 use cshell_terminal::{Cell, CellWidth, FrameSnapshot};
+use regex::{Regex, RegexBuilder};
 use std::sync::Arc;
 use thiserror::Error;
 
 pub const MAX_TERMINAL_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 pub const MAX_TERMINAL_SEARCH_MATCHES: usize = 4 * 1024;
+pub const MAX_TERMINAL_SEARCH_REGEX_BYTES: usize = 1024 * 1024;
 pub const MAX_TERMINAL_SELECTION_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -36,6 +38,7 @@ pub struct TerminalSearchMatch {
 pub struct TerminalSearchOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,
+    pub regex: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -56,6 +59,10 @@ pub struct TerminalDecorations {
 pub enum TerminalInteractionError {
     #[error("terminal search query contains {actual} bytes; maximum is {maximum}")]
     SearchQueryTooLong { actual: usize, maximum: usize },
+    #[error("terminal search regular expression is invalid: {0}")]
+    InvalidSearchRegex(String),
+    #[error("terminal search regular expression must not match empty text")]
+    EmptySearchRegexMatch,
     #[error("terminal selection contains more than {0} UTF-8 bytes")]
     SelectionTooLarge(usize),
 }
@@ -164,15 +171,19 @@ pub fn search_terminal_snapshot(
     if query.is_empty() {
         return Ok(TerminalSearchResult::default());
     }
-    let normalized_query = normalize(query, options.case_sensitive);
+    let matcher = build_search_regex(query, options)?;
     let mut matches = Vec::new();
     for row in 0..snapshot.rows {
         let Some(cells) = snapshot.row(row) else {
             continue;
         };
-        let (text, byte_columns) = searchable_row(cells, options.case_sensitive);
-        for (byte_start, matched) in text.match_indices(&normalized_query) {
-            let byte_end = byte_start + matched.len();
+        let (text, byte_columns) = searchable_row(cells);
+        for matched in matcher.find_iter(&text) {
+            if matched.is_empty() {
+                return Err(TerminalInteractionError::EmptySearchRegexMatch);
+            }
+            let byte_start = matched.start();
+            let byte_end = matched.end();
             if options.whole_word && !is_whole_word(&text, byte_start, byte_end) {
                 continue;
             }
@@ -204,6 +215,26 @@ pub fn search_terminal_snapshot(
         matches: matches.into(),
         truncated: false,
     })
+}
+
+fn build_search_regex(
+    query: &str,
+    options: TerminalSearchOptions,
+) -> Result<Regex, TerminalInteractionError> {
+    let pattern = if options.regex {
+        query.to_owned()
+    } else {
+        regex::escape(query)
+    };
+    let matcher = RegexBuilder::new(&pattern)
+        .case_insensitive(!options.case_sensitive)
+        .size_limit(MAX_TERMINAL_SEARCH_REGEX_BYTES)
+        .build()
+        .map_err(|error| TerminalInteractionError::InvalidSearchRegex(error.to_string()))?;
+    if options.regex && matcher.is_match("") {
+        return Err(TerminalInteractionError::EmptySearchRegexMatch);
+    }
+    Ok(matcher)
 }
 
 fn ordered_points(
@@ -239,7 +270,7 @@ fn snap_wide_point(snapshot: &FrameSnapshot, point: TerminalCellPoint) -> Termin
     }
 }
 
-fn searchable_row(cells: &[Cell], case_sensitive: bool) -> (String, Vec<u16>) {
+fn searchable_row(cells: &[Cell]) -> (String, Vec<u16>) {
     let mut text = String::new();
     let mut byte_columns = Vec::new();
     for (column, cell) in cells.iter().enumerate() {
@@ -247,30 +278,21 @@ fn searchable_row(cells: &[Cell], case_sensitive: bool) -> (String, Vec<u16>) {
             continue;
         }
         let source: String = cell.characters().collect();
-        let normalized = normalize(&source, case_sensitive);
         let end_column = if cell.width == CellWidth::Wide {
             column.saturating_add(1)
         } else {
             column
         }
         .min(usize::from(u16::MAX)) as u16;
-        byte_columns.extend(std::iter::repeat_n(end_column, normalized.len()));
-        if let Some(first) = byte_columns.len().checked_sub(normalized.len())
-            && !normalized.is_empty()
+        byte_columns.extend(std::iter::repeat_n(end_column, source.len()));
+        if let Some(first) = byte_columns.len().checked_sub(source.len())
+            && !source.is_empty()
         {
             byte_columns[first] = column.min(usize::from(u16::MAX)) as u16;
         }
-        text.push_str(&normalized);
+        text.push_str(&source);
     }
     (text, byte_columns)
-}
-
-fn normalize(text: &str, case_sensitive: bool) -> String {
-    if case_sensitive {
-        text.to_owned()
-    } else {
-        text.chars().flat_map(char::to_lowercase).collect()
-    }
 }
 
 fn is_whole_word(text: &str, start: usize, end: usize) -> bool {
@@ -400,6 +422,7 @@ mod tests {
             TerminalSearchOptions {
                 case_sensitive: true,
                 whole_word: false,
+                regex: false,
             },
         )
         .unwrap_or_else(|error| panic!("wide search must be valid: {error}"));
@@ -417,6 +440,7 @@ mod tests {
             TerminalSearchOptions {
                 case_sensitive: false,
                 whole_word: true,
+                regex: false,
             },
         )
         .unwrap_or_else(|error| panic!("whole-word search must be valid: {error}"));
@@ -441,5 +465,46 @@ mod tests {
             .unwrap_or_else(|error| panic!("bounded search must be valid: {error}"));
         assert_eq!(result.matches.len(), MAX_TERMINAL_SEARCH_MATCHES);
         assert!(result.truncated);
+    }
+
+    #[test]
+    fn regex_search_is_bounded_validated_and_maps_terminal_cells() {
+        let wide = Cell::with_zerowidth('界', ['\u{fe0f}'], CellWidth::Wide, Default::default());
+        let frame = snapshot(&[vec![
+            Cell::new('A', CellWidth::Single, Default::default()),
+            wide,
+            Cell::new(' ', CellWidth::WideSpacer, Default::default()),
+            Cell::new('B', CellWidth::Single, Default::default()),
+        ]]);
+        let options = TerminalSearchOptions {
+            case_sensitive: true,
+            whole_word: false,
+            regex: true,
+        };
+        let result = search_terminal_snapshot(&frame, "界.*B", options)
+            .unwrap_or_else(|error| panic!("regex search must be valid: {error}"));
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].start.column, 1);
+        assert_eq!(result.matches[0].end.column, 3);
+
+        assert!(matches!(
+            search_terminal_snapshot(&frame, "[", options),
+            Err(TerminalInteractionError::InvalidSearchRegex(_))
+        ));
+        assert_eq!(
+            search_terminal_snapshot(&frame, "a*", options),
+            Err(TerminalInteractionError::EmptySearchRegexMatch)
+        );
+        assert_eq!(
+            search_terminal_snapshot(&frame, "\\b", options),
+            Err(TerminalInteractionError::EmptySearchRegexMatch)
+        );
+
+        let literal = snapshot(&[cells("a.b acb", 7)]);
+        let literal_result =
+            search_terminal_snapshot(&literal, "a.b", TerminalSearchOptions::default())
+                .unwrap_or_else(|error| panic!("literal search must escape regex syntax: {error}"));
+        assert_eq!(literal_result.matches.len(), 1);
+        assert_eq!(literal_result.matches[0].start.column, 0);
     }
 }

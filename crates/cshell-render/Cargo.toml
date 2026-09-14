@@ -20,6 +20,7 @@ epaint_default_fonts.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 guillotiere.workspace = true
+regex.workspace = true
 thiserror.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
