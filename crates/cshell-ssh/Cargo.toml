@@ -19,6 +19,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 rand.workspace = true
 
 [lints]

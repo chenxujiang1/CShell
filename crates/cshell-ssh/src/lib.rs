@@ -1,9 +1,18 @@
 //! SSH provider boundary and the initial russh capability declaration.
 
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const SSH_AUTH_ROUND_TIMEOUT: Duration = Duration::from_secs(30);
+const SSH_AGENT_SIGN_TIMEOUT: Duration = Duration::from_secs(120);
+pub const MAX_KEYBOARD_INTERACTIVE_ROUNDS: usize = 16;
+pub const MAX_KEYBOARD_INTERACTIVE_PROMPTS: usize = 32;
+pub const MAX_KEYBOARD_INTERACTIVE_METADATA_BYTES: usize = 16 * 1024;
+pub const MAX_AGENT_IDENTITIES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AlgorithmPolicy {
@@ -92,6 +101,50 @@ pub struct PinnedHostKey {
     sha256_fingerprint: String,
 }
 
+#[derive(Clone)]
+pub struct SshPrivateKey {
+    key: Arc<russh::keys::PrivateKey>,
+}
+
+impl std::fmt::Debug for SshPrivateKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshPrivateKey")
+            .field("algorithm", &self.key.algorithm())
+            .field("sha256_fingerprint", &self.sha256_fingerprint())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SshPrivateKey {
+    pub fn decode_openssh(encoded: &str, passphrase: Option<&str>) -> Result<Self, SshError> {
+        let key =
+            russh::keys::decode_secret_key(encoded, passphrase).map_err(SshError::PrivateKey)?;
+        Ok(Self { key: Arc::new(key) })
+    }
+
+    #[must_use]
+    pub fn sha256_fingerprint(&self) -> String {
+        self.key
+            .public_key()
+            .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+            .to_string()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyboardInteractivePrompt {
+    pub text: String,
+    pub echo: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyboardInteractiveChallenge {
+    pub name: String,
+    pub instructions: String,
+    pub prompts: Vec<KeyboardInteractivePrompt>,
+}
+
 impl PinnedHostKey {
     #[must_use]
     pub fn sha256(fingerprint: impl Into<String>) -> Self {
@@ -127,6 +180,24 @@ pub enum SshError {
     Protocol(#[from] russh::Error),
     #[error("SSH authentication was rejected")]
     AuthenticationRejected,
+    #[error("SSH authentication was cancelled")]
+    AuthenticationCancelled,
+    #[error("SSH authentication round timed out")]
+    AuthenticationTimeout,
+    #[error("SSH private key could not be decoded: {0}")]
+    PrivateKey(#[source] russh::keys::Error),
+    #[error("SSH agent operation failed: {0}")]
+    Agent(#[source] russh::keys::Error),
+    #[error("SSH agent signing authentication failed: {0}")]
+    AgentAuthentication(String),
+    #[error("SSH agent returned {actual} identities; maximum is {maximum}")]
+    AgentIdentityLimit { actual: usize, maximum: usize },
+    #[error("server only advertised legacy RSA/SHA-1 user authentication")]
+    LegacyRsaSignatureRejected,
+    #[error("keyboard-interactive challenge exceeded a safety limit")]
+    KeyboardInteractiveLimitExceeded,
+    #[error("keyboard-interactive response count {actual} does not match prompt count {expected}")]
+    KeyboardInteractiveResponseCount { expected: usize, actual: usize },
     #[error("SSH connection attempt timed out")]
     ConnectionTimeout,
     #[error("SSH command channel closed without an exit status")]
@@ -162,27 +233,129 @@ impl RusshClient {
     where
         A: tokio::net::ToSocketAddrs,
     {
-        let mut config = RusshProvider::default().client_config();
-        // Interactive sessions may legitimately remain idle for a long time.
-        // Bound connection establishment externally instead of enabling
-        // russh's whole-session inactivity garbage collection.
-        config.inactivity_timeout = None;
-        config.keepalive_interval = Some(Duration::from_secs(15));
-        config.keepalive_max = 3;
-        let mut session = tokio::time::timeout(
-            Duration::from_secs(30),
-            russh::client::connect(Arc::new(config), address, VerifiedClient { host_key }),
+        let mut session = connect_verified(address, host_key).await?;
+        let result = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_password(username, password),
         )
         .await
-        .map_err(|_elapsed| SshError::ConnectionTimeout)??;
-        if !session
-            .authenticate_password(username, password)
-            .await?
-            .success()
-        {
-            return Err(SshError::AuthenticationRejected);
-        }
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        ensure_authenticated(result)?;
         Ok(Self { session })
+    }
+
+    pub async fn connect_public_key<A>(
+        address: A,
+        username: impl Into<String>,
+        private_key: SshPrivateKey,
+        host_key: PinnedHostKey,
+    ) -> Result<Self, SshError>
+    where
+        A: tokio::net::ToSocketAddrs,
+    {
+        let mut session = connect_verified(address, host_key).await?;
+        let username = username.into();
+        let hash_alg = modern_rsa_hash(&session, &private_key.key).await?;
+        let result = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_publickey(
+                username,
+                russh::keys::PrivateKeyWithHashAlg::new(private_key.key, hash_alg),
+            ),
+        )
+        .await
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        ensure_authenticated(result)?;
+        Ok(Self { session })
+    }
+
+    pub async fn connect_agent<A>(
+        address: A,
+        username: impl Into<String>,
+        host_key: PinnedHostKey,
+    ) -> Result<Self, SshError>
+    where
+        A: tokio::net::ToSocketAddrs,
+    {
+        let mut session = connect_verified(address, host_key).await?;
+        let mut agent = tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, connect_default_agent())
+            .await
+            .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        authenticate_with_agent(&mut session, username.into(), &mut agent).await?;
+        Ok(Self { session })
+    }
+
+    pub async fn connect_keyboard_interactive<A, R, F>(
+        address: A,
+        username: impl Into<String>,
+        host_key: PinnedHostKey,
+        mut responder: R,
+    ) -> Result<Self, SshError>
+    where
+        A: tokio::net::ToSocketAddrs,
+        R: FnMut(KeyboardInteractiveChallenge) -> F + Send,
+        F: Future<Output = Result<Vec<String>, SshError>> + Send,
+    {
+        let mut session = connect_verified(address, host_key).await?;
+        let mut response = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_keyboard_interactive_start(username, None),
+        )
+        .await
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        let mut rounds = 0_usize;
+        loop {
+            match response {
+                russh::client::KeyboardInteractiveAuthResponse::Success => {
+                    return Ok(Self { session });
+                }
+                russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
+                    return Err(SshError::AuthenticationRejected);
+                }
+                russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
+                    name,
+                    instructions,
+                    prompts,
+                } => {
+                    rounds = rounds.saturating_add(1);
+                    let metadata_bytes = name
+                        .len()
+                        .saturating_add(instructions.len())
+                        .saturating_add(prompts.iter().map(|prompt| prompt.prompt.len()).sum());
+                    if rounds > MAX_KEYBOARD_INTERACTIVE_ROUNDS
+                        || prompts.len() > MAX_KEYBOARD_INTERACTIVE_PROMPTS
+                        || metadata_bytes > MAX_KEYBOARD_INTERACTIVE_METADATA_BYTES
+                    {
+                        return Err(SshError::KeyboardInteractiveLimitExceeded);
+                    }
+                    let challenge = KeyboardInteractiveChallenge {
+                        name,
+                        instructions,
+                        prompts: prompts
+                            .into_iter()
+                            .map(|prompt| KeyboardInteractivePrompt {
+                                text: prompt.prompt,
+                                echo: prompt.echo,
+                            })
+                            .collect(),
+                    };
+                    let expected = challenge.prompts.len();
+                    let answers = responder(challenge).await?;
+                    if answers.len() != expected {
+                        return Err(SshError::KeyboardInteractiveResponseCount {
+                            expected,
+                            actual: answers.len(),
+                        });
+                    }
+                    response = tokio::time::timeout(
+                        SSH_AUTH_ROUND_TIMEOUT,
+                        session.authenticate_keyboard_interactive_respond(answers),
+                    )
+                    .await
+                    .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+                }
+            }
+        }
     }
 
     pub async fn exec_with_pty(
@@ -238,14 +411,136 @@ impl RusshClient {
     }
 }
 
+async fn connect_verified<A>(
+    address: A,
+    host_key: PinnedHostKey,
+) -> Result<russh::client::Handle<VerifiedClient>, SshError>
+where
+    A: tokio::net::ToSocketAddrs,
+{
+    let mut config = RusshProvider::default().client_config();
+    // Interactive sessions may legitimately remain idle for a long time.
+    // Bound connection establishment externally instead of enabling russh's
+    // whole-session inactivity garbage collection.
+    config.inactivity_timeout = None;
+    config.keepalive_interval = Some(Duration::from_secs(15));
+    config.keepalive_max = 3;
+    tokio::time::timeout(
+        SSH_CONNECT_TIMEOUT,
+        russh::client::connect(Arc::new(config), address, VerifiedClient { host_key }),
+    )
+    .await
+    .map_err(|_elapsed| SshError::ConnectionTimeout)?
+    .map_err(SshError::Protocol)
+}
+
+fn ensure_authenticated(result: russh::client::AuthResult) -> Result<(), SshError> {
+    if result.success() {
+        Ok(())
+    } else {
+        Err(SshError::AuthenticationRejected)
+    }
+}
+
+async fn modern_rsa_hash(
+    session: &russh::client::Handle<VerifiedClient>,
+    key: &russh::keys::PrivateKey,
+) -> Result<Option<russh::keys::ssh_key::HashAlg>, SshError> {
+    if !key.algorithm().is_rsa() {
+        return Ok(None);
+    }
+    match session.best_supported_rsa_hash().await? {
+        Some(Some(hash)) => Ok(Some(hash)),
+        // Older OpenSSH servers may omit RFC 8308 EXT_INFO while still
+        // accepting RFC 8332. Prefer SHA-512 and never silently use ssh-rsa.
+        None => Ok(Some(russh::keys::ssh_key::HashAlg::Sha512)),
+        Some(None) => Err(SshError::LegacyRsaSignatureRejected),
+    }
+}
+
+type DynamicAgent = russh::keys::agent::client::AgentClient<
+    Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>,
+>;
+
+#[cfg(unix)]
+async fn connect_default_agent() -> Result<DynamicAgent, SshError> {
+    russh::keys::agent::client::AgentClient::connect_env()
+        .await
+        .map(russh::keys::agent::client::AgentClient::dynamic)
+        .map_err(SshError::Agent)
+}
+
+#[cfg(windows)]
+async fn connect_default_agent() -> Result<DynamicAgent, SshError> {
+    russh::keys::agent::client::AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent")
+        .await
+        .map(russh::keys::agent::client::AgentClient::dynamic)
+        .map_err(SshError::Agent)
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn connect_default_agent() -> Result<DynamicAgent, SshError> {
+    Err(SshError::Agent(russh::keys::Error::BadAuthSock))
+}
+
+async fn authenticate_with_agent<S>(
+    session: &mut russh::client::Handle<VerifiedClient>,
+    username: String,
+    agent: &mut russh::keys::agent::client::AgentClient<S>,
+) -> Result<(), SshError>
+where
+    S: russh::keys::agent::client::AgentStream + Send + Unpin,
+{
+    let identities = tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, agent.request_identities())
+        .await
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)?
+        .map_err(SshError::Agent)?;
+    if identities.len() > MAX_AGENT_IDENTITIES {
+        return Err(SshError::AgentIdentityLimit {
+            actual: identities.len(),
+            maximum: MAX_AGENT_IDENTITIES,
+        });
+    }
+    for identity in identities {
+        let russh::keys::agent::AgentIdentity::PublicKey { key, .. } = identity else {
+            continue;
+        };
+        let hash_alg = if key.algorithm().is_rsa() {
+            match session.best_supported_rsa_hash().await? {
+                Some(Some(hash)) => Some(hash),
+                None => Some(russh::keys::ssh_key::HashAlg::Sha512),
+                Some(None) => continue,
+            }
+        } else {
+            None
+        };
+        let result = tokio::time::timeout(
+            SSH_AGENT_SIGN_TIMEOUT,
+            session.authenticate_publickey_with(username.clone(), key, hash_alg, agent),
+        )
+        .await
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)?
+        .map_err(|error| SshError::AgentAuthentication(error.to_string()))?;
+        if result.success() {
+            return Ok(());
+        }
+    }
+    Err(SshError::AuthenticationRejected)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{AlgorithmPolicy, PinnedHostKey, RusshClient, RusshProvider, SshProvider};
+    use super::{
+        AlgorithmPolicy, KeyboardInteractiveChallenge, PinnedHostKey, RusshClient, RusshProvider,
+        SshPrivateKey, SshProvider, authenticate_with_agent, connect_verified,
+    };
+    use futures::stream;
     use rand::rng;
-    use russh::keys::ssh_key::{Algorithm, HashAlg, PrivateKey};
-    use russh::server::{Auth, Msg, Session};
+    use russh::keys::ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey};
+    use russh::server::{Auth, Msg, Response, Session};
     use russh::{Channel, ChannelId};
+    use std::borrow::Cow;
     use std::sync::Arc;
 
     #[test]
@@ -265,8 +560,10 @@ mod tests {
         assert_eq!(provider.name(), "russh");
     }
 
-    #[derive(Debug)]
-    struct ProtocolTestServer;
+    #[derive(Debug, Default)]
+    struct ProtocolTestServer {
+        accepted_public_key: Option<PublicKey>,
+    }
 
     impl russh::server::Handler for ProtocolTestServer {
         type Error = russh::Error;
@@ -277,6 +574,52 @@ mod tests {
             } else {
                 Auth::reject()
             })
+        }
+
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            public_key: &PublicKey,
+        ) -> Result<Auth, Self::Error> {
+            Ok(
+                if user == "cshell" && self.accepted_public_key.as_ref() == Some(public_key) {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                },
+            )
+        }
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            user: &str,
+            _submethods: &str,
+            response: Option<Response<'a>>,
+        ) -> Result<Auth, Self::Error> {
+            if user != "cshell" {
+                return Ok(Auth::reject());
+            }
+            let Some(response) = response else {
+                return Ok(Auth::Partial {
+                    name: Cow::Borrowed("CShell integration"),
+                    instructions: Cow::Borrowed("Complete both prompts"),
+                    prompts: Cow::Owned(vec![
+                        (Cow::Borrowed("Verification code: "), false),
+                        (Cow::Borrowed("Visible label: "), true),
+                    ]),
+                });
+            };
+            let responses: Vec<_> = response.collect();
+            Ok(
+                if responses.len() == 2
+                    && responses[0].as_ref() == b"654321"
+                    && responses[1].as_ref() == b"operator"
+                {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                },
+            )
         }
 
         async fn channel_open_session(
@@ -328,8 +671,9 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn real_russh_password_host_key_pty_and_exec_round_trip() {
+    async fn spawn_protocol_server(
+        accepted_public_key: Option<PublicKey>,
+    ) -> (std::net::SocketAddr, String, tokio::task::JoinHandle<()>) {
         let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
         let fingerprint = host_key.fingerprint(HashAlg::Sha256).to_string();
         let mut server_config = russh::server::Config::default();
@@ -339,10 +683,15 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let running =
-                russh::server::run_stream(Arc::new(server_config), stream, ProtocolTestServer)
-                    .await
-                    .unwrap();
+            let running = russh::server::run_stream(
+                Arc::new(server_config),
+                stream,
+                ProtocolTestServer {
+                    accepted_public_key,
+                },
+            )
+            .await
+            .unwrap();
             if let Err(error) = running.await {
                 assert!(
                     matches!(
@@ -354,6 +703,19 @@ mod tests {
                 );
             }
         });
+        (address, fingerprint, server)
+    }
+
+    async fn await_protocol_server(server: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_russh_password_host_key_pty_and_exec_round_trip() {
+        let (address, fingerprint, server) = spawn_protocol_server(None).await;
 
         let client = RusshClient::connect_password(
             address,
@@ -368,9 +730,101 @@ mod tests {
         assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
         assert!(result.stderr.is_empty());
         client.disconnect().await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+        await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_russh_openssh_private_key_host_key_pty_and_exec_round_trip() {
+        let client_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let encoded = client_key.to_openssh(LineEnding::LF).unwrap();
+        let private_key = SshPrivateKey::decode_openssh(&encoded, None).unwrap();
+        assert_eq!(
+            private_key.sha256_fingerprint(),
+            client_key.fingerprint(HashAlg::Sha256).to_string()
+        );
+        assert!(!format!("{private_key:?}").contains(encoded.as_str()));
+        let (address, fingerprint, server) =
+            spawn_protocol_server(Some(client_key.public_key().clone())).await;
+
+        let client = RusshClient::connect_public_key(
+            address,
+            "cshell",
+            private_key,
+            PinnedHostKey::sha256(fingerprint),
+        )
+        .await
+        .unwrap();
+        let result = client.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
+        assert_eq!(result.exit_status, 0);
+        assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
+        assert!(result.stderr.is_empty());
+        client.disconnect().await.unwrap();
+        await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_russh_keyboard_interactive_challenge_pty_and_exec_round_trip() {
+        let (address, fingerprint, server) = spawn_protocol_server(None).await;
+        let mut challenge_count = 0_usize;
+        let client = RusshClient::connect_keyboard_interactive(
+            address,
+            "cshell",
+            PinnedHostKey::sha256(fingerprint),
+            |challenge: KeyboardInteractiveChallenge| {
+                challenge_count += 1;
+                async move {
+                    assert_eq!(challenge.name, "CShell integration");
+                    assert_eq!(challenge.instructions, "Complete both prompts");
+                    assert_eq!(challenge.prompts.len(), 2);
+                    assert_eq!(challenge.prompts[0].text, "Verification code: ");
+                    assert!(!challenge.prompts[0].echo);
+                    assert_eq!(challenge.prompts[1].text, "Visible label: ");
+                    assert!(challenge.prompts[1].echo);
+                    Ok(vec!["654321".to_owned(), "operator".to_owned()])
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(challenge_count, 1);
+        let result = client.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
+        assert_eq!(result.exit_status, 0);
+        assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
+        assert!(result.stderr.is_empty());
+        client.disconnect().await.unwrap();
+        await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_russh_agent_signature_host_key_pty_and_exec_round_trip() {
+        let rejected_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let accepted_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let (address, fingerprint, server) =
+            spawn_protocol_server(Some(accepted_key.public_key().clone())).await;
+
+        let (agent_client_stream, agent_server_stream) = tokio::io::duplex(64 * 1024);
+        russh::keys::agent::server::serve(
+            stream::iter([Ok::<_, std::io::Error>(agent_server_stream)]),
+            (),
+        )
+        .await
+        .unwrap();
+        let mut agent = russh::keys::agent::client::AgentClient::connect(agent_client_stream);
+        agent.add_identity(&rejected_key, &[]).await.unwrap();
+        agent.add_identity(&accepted_key, &[]).await.unwrap();
+
+        let mut session = connect_verified(address, PinnedHostKey::sha256(fingerprint))
             .await
-            .unwrap()
             .unwrap();
+        authenticate_with_agent(&mut session, "cshell".to_owned(), &mut agent)
+            .await
+            .unwrap();
+        let client = RusshClient { session };
+        let result = client.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
+        assert_eq!(result.exit_status, 0);
+        assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
+        assert!(result.stderr.is_empty());
+        client.disconnect().await.unwrap();
+        await_protocol_server(server).await;
     }
 }
