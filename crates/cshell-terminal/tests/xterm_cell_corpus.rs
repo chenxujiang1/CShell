@@ -3,6 +3,7 @@ use cshell_terminal::{
     AlacrittyTerminalEngine, Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameSnapshot,
     Style, TerminalEngine,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Debug)]
 struct CellSpec {
@@ -92,6 +93,121 @@ fn corpus() -> Vec<CorpusCase> {
                     ..spec(0, 1, " ")
                 },
                 spec(0, 2, "e\u{301}"),
+            ],
+        },
+        CorpusCase {
+            name: "east-asian-and-emoji-scalar-widths",
+            size: TerminalSize::cells(2, 12),
+            input: "Ａｶ·😀",
+            cursor: (0, 6),
+            cells: vec![
+                CellSpec {
+                    width: CellWidth::Wide,
+                    ..spec(0, 0, "Ａ")
+                },
+                CellSpec {
+                    width: CellWidth::WideSpacer,
+                    ..spec(0, 1, " ")
+                },
+                spec(0, 2, "ｶ"),
+                spec(0, 3, "·"),
+                CellSpec {
+                    width: CellWidth::Wide,
+                    ..spec(0, 4, "😀")
+                },
+                CellSpec {
+                    width: CellWidth::WideSpacer,
+                    ..spec(0, 5, " ")
+                },
+            ],
+        },
+        CorpusCase {
+            name: "stacked-combining-and-emoji-variation-selectors",
+            size: TerminalSize::cells(2, 12),
+            input: "e\u{301}\u{327}❤\u{fe0f}1\u{fe0f}\u{20e3}",
+            cursor: (0, 3),
+            cells: vec![
+                spec(0, 0, "e\u{301}\u{327}"),
+                spec(0, 1, "❤\u{fe0f}"),
+                spec(0, 2, "1\u{fe0f}\u{20e3}"),
+            ],
+        },
+        CorpusCase {
+            name: "emoji-zwj-modifier-and-regional-indicator-codepoints",
+            size: TerminalSize::cells(2, 16),
+            input: "👩\u{200d}💻👍🏽🇨🇳",
+            cursor: (0, 10),
+            cells: vec![
+                CellSpec {
+                    width: CellWidth::Wide,
+                    ..spec(0, 0, "👩\u{200d}")
+                },
+                CellSpec {
+                    width: CellWidth::WideSpacer,
+                    ..spec(0, 1, " ")
+                },
+                CellSpec {
+                    width: CellWidth::Wide,
+                    ..spec(0, 2, "💻")
+                },
+                CellSpec {
+                    width: CellWidth::WideSpacer,
+                    ..spec(0, 3, " ")
+                },
+                CellSpec {
+                    width: CellWidth::Wide,
+                    ..spec(0, 4, "👍")
+                },
+                CellSpec {
+                    width: CellWidth::WideSpacer,
+                    ..spec(0, 5, " ")
+                },
+                CellSpec {
+                    width: CellWidth::Wide,
+                    ..spec(0, 6, "🏽")
+                },
+                CellSpec {
+                    width: CellWidth::WideSpacer,
+                    ..spec(0, 7, " ")
+                },
+                spec(0, 8, "🇨"),
+                spec(0, 9, "🇳"),
+            ],
+        },
+        CorpusCase {
+            name: "wide-character-at-right-margin-wraps-atomically",
+            size: TerminalSize::cells(2, 4),
+            input: "abc你",
+            cursor: (1, 2),
+            cells: vec![
+                spec(0, 0, "a"),
+                spec(0, 1, "b"),
+                spec(0, 2, "c"),
+                CellSpec {
+                    width: CellWidth::LeadingWideSpacer,
+                    ..spec(0, 3, " ")
+                },
+                CellSpec {
+                    width: CellWidth::Wide,
+                    ..spec(1, 0, "你")
+                },
+                CellSpec {
+                    width: CellWidth::WideSpacer,
+                    ..spec(1, 1, " ")
+                },
+            ],
+        },
+        CorpusCase {
+            name: "combining-mark-does-not-trigger-delayed-wrap",
+            size: TerminalSize::cells(2, 4),
+            input: "abcX\u{301}Y",
+            cursor: (1, 1),
+            cells: vec![
+                spec(0, 0, "a"),
+                spec(0, 1, "b"),
+                spec(0, 2, "c"),
+                spec(0, 3, "X\u{301}"),
+                spec(1, 0, "Y"),
             ],
         },
         CorpusCase {
@@ -282,6 +398,50 @@ fn xterm_cell_golden_corpus_survives_fragmented_input() {
             chunk += 1;
         }
         assert_case(&case, &terminal.snapshot());
+    }
+}
+
+#[test]
+fn xterm_default_scalar_width_and_grapheme_width_difference_is_pinned() {
+    // xterm's emojiWidth resource defaults to false: VS15/VS16 do not
+    // retroactively resize an existing cell. Alacritty likewise assigns grid
+    // columns per scalar, while UnicodeWidthStr intentionally collapses
+    // qualified emoji sequences for higher-level text layout. Keep both
+    // numbers explicit so a dependency update cannot silently change the PTY
+    // cursor contract or be confused with renderer-side grapheme shaping.
+    let cases = [
+        ("ascii", "A", 1, 1),
+        ("east-asian-ambiguous", "·", 1, 1),
+        ("fullwidth", "Ａ", 2, 2),
+        ("halfwidth", "ｶ", 1, 1),
+        ("stacked-combining", "e\u{301}\u{327}", 1, 1),
+        ("default-emoji", "😀", 2, 2),
+        ("text-variation", "❤\u{fe0e}", 1, 1),
+        ("emoji-variation", "❤\u{fe0f}", 1, 2),
+        ("keycap", "1\u{fe0f}\u{20e3}", 1, 2),
+        ("emoji-zwj", "👩\u{200d}💻", 4, 2),
+        ("emoji-modifier", "👍🏽", 4, 2),
+        ("regional-pair", "🇨🇳", 2, 2),
+        ("family-zwj", "👨\u{200d}👩\u{200d}👧\u{200d}👦", 8, 2),
+    ];
+
+    for (name, text, scalar_width, grapheme_width) in cases {
+        let actual_scalar_width: usize = text
+            .chars()
+            .map(|character| character.width().unwrap_or(0))
+            .sum();
+        assert_eq!(actual_scalar_width, scalar_width, "{name} scalar width");
+        assert_eq!(text.width(), grapheme_width, "{name} grapheme width");
+
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(2, 32));
+        for byte in text.as_bytes().chunks(1) {
+            terminal.feed(byte);
+        }
+        assert_eq!(
+            terminal.snapshot().cursor_col,
+            scalar_width as u16,
+            "{name} terminal cursor width"
+        );
     }
 }
 
