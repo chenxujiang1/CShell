@@ -10,5 +10,5 @@ useradd --create-home --shell /bin/sh "${interop_user}"
 passwd --delete "${interop_user}" >/dev/null
 mkdir -p /run/sshd
 
-/usr/sbin/sshd -V 2>&1
+dpkg-query --show --showformat='OpenSSH server package ${Version}\n' openssh-server
 exec /usr/sbin/sshd -D -e -f /interop/sshd_config

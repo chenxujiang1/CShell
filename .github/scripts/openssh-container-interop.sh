@@ -2,6 +2,7 @@
 set -euo pipefail
 
 image="${1:?an OpenSSH container image is required}"
+cargo_command="${2:-cargo}"
 case "${image}" in
   ubuntu:22.04) ;;
   *)
@@ -99,4 +100,4 @@ export CSHELL_OPENSSH_CERTIFICATE_KEY="${interop_dir}/certificate_key"
 export CSHELL_OPENSSH_CERTIFICATE="${interop_dir}/certificate_key-cert.pub"
 
 docker logs "${container_name}"
-cargo test -p cshell-ssh --test openssh_interop --all-features --locked -- --test-threads=1
+"${cargo_command}" test -p cshell-ssh --test openssh_interop --all-features --locked -- --test-threads=1
