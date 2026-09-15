@@ -1017,6 +1017,7 @@ mod tests {
                                 error.kind(),
                                 std::io::ErrorKind::ConnectionReset
                                     | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::BrokenPipe
                                     | std::io::ErrorKind::UnexpectedEof
                             )
                     ),
