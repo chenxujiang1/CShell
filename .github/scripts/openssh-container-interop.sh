@@ -23,6 +23,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+report_failure() {
+  local line="$1"
+  local status="$2"
+  trap - ERR
+  docker logs "${container_name}" 2>&1 || true
+  echo "::error title=OpenSSH historical interoperability::script line ${line} exited with status ${status}"
+  exit "${status}"
+}
+trap 'report_failure "${LINENO}" "$?"' ERR
+
 ssh-keygen -q -t ed25519 -N '' -f "${interop_dir}/host_key"
 ssh-keygen -q -t ed25519 -N '' -f "${interop_dir}/public_key"
 ssh-keygen -q -t ed25519 -N '' -f "${interop_dir}/certificate_key"
