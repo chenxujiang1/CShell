@@ -1509,6 +1509,53 @@ mod tests {
         await_protocol_server(server).await;
     }
 
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_pageant_backend_signature_host_key_pty_and_exec_round_trip() {
+        if std::env::var_os("CSHELL_PAGEANT_INTEROP").is_none() {
+            eprintln!("skipping real Pageant interoperability test");
+            return;
+        }
+
+        let accepted_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let (address, fingerprint, server) =
+            spawn_protocol_server(Some(accepted_key.public_key().clone())).await;
+
+        let mut pageant = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match russh::keys::agent::client::AgentClient::connect_pageant().await {
+                    Ok(agent) => break agent,
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        pageant.add_identity(&accepted_key, &[]).await.unwrap();
+
+        let client = RusshClient::connect_agent_with_backend(
+            address,
+            "cshell",
+            PinnedHostKey::sha256(fingerprint),
+            AgentBackend::Pageant,
+        )
+        .await
+        .unwrap();
+        let result = client.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
+        assert_eq!(result.exit_status, 0);
+        assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
+        assert!(result.stderr.is_empty());
+        client.disconnect().await.unwrap();
+
+        pageant
+            .remove_identity(accepted_key.public_key())
+            .await
+            .unwrap();
+        await_protocol_server(server).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn local_forward_bridges_tcp_through_authenticated_ssh() {
         let (target, echo_server) = spawn_echo_server().await;

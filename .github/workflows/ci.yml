@@ -85,3 +85,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - shell: pwsh
         run: .github/scripts/windows-openssh-interop.ps1
+
+  pageant-interop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Download verified PuTTY 0.85
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'putty-0.85-w64.zip'
+          $puttyRoot = Join-Path $env:RUNNER_TEMP 'putty-0.85-w64'
+          Invoke-WebRequest -Uri 'https://the.earth.li/~sgtatham/putty/0.85/w64/putty.zip' -OutFile $archive -UseBasicParsing
+          $expected = 'e0b36e5381ecc78dd06a291bab25fb9d95bc991d0d864cf2741a5bde82816668'
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "PuTTY archive SHA-256 mismatch: expected $expected, got $actual"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $puttyRoot
+          "CSHELL_PAGEANT_EXE=$(Join-Path $puttyRoot 'pageant.exe')" >> $env:GITHUB_ENV
+      - shell: pwsh
+        run: .github/scripts/pageant-interop.ps1
