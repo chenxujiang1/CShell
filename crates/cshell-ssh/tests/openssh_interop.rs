@@ -52,7 +52,7 @@ async fn assert_openssh_exec(client: &RusshClient) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn current_openssh_accepts_project_public_key_authentication() {
+async fn openssh_server_accepts_project_public_key_authentication() {
     let Some(environment) = InteropEnvironment::load() else {
         return;
     };
@@ -70,7 +70,7 @@ async fn current_openssh_accepts_project_public_key_authentication() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn current_openssh_accepts_project_certificate_authentication() {
+async fn openssh_server_accepts_project_certificate_authentication() {
     let Some(environment) = InteropEnvironment::load() else {
         return;
     };
@@ -94,7 +94,7 @@ async fn current_openssh_accepts_project_certificate_authentication() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn current_openssh_accepts_agent_held_certificate_identity() {
+async fn openssh_server_accepts_agent_held_certificate_identity() {
     let Some(environment) = InteropEnvironment::load() else {
         return;
     };
