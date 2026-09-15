@@ -202,6 +202,8 @@ pub enum SshError {
     ConnectionTimeout,
     #[error("SSH command channel closed without an exit status")]
     MissingExitStatus,
+    #[error("SFTP subsystem failed: {0}")]
+    Sftp(#[from] cshell_sftp::SftpError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -403,6 +405,12 @@ impl RusshClient {
         })
     }
 
+    pub async fn open_sftp(&self) -> Result<cshell_sftp::SftpClient, SshError> {
+        let channel = self.session.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        Ok(cshell_sftp::SftpClient::connect(channel.into_stream()).await?)
+    }
+
     pub async fn disconnect(self) -> Result<(), SshError> {
         self.session
             .disconnect(russh::Disconnect::ByApplication, "", "")
@@ -541,6 +549,7 @@ mod tests {
     use russh::server::{Auth, Msg, Response, Session};
     use russh::{Channel, ChannelId};
     use std::borrow::Cow;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -563,6 +572,18 @@ mod tests {
     #[derive(Debug, Default)]
     struct ProtocolTestServer {
         accepted_public_key: Option<PublicKey>,
+        channels: HashMap<ChannelId, Channel<Msg>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct InitOnlySftpServer;
+
+    impl russh_sftp::server::Handler for InitOnlySftpServer {
+        type Error = russh_sftp::protocol::StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            russh_sftp::protocol::StatusCode::OpUnsupported
+        }
     }
 
     impl russh::server::Handler for ProtocolTestServer {
@@ -624,11 +645,31 @@ mod tests {
 
         async fn channel_open_session(
             &mut self,
-            _channel: Channel<Msg>,
+            channel: Channel<Msg>,
             reply: russh::server::ChannelOpenHandle,
             _session: &mut Session,
         ) -> Result<(), Self::Error> {
+            self.channels.insert(channel.id(), channel);
             reply.accept().await;
+            Ok(())
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            channel: ChannelId,
+            name: &str,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            if name != "sftp" {
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
+            let Some(channel_stream) = self.channels.remove(&channel) else {
+                session.channel_failure(channel)?;
+                return Ok(());
+            };
+            session.channel_success(channel)?;
+            russh_sftp::server::run(channel_stream.into_stream(), InitOnlySftpServer).await;
             Ok(())
         }
 
@@ -688,6 +729,7 @@ mod tests {
                 stream,
                 ProtocolTestServer {
                     accepted_public_key,
+                    ..ProtocolTestServer::default()
                 },
             )
             .await
@@ -729,6 +771,23 @@ mod tests {
         assert_eq!(result.exit_status, 0);
         assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
         assert!(result.stderr.is_empty());
+        client.disconnect().await.unwrap();
+        await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_russh_authenticated_sftp_subsystem_round_trip() {
+        let (address, fingerprint, server) = spawn_protocol_server(None).await;
+        let client = RusshClient::connect_password(
+            address,
+            "cshell",
+            "phase0",
+            PinnedHostKey::sha256(fingerprint),
+        )
+        .await
+        .unwrap();
+        let sftp = client.open_sftp().await.unwrap();
+        sftp.close().await.unwrap();
         client.disconnect().await.unwrap();
         await_protocol_server(server).await;
     }
