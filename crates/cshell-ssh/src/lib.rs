@@ -6,6 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
+mod forwarding;
+
+pub use forwarding::{ForwardHandle, ForwardLimits, RemoteForwardTarget};
+
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_AUTH_ROUND_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_AGENT_SIGN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -13,6 +17,11 @@ pub const MAX_KEYBOARD_INTERACTIVE_ROUNDS: usize = 16;
 pub const MAX_KEYBOARD_INTERACTIVE_PROMPTS: usize = 32;
 pub const MAX_KEYBOARD_INTERACTIVE_METADATA_BYTES: usize = 16 * 1024;
 pub const MAX_AGENT_IDENTITIES: usize = 256;
+
+type ForwardRouteKey = (String, u32);
+type ForwardRouteSender = tokio::sync::mpsc::Sender<russh::Channel<russh::client::Msg>>;
+type ForwardRoutes =
+    Arc<std::sync::RwLock<std::collections::HashMap<ForwardRouteKey, ForwardRouteSender>>>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AlgorithmPolicy {
@@ -157,6 +166,7 @@ impl PinnedHostKey {
 #[derive(Debug)]
 struct VerifiedClient {
     host_key: PinnedHostKey,
+    forward_routes: ForwardRoutes,
 }
 
 impl russh::client::Handler for VerifiedClient {
@@ -171,6 +181,31 @@ impl russh::client::Handler for VerifiedClient {
             .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
             .to_string();
         Ok(fingerprint == self.host_key.sha256_fingerprint)
+    }
+
+    fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        let sender = self.forward_routes.read().ok().and_then(|routes| {
+            routes
+                .get(&(connected_address.to_owned(), connected_port))
+                .cloned()
+        });
+        async move {
+            if let Some(sender) = sender
+                && sender.try_send(channel).is_ok()
+            {
+                reply.accept().await;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -204,6 +239,14 @@ pub enum SshError {
     MissingExitStatus,
     #[error("SFTP subsystem failed: {0}")]
     Sftp(#[from] cshell_sftp::SftpError),
+    #[error("SSH forwarding I/O failed: {0}")]
+    ForwardIo(#[source] std::io::Error),
+    #[error("SSH forwarding configuration is invalid: {0}")]
+    InvalidForwardConfig(String),
+    #[error("SOCKS5 handshake failed: {0}")]
+    Socks5(String),
+    #[error("SSH forwarding task failed: {0}")]
+    ForwardTask(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -214,7 +257,8 @@ pub struct ExecResult {
 }
 
 pub struct RusshClient {
-    session: russh::client::Handle<VerifiedClient>,
+    pub(crate) session: russh::client::Handle<VerifiedClient>,
+    pub(crate) forward_routes: ForwardRoutes,
 }
 
 impl std::fmt::Debug for RusshClient {
@@ -226,6 +270,84 @@ impl std::fmt::Debug for RusshClient {
 }
 
 impl RusshClient {
+    pub async fn connect_password_via(
+        jump: &Self,
+        target_host: impl Into<String>,
+        target_port: u16,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        host_key: PinnedHostKey,
+    ) -> Result<Self, SshError> {
+        let stream = jump
+            .open_direct_stream(target_host.into(), target_port)
+            .await?;
+        let (mut session, forward_routes) = connect_verified_stream(stream, host_key).await?;
+        let result = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_password(username, password),
+        )
+        .await
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        ensure_authenticated(result)?;
+        Ok(Self {
+            session,
+            forward_routes,
+        })
+    }
+
+    pub async fn connect_public_key_via(
+        jump: &Self,
+        target_host: impl Into<String>,
+        target_port: u16,
+        username: impl Into<String>,
+        private_key: SshPrivateKey,
+        host_key: PinnedHostKey,
+    ) -> Result<Self, SshError> {
+        let stream = jump
+            .open_direct_stream(target_host.into(), target_port)
+            .await?;
+        let (mut session, forward_routes) = connect_verified_stream(stream, host_key).await?;
+        let hash_alg = modern_rsa_hash(&session, &private_key.key).await?;
+        let result = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_publickey(
+                username,
+                russh::keys::PrivateKeyWithHashAlg::new(private_key.key, hash_alg),
+            ),
+        )
+        .await
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        ensure_authenticated(result)?;
+        Ok(Self {
+            session,
+            forward_routes,
+        })
+    }
+
+    async fn open_direct_stream(
+        &self,
+        target_host: String,
+        target_port: u16,
+    ) -> Result<russh::ChannelStream<russh::client::Msg>, SshError> {
+        if target_host.is_empty() || target_port == 0 {
+            return Err(SshError::InvalidForwardConfig(
+                "jump target host and port must be non-empty and non-zero".to_owned(),
+            ));
+        }
+        let channel = tokio::time::timeout(
+            SSH_CONNECT_TIMEOUT,
+            self.session.channel_open_direct_tcpip(
+                target_host,
+                u32::from(target_port),
+                "127.0.0.1",
+                0,
+            ),
+        )
+        .await
+        .map_err(|_elapsed| SshError::ConnectionTimeout)??;
+        Ok(channel.into_stream())
+    }
+
     pub async fn connect_password<A>(
         address: A,
         username: impl Into<String>,
@@ -235,7 +357,7 @@ impl RusshClient {
     where
         A: tokio::net::ToSocketAddrs,
     {
-        let mut session = connect_verified(address, host_key).await?;
+        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
         let result = tokio::time::timeout(
             SSH_AUTH_ROUND_TIMEOUT,
             session.authenticate_password(username, password),
@@ -243,7 +365,10 @@ impl RusshClient {
         .await
         .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
         ensure_authenticated(result)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            forward_routes,
+        })
     }
 
     pub async fn connect_public_key<A>(
@@ -255,7 +380,7 @@ impl RusshClient {
     where
         A: tokio::net::ToSocketAddrs,
     {
-        let mut session = connect_verified(address, host_key).await?;
+        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
         let username = username.into();
         let hash_alg = modern_rsa_hash(&session, &private_key.key).await?;
         let result = tokio::time::timeout(
@@ -268,7 +393,10 @@ impl RusshClient {
         .await
         .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
         ensure_authenticated(result)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            forward_routes,
+        })
     }
 
     pub async fn connect_agent<A>(
@@ -279,12 +407,15 @@ impl RusshClient {
     where
         A: tokio::net::ToSocketAddrs,
     {
-        let mut session = connect_verified(address, host_key).await?;
+        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
         let mut agent = tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, connect_default_agent())
             .await
             .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
         authenticate_with_agent(&mut session, username.into(), &mut agent).await?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            forward_routes,
+        })
     }
 
     pub async fn connect_keyboard_interactive<A, R, F>(
@@ -298,7 +429,7 @@ impl RusshClient {
         R: FnMut(KeyboardInteractiveChallenge) -> F + Send,
         F: Future<Output = Result<Vec<String>, SshError>> + Send,
     {
-        let mut session = connect_verified(address, host_key).await?;
+        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
         let mut response = tokio::time::timeout(
             SSH_AUTH_ROUND_TIMEOUT,
             session.authenticate_keyboard_interactive_start(username, None),
@@ -309,7 +440,10 @@ impl RusshClient {
         loop {
             match response {
                 russh::client::KeyboardInteractiveAuthResponse::Success => {
-                    return Ok(Self { session });
+                    return Ok(Self {
+                        session,
+                        forward_routes,
+                    });
                 }
                 russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
                     return Err(SshError::AuthenticationRejected);
@@ -422,10 +556,57 @@ impl RusshClient {
 async fn connect_verified<A>(
     address: A,
     host_key: PinnedHostKey,
-) -> Result<russh::client::Handle<VerifiedClient>, SshError>
+) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes), SshError>
 where
     A: tokio::net::ToSocketAddrs,
 {
+    let config = verified_config();
+
+    let forward_routes = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let session = tokio::time::timeout(
+        SSH_CONNECT_TIMEOUT,
+        russh::client::connect(
+            Arc::new(config),
+            address,
+            VerifiedClient {
+                host_key,
+                forward_routes: Arc::clone(&forward_routes),
+            },
+        ),
+    )
+    .await
+    .map_err(|_elapsed| SshError::ConnectionTimeout)?
+    .map_err(SshError::Protocol)?;
+    Ok((session, forward_routes))
+}
+
+async fn connect_verified_stream<R>(
+    stream: R,
+    host_key: PinnedHostKey,
+) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes), SshError>
+where
+    R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let config = verified_config();
+    let forward_routes = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let session = tokio::time::timeout(
+        SSH_CONNECT_TIMEOUT,
+        russh::client::connect_stream(
+            Arc::new(config),
+            stream,
+            VerifiedClient {
+                host_key,
+                forward_routes: Arc::clone(&forward_routes),
+            },
+        ),
+    )
+    .await
+    .map_err(|_elapsed| SshError::ConnectionTimeout)?
+    .map_err(SshError::Protocol)?;
+    Ok((session, forward_routes))
+}
+
+fn verified_config() -> russh::client::Config {
     let mut config = RusshProvider::default().client_config();
     // Interactive sessions may legitimately remain idle for a long time.
     // Bound connection establishment externally instead of enabling russh's
@@ -433,13 +614,7 @@ where
     config.inactivity_timeout = None;
     config.keepalive_interval = Some(Duration::from_secs(15));
     config.keepalive_max = 3;
-    tokio::time::timeout(
-        SSH_CONNECT_TIMEOUT,
-        russh::client::connect(Arc::new(config), address, VerifiedClient { host_key }),
-    )
-    .await
-    .map_err(|_elapsed| SshError::ConnectionTimeout)?
-    .map_err(SshError::Protocol)
+    config
 }
 
 fn ensure_authenticated(result: russh::client::AuthResult) -> Result<(), SshError> {
@@ -573,6 +748,7 @@ mod tests {
     struct ProtocolTestServer {
         accepted_public_key: Option<PublicKey>,
         channels: HashMap<ChannelId, Channel<Msg>>,
+        remote_forwards: HashMap<(String, u32), tokio::sync::oneshot::Sender<()>>,
     }
 
     #[derive(Debug, Default)]
@@ -652,6 +828,104 @@ mod tests {
             self.channels.insert(channel.id(), channel);
             reply.accept().await;
             Ok(())
+        }
+
+        fn channel_open_direct_tcpip(
+            &mut self,
+            channel: Channel<Msg>,
+            host_to_connect: &str,
+            port_to_connect: u32,
+            _originator_address: &str,
+            _originator_port: u32,
+            reply: russh::server::ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            let host = host_to_connect.to_owned();
+            async move {
+                let Ok(port) = u16::try_from(port_to_connect) else {
+                    reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                    return Ok(());
+                };
+                match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                    Ok(mut socket) => {
+                        reply.accept().await;
+                        tokio::spawn(async move {
+                            let mut stream = channel.into_stream();
+                            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+                        });
+                    }
+                    Err(_) => {
+                        reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        fn tcpip_forward(
+            &mut self,
+            address: &str,
+            port: &mut u32,
+            session: &mut Session,
+        ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+            let address = address.to_owned();
+            let requested_port = *port;
+            let handle = session.handle();
+            async move {
+                let Ok(requested_port) = u16::try_from(requested_port) else {
+                    return Ok(false);
+                };
+                let Ok(listener) =
+                    tokio::net::TcpListener::bind((address.as_str(), requested_port)).await
+                else {
+                    return Ok(false);
+                };
+                let actual_port = listener.local_addr()?.port();
+                *port = u32::from(actual_port);
+                let key = (address.clone(), u32::from(actual_port));
+                let (stop, mut stopped) = tokio::sync::oneshot::channel();
+                if self.remote_forwards.insert(key, stop).is_some() {
+                    return Ok(false);
+                }
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = &mut stopped => break,
+                            accepted = listener.accept() => {
+                                let Ok((mut socket, peer)) = accepted else { break };
+                                let Ok(channel) = handle.channel_open_forwarded_tcpip(
+                                    address.clone(),
+                                    u32::from(actual_port),
+                                    peer.ip().to_string(),
+                                    u32::from(peer.port()),
+                                ).await else { break };
+                                tokio::spawn(async move {
+                                    let mut stream = channel.into_stream();
+                                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+                                });
+                            }
+                        }
+                    }
+                });
+                Ok(true)
+            }
+        }
+
+        fn cancel_tcpip_forward(
+            &mut self,
+            address: &str,
+            port: u32,
+            _session: &mut Session,
+        ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+            let stopped = self.remote_forwards.remove(&(address.to_owned(), port));
+            async move {
+                if let Some(stop) = stopped {
+                    let _ = stop.send(());
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
         }
 
         async fn subsystem_request(
@@ -739,7 +1013,12 @@ mod tests {
                     matches!(
                         error,
                         russh::Error::IO(ref error)
-                            if error.kind() == std::io::ErrorKind::ConnectionReset
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::UnexpectedEof
+                            )
                     ),
                     "unexpected SSH test server failure: {error}"
                 );
@@ -753,6 +1032,22 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    async fn spawn_echo_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut payload = [0_u8; 5];
+            tokio::io::AsyncReadExt::read_exact(&mut socket, &mut payload)
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut socket, &payload)
+                .await
+                .unwrap();
+        });
+        (address, server)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -872,18 +1167,214 @@ mod tests {
         agent.add_identity(&rejected_key, &[]).await.unwrap();
         agent.add_identity(&accepted_key, &[]).await.unwrap();
 
-        let mut session = connect_verified(address, PinnedHostKey::sha256(fingerprint))
-            .await
-            .unwrap();
+        let (mut session, forward_routes) =
+            connect_verified(address, PinnedHostKey::sha256(fingerprint))
+                .await
+                .unwrap();
         authenticate_with_agent(&mut session, "cshell".to_owned(), &mut agent)
             .await
             .unwrap();
-        let client = RusshClient { session };
+        let client = RusshClient {
+            session,
+            forward_routes,
+        };
         let result = client.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
         assert_eq!(result.exit_status, 0);
         assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
         assert!(result.stderr.is_empty());
         client.disconnect().await.unwrap();
         await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_forward_bridges_tcp_through_authenticated_ssh() {
+        let (target, echo_server) = spawn_echo_server().await;
+        let (ssh_address, fingerprint, ssh_server) = spawn_protocol_server(None).await;
+        let client = Arc::new(
+            RusshClient::connect_password(
+                ssh_address,
+                "cshell",
+                "phase0",
+                PinnedHostKey::sha256(fingerprint),
+            )
+            .await
+            .unwrap(),
+        );
+        let forward = client
+            .start_local_forward(
+                "127.0.0.1:0".parse().unwrap(),
+                target.ip().to_string(),
+                target.port(),
+                super::ForwardLimits::default(),
+            )
+            .await
+            .unwrap();
+        let mut socket =
+            tokio::net::TcpStream::connect((forward.bound_address(), forward.bound_port()))
+                .await
+                .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut socket, b"hello")
+            .await
+            .unwrap();
+        let mut echoed = [0_u8; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut socket, &mut echoed)
+            .await
+            .unwrap();
+        assert_eq!(&echoed, b"hello");
+        forward.shutdown().await.unwrap();
+        echo_server.await.unwrap();
+        Arc::try_unwrap(client).unwrap().disconnect().await.unwrap();
+        await_protocol_server(ssh_server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dynamic_forward_negotiates_socks5_and_bridges_tcp() {
+        let (target, echo_server) = spawn_echo_server().await;
+        let (ssh_address, fingerprint, ssh_server) = spawn_protocol_server(None).await;
+        let client = Arc::new(
+            RusshClient::connect_password(
+                ssh_address,
+                "cshell",
+                "phase0",
+                PinnedHostKey::sha256(fingerprint),
+            )
+            .await
+            .unwrap(),
+        );
+        let forward = client
+            .start_dynamic_forward(
+                "127.0.0.1:0".parse().unwrap(),
+                super::ForwardLimits::default(),
+            )
+            .await
+            .unwrap();
+        let mut socket =
+            tokio::net::TcpStream::connect((forward.bound_address(), forward.bound_port()))
+                .await
+                .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut socket, &[5, 1, 0])
+            .await
+            .unwrap();
+        let mut method = [0_u8; 2];
+        tokio::io::AsyncReadExt::read_exact(&mut socket, &mut method)
+            .await
+            .unwrap();
+        assert_eq!(method, [5, 0]);
+        let octets = match target.ip() {
+            std::net::IpAddr::V4(address) => address.octets(),
+            std::net::IpAddr::V6(_) => unreachable!(),
+        };
+        let mut request = vec![5, 1, 0, 1];
+        request.extend_from_slice(&octets);
+        request.extend_from_slice(&target.port().to_be_bytes());
+        tokio::io::AsyncWriteExt::write_all(&mut socket, &request)
+            .await
+            .unwrap();
+        let mut reply = [0_u8; 10];
+        tokio::io::AsyncReadExt::read_exact(&mut socket, &mut reply)
+            .await
+            .unwrap();
+        assert_eq!(reply[1], 0);
+        tokio::io::AsyncWriteExt::write_all(&mut socket, b"hello")
+            .await
+            .unwrap();
+        let mut echoed = [0_u8; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut socket, &mut echoed)
+            .await
+            .unwrap();
+        assert_eq!(&echoed, b"hello");
+        forward.shutdown().await.unwrap();
+        echo_server.await.unwrap();
+        Arc::try_unwrap(client).unwrap().disconnect().await.unwrap();
+        await_protocol_server(ssh_server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn remote_forward_accepts_server_side_tcp_and_cancels_cleanly() {
+        let (target, echo_server) = spawn_echo_server().await;
+        let (ssh_address, fingerprint, ssh_server) = spawn_protocol_server(None).await;
+        let client = Arc::new(
+            RusshClient::connect_password(
+                ssh_address,
+                "cshell",
+                "phase0",
+                PinnedHostKey::sha256(fingerprint),
+            )
+            .await
+            .unwrap(),
+        );
+        let forward = client
+            .start_remote_forward(
+                "127.0.0.1",
+                0,
+                super::RemoteForwardTarget {
+                    host: target.ip().to_string(),
+                    port: target.port(),
+                },
+                super::ForwardLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(forward.bound_port(), 0);
+        let mut socket =
+            tokio::net::TcpStream::connect((forward.bound_address(), forward.bound_port()))
+                .await
+                .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut socket, b"hello")
+            .await
+            .unwrap();
+        let mut echoed = [0_u8; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut socket, &mut echoed)
+            .await
+            .unwrap();
+        assert_eq!(&echoed, b"hello");
+        drop(socket);
+        forward.shutdown().await.unwrap();
+        echo_server.await.unwrap();
+        Arc::try_unwrap(client).unwrap().disconnect().await.unwrap();
+        await_protocol_server(ssh_server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn multi_hop_stream_performs_verified_ssh_handshake_at_each_hop() {
+        let (target_address, target_fingerprint, target_server) = spawn_protocol_server(None).await;
+        let (second_address, second_fingerprint, second_server) = spawn_protocol_server(None).await;
+        let (first_address, first_fingerprint, first_server) = spawn_protocol_server(None).await;
+        let first = RusshClient::connect_password(
+            first_address,
+            "cshell",
+            "phase0",
+            PinnedHostKey::sha256(first_fingerprint),
+        )
+        .await
+        .unwrap();
+        let second = RusshClient::connect_password_via(
+            &first,
+            second_address.ip().to_string(),
+            second_address.port(),
+            "cshell",
+            "phase0",
+            PinnedHostKey::sha256(second_fingerprint),
+        )
+        .await
+        .unwrap();
+        let target = RusshClient::connect_password_via(
+            &second,
+            target_address.ip().to_string(),
+            target_address.port(),
+            "cshell",
+            "phase0",
+            PinnedHostKey::sha256(target_fingerprint),
+        )
+        .await
+        .unwrap();
+        let result = target.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
+        assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
+        target.disconnect().await.unwrap();
+        second.disconnect().await.unwrap();
+        first.disconnect().await.unwrap();
+        await_protocol_server(target_server).await;
+        await_protocol_server(second_server).await;
+        await_protocol_server(first_server).await;
     }
 }
