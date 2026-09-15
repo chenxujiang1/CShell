@@ -9,6 +9,7 @@ fn main() -> ExitCode {
         "pipeline-bench" => pipeline_bench(),
         "ipc-fanout-bench" => ipc_fanout_bench(),
         "atlas-pressure-bench" => atlas_pressure_bench(),
+        "native-ci-bench" => native_ci_bench(),
         "journal-capacity-bench" => journal_capacity_bench(),
         "journal-crash-matrix" => journal_crash_matrix(),
         "terminal-corpus" => terminal_corpus(),
@@ -134,6 +135,30 @@ fn atlas_pressure_bench() -> Result<(), String> {
     )
 }
 
+fn native_ci_bench() -> Result<(), String> {
+    run_with_env(
+        "cargo",
+        &["bench", "--package", "cshelld", "--bench", "ipc_fanout"],
+        &[
+            ("CSHELL_IPC_FANOUT_CLIENTS", "100"),
+            ("CSHELL_IPC_FANOUT_SECONDS", "15"),
+            ("CSHELL_ENFORCE_PERF", "1"),
+        ],
+    )?;
+    atlas_pressure_bench()?;
+    run_with_env(
+        "cargo",
+        &[
+            "bench",
+            "--package",
+            "cshell-output-store",
+            "--bench",
+            "journal_throughput",
+        ],
+        &[("CSHELL_SCALE_MIB", "1024"), ("CSHELL_ENFORCE_PERF", "1")],
+    )
+}
+
 fn journal_capacity_bench() -> Result<(), String> {
     run_with_env(
         "cargo",
@@ -236,6 +261,7 @@ fn print_help() {
     println!("  cargo xtask pipeline-bench run the 60-second full output pipeline gate");
     println!("  cargo xtask ipc-fanout-bench run the 100-client IPC resource gate");
     println!("  cargo xtask atlas-pressure-bench run the full dynamic glyph-atlas gate");
+    println!("  cargo xtask native-ci-bench run bounded four-platform resource gates");
     println!("  cargo xtask journal-capacity-bench run the 100-GiB journal capacity gate");
     println!("  cargo xtask journal-crash-matrix run forced-termination recovery cases");
     println!("  cargo xtask terminal-corpus run fragmented ANSI/OSC/xterm cell golden cases");

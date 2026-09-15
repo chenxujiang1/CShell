@@ -45,6 +45,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
 
+  native-resource-gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-15
+          - macos-15-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask native-ci-bench
+
   msrv:
     runs-on: ubuntu-latest
     steps:
