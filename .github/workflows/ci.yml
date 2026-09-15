@@ -76,3 +76,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: bash .github/scripts/dropbear-interop.sh
+
+  windows-openssh-interop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - shell: pwsh
+        run: .github/scripts/windows-openssh-interop.ps1
