@@ -141,7 +141,7 @@ fn echo_latency_bench() -> Result<(), String> {
         "cargo",
         &["bench", "--package", "cshelld", "--bench", "echo_latency"],
         &[
-            ("CSHELL_ECHO_SAMPLES", "80"),
+            ("CSHELL_ECHO_SAMPLES", "200"),
             ("CSHELL_ECHO_WARMUP", "10"),
             ("CSHELL_REQUIRE_GPU", "1"),
             ("CSHELL_ENFORCE_PERF", "1"),

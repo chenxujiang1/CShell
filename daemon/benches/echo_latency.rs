@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const CHILD_MODE: &str = "--pty-echo-child";
-const DEFAULT_SAMPLES: usize = 80;
+const DEFAULT_SAMPLES: usize = 200;
 const DEFAULT_WARMUP: usize = 10;
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(2);
 const P95_BUDGET_MS: f64 = 16.7;
@@ -80,8 +80,8 @@ fn echo_child() -> ExitCode {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let samples = env_usize("CSHELL_ECHO_SAMPLES", DEFAULT_SAMPLES)?;
     let warmup = env_usize("CSHELL_ECHO_WARMUP", DEFAULT_WARMUP)?;
-    if samples < 20 {
-        return Err("CSHELL_ECHO_SAMPLES must be at least 20".into());
+    if samples < 100 {
+        return Err("CSHELL_ECHO_SAMPLES must be at least 100 for a meaningful p99".into());
     }
     let mut renderer = HeadlessTerminalRenderer::new(800, 480).await?;
     let adapter = renderer.adapter_info();
