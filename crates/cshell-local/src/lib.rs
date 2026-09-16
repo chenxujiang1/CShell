@@ -9,6 +9,16 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use thiserror::Error;
 
+#[cfg(unix)]
+mod unix_process_tree;
+#[cfg(windows)]
+mod windows_process_tree;
+
+#[cfg(unix)]
+use unix_process_tree::ProcessTree;
+#[cfg(windows)]
+use windows_process_tree::ProcessTree;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum WorkingDirectoryPolicy {
     Inherit,
@@ -78,9 +88,13 @@ pub enum LocalPtyError {
     ReaderAlreadyTaken,
     #[error("local PTY input is already closed")]
     InputClosed,
+    #[error("cannot supervise local process tree: {0}")]
+    ProcessTree(std::io::Error),
 }
 
 pub struct PtySession {
+    // Dropped first: descendants cannot retain the PTY after its owner exits.
+    process_tree: ProcessTree,
     master: Box<dyn MasterPty + Send>,
     writer: Option<Box<dyn Write + Send>>,
     reader: Option<Box<dyn Read + Send>>,
@@ -117,10 +131,15 @@ impl PtySession {
             command.cwd(path);
         }
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(command)
             .map_err(|error| LocalPtyError::Spawn(error.to_string()))?;
+        let process_tree = ProcessTree::attach(&*child).map_err(|error| {
+            let _ = child.kill();
+            let _ = child.wait();
+            LocalPtyError::ProcessTree(error)
+        })?;
         drop(pair.slave);
         let reader = pair
             .master
@@ -131,6 +150,7 @@ impl PtySession {
             .take_writer()
             .map_err(|error| LocalPtyError::Io(std::io::Error::other(error.to_string())))?;
         Ok(Self {
+            process_tree,
             master: pair.master,
             writer: Some(writer),
             reader: Some(reader),
@@ -173,12 +193,32 @@ impl PtySession {
     }
 
     pub fn kill(&mut self) -> Result<(), LocalPtyError> {
-        self.child.kill().map_err(Into::into)
+        #[cfg(unix)]
+        self.process_tree
+            .terminate(self.master.process_group_leader())
+            .map_err(LocalPtyError::ProcessTree)?;
+        #[cfg(windows)]
+        self.process_tree
+            .terminate()
+            .map_err(LocalPtyError::ProcessTree)?;
+        self.child.wait()?;
+        Ok(())
     }
 
     #[must_use]
     pub fn process_id(&self) -> Option<u32> {
         self.child.process_id()
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        let _ = self
+            .process_tree
+            .terminate(self.master.process_group_leader());
+        #[cfg(windows)]
+        let _ = self.process_tree.terminate();
     }
 }
 
@@ -197,7 +237,7 @@ mod tests {
     use cshell_domain::TerminalSize;
     use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
     use std::collections::BTreeMap;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -294,5 +334,116 @@ mod tests {
         assert!(!output.trim().is_empty(), "PTY output was empty");
         #[cfg(not(windows))]
         assert!(output.contains("CSHELL_PTY_OK"), "PTY output: {output:?}");
+    }
+
+    #[test]
+    fn killing_a_pty_session_terminates_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let heartbeat = directory.path().join("descendant-heartbeat");
+        let profile = LocalProfile {
+            name: "PTY process tree probe".to_owned(),
+            program: std::env::current_exe().unwrap(),
+            args: vec![
+                "--ignored".to_owned(),
+                "--exact".to_owned(),
+                "tests::process_tree_helper".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            env_overrides: BTreeMap::from([
+                ("CSHELL_PROCESS_TREE_HELPER".to_owned(), "parent".to_owned()),
+                (
+                    "CSHELL_PROCESS_TREE_HEARTBEAT".to_owned(),
+                    heartbeat.to_string_lossy().into_owned(),
+                ),
+            ]),
+        };
+        let mut session = PtySession::spawn(&profile, TerminalSize::cells(24, 80)).unwrap();
+        let reader = session.take_reader().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buffer = [0_u8; 4096];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut output = Vec::new();
+        let mut answered_cursor_query = false;
+        loop {
+            if let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(50)) {
+                output.extend_from_slice(&chunk);
+            }
+            if !answered_cursor_query && output.windows(4).any(|window| window == b"\x1b[6n") {
+                session.write_all(b"\x1b[1;1R").unwrap();
+                answered_cursor_query = true;
+            }
+            let descendant_started =
+                String::from_utf8_lossy(&output).contains("CSHELL_DESCENDANT_STARTED");
+            let heartbeat_started = heartbeat
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() >= 3);
+            if descendant_started && heartbeat_started {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "descendant did not start: {:?}",
+                String::from_utf8_lossy(&output)
+            );
+        }
+
+        session.kill().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let settled_length = heartbeat.metadata().unwrap().len();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            heartbeat.metadata().unwrap().len(),
+            settled_length,
+            "descendant continued writing after the PTY process tree was terminated"
+        );
+    }
+
+    #[test]
+    #[ignore = "invoked as a subprocess by the process-tree test"]
+    fn process_tree_helper() {
+        let Some(mode) = std::env::var_os("CSHELL_PROCESS_TREE_HELPER") else {
+            return;
+        };
+        let heartbeat = std::env::var_os("CSHELL_PROCESS_TREE_HEARTBEAT").unwrap();
+        if mode == "parent" {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "tests::process_tree_helper",
+                    "--nocapture",
+                ])
+                .env("CSHELL_PROCESS_TREE_HELPER", "descendant")
+                .env("CSHELL_PROCESS_TREE_HEARTBEAT", &heartbeat)
+                .spawn()
+                .unwrap();
+            println!("CSHELL_DESCENDANT_STARTED={}", child.id());
+            std::io::stdout().flush().unwrap();
+            child.wait().unwrap();
+            return;
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(heartbeat)
+            .unwrap();
+        #[cfg(unix)]
+        crate::unix_process_tree::make_self_foreground().unwrap();
+        loop {
+            file.write_all(b"x").unwrap();
+            file.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

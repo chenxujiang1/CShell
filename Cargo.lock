@@ -805,9 +805,12 @@ version = "0.1.0"
 dependencies = [
  "cshell-domain",
  "cshell-terminal",
+ "libc",
  "portable-pty",
  "serde",
+ "tempfile",
  "thiserror 2.0.20",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
