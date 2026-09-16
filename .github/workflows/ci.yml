@@ -63,7 +63,10 @@ jobs:
       - name: Install Linux software Vulkan adapter
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes libvulkan1 mesa-vulkan-drivers
-      - run: bash .github/scripts/run-with-diagnostics.sh cargo xtask native-ci-bench
+      - name: Run native resource gates
+        env:
+          CSHELL_ALLOW_SOFTWARE_GPU: '1'
+        run: bash .github/scripts/run-with-diagnostics.sh cargo xtask native-ci-bench
 
   msrv:
     runs-on: ubuntu-latest

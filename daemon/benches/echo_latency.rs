@@ -22,6 +22,8 @@ const DEFAULT_WARMUP: usize = 10;
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(2);
 const P95_BUDGET_MS: f64 = 16.7;
 const P99_BUDGET_MS: f64 = 33.0;
+const SOFTWARE_P95_BUDGET_MS: f64 = 25.0;
+const SOFTWARE_P99_BUDGET_MS: f64 = 50.0;
 
 fn main() -> ExitCode {
     if env::args().nth(1).as_deref() == Some(CHILD_MODE) {
@@ -89,6 +91,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "terminal GPU adapter: {} ({}, {})",
         adapter.0, adapter.1, adapter.2
     );
+    let budgets = if renderer.is_cpu_adapter() {
+        if env::var_os("CSHELL_ALLOW_SOFTWARE_GPU").is_none() {
+            return Err(
+                "CPU rendering adapter is not a hardware performance gate; set CSHELL_ALLOW_SOFTWARE_GPU=1 only for software-adapter CI"
+                    .into(),
+            );
+        }
+        LatencyBudgets {
+            tier: "CPU fallback",
+            p95_ms: SOFTWARE_P95_BUDGET_MS,
+            p99_ms: SOFTWARE_P99_BUDGET_MS,
+        }
+    } else {
+        LatencyBudgets {
+            tier: "hardware GPU",
+            p95_ms: P95_BUDGET_MS,
+            p99_ms: P99_BUDGET_MS,
+        }
+    };
+    println!(
+        "terminal latency budgets ({}): p95 < {:.1} ms, p99 < {:.1} ms",
+        budgets.tier, budgets.p95_ms, budgets.p99_ms
+    );
     let local = benchmark_local_pty(&mut renderer, samples, warmup)?;
     let ssh = benchmark_ssh(&mut renderer, samples, warmup).await?;
     print_report(
@@ -100,8 +125,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &ssh,
     );
     if env::var_os("CSHELL_ENFORCE_PERF").is_some() {
-        enforce("local PTY", &local)?;
-        enforce("loopback SSH", &ssh)?;
+        enforce("local PTY", &local, budgets)?;
+        enforce("loopback SSH", &ssh, budgets)?;
     }
     Ok(())
 }
@@ -305,6 +330,13 @@ struct LatencyReport {
     gpu_p99_ms: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LatencyBudgets {
+    tier: &'static str,
+    p95_ms: f64,
+    p99_ms: f64,
+}
+
 impl LatencyReport {
     fn new(mut values: Vec<Duration>, mut gpu_values: Vec<Duration>) -> Self {
         values.sort_unstable();
@@ -348,11 +380,15 @@ fn print_report(label: &str, report: &LatencyReport) {
     );
 }
 
-fn enforce(label: &str, report: &LatencyReport) -> Result<(), Box<dyn std::error::Error>> {
-    if report.p95_ms > P95_BUDGET_MS || report.p99_ms > P99_BUDGET_MS {
+fn enforce(
+    label: &str,
+    report: &LatencyReport,
+    budgets: LatencyBudgets,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if report.p95_ms > budgets.p95_ms || report.p99_ms > budgets.p99_ms {
         return Err(format!(
-            "{label} latency p95/p99 {:.3}/{:.3} ms exceeded {:.1}/{:.1} ms",
-            report.p95_ms, report.p99_ms, P95_BUDGET_MS, P99_BUDGET_MS
+            "{label} latency p95/p99 {:.3}/{:.3} ms exceeded {} budgets {:.1}/{:.1} ms",
+            report.p95_ms, report.p99_ms, budgets.tier, budgets.p95_ms, budgets.p99_ms
         )
         .into());
     }

@@ -1087,6 +1087,11 @@ impl HeadlessTerminalRenderer {
         (&self.adapter_name, &self.backend, &self.device_type)
     }
 
+    #[must_use]
+    pub fn is_cpu_adapter(&self) -> bool {
+        self.device_type == "Cpu"
+    }
+
     pub fn render_frame(
         &mut self,
         frame: &TerminalSurfaceFrame,
