@@ -9,6 +9,7 @@ fn main() -> ExitCode {
         "pipeline-bench" => pipeline_bench(),
         "ipc-fanout-bench" => ipc_fanout_bench(),
         "atlas-pressure-bench" => atlas_pressure_bench(),
+        "echo-latency-bench" => echo_latency_bench(),
         "native-ci-bench" => native_ci_bench(),
         "journal-capacity-bench" => journal_capacity_bench(),
         "journal-crash-matrix" => journal_crash_matrix(),
@@ -135,7 +136,21 @@ fn atlas_pressure_bench() -> Result<(), String> {
     )
 }
 
+fn echo_latency_bench() -> Result<(), String> {
+    run_with_env(
+        "cargo",
+        &["bench", "--package", "cshelld", "--bench", "echo_latency"],
+        &[
+            ("CSHELL_ECHO_SAMPLES", "80"),
+            ("CSHELL_ECHO_WARMUP", "10"),
+            ("CSHELL_REQUIRE_GPU", "1"),
+            ("CSHELL_ENFORCE_PERF", "1"),
+        ],
+    )
+}
+
 fn native_ci_bench() -> Result<(), String> {
+    echo_latency_bench()?;
     run_with_env(
         "cargo",
         &["bench", "--package", "cshelld", "--bench", "ipc_fanout"],
@@ -261,6 +276,7 @@ fn print_help() {
     println!("  cargo xtask pipeline-bench run the 60-second full output pipeline gate");
     println!("  cargo xtask ipc-fanout-bench run the 100-client IPC resource gate");
     println!("  cargo xtask atlas-pressure-bench run the full dynamic glyph-atlas gate");
+    println!("  cargo xtask echo-latency-bench run PTY/SSH-to-GPU percentile gates");
     println!("  cargo xtask native-ci-bench run bounded four-platform resource gates");
     println!("  cargo xtask journal-capacity-bench run the 100-GiB journal capacity gate");
     println!("  cargo xtask journal-crash-matrix run forced-termination recovery cases");

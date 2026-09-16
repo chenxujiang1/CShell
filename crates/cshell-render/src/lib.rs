@@ -23,9 +23,10 @@ pub use terminal_interaction::{
     search_terminal_snapshot, validate_terminal_search_query,
 };
 pub use window::{
-    AtlasPressureBenchmarkReport, EguiFrame, LogGeometryBenchmarkReport, RenderOutcome,
-    TerminalGeometryBenchmarkReport, TerminalViewport, WindowRenderer, WindowRendererError,
-    benchmark_atlas_pressure, benchmark_log_geometry, benchmark_terminal_geometry,
+    AtlasPressureBenchmarkReport, EguiFrame, HeadlessRenderReport, HeadlessTerminalRenderer,
+    LogGeometryBenchmarkReport, RenderOutcome, TerminalGeometryBenchmarkReport, TerminalViewport,
+    WindowRenderer, WindowRendererError, benchmark_atlas_pressure, benchmark_log_geometry,
+    benchmark_terminal_geometry,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,8 +252,11 @@ pub async fn run_headless_gpu_probe() -> Result<GpuProbeReport, GpuProbeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuProbeError, TerminalSurfaceModel, ViewportPlanner, run_headless_gpu_probe};
-    use cshell_terminal::{Cell, FrameSnapshot, TerminalModes};
+    use super::{
+        GpuProbeError, HeadlessTerminalRenderer, TerminalSurfaceModel, ViewportPlanner,
+        WindowRendererError, run_headless_gpu_probe,
+    };
+    use cshell_terminal::{Cell, CellWidth, FrameSnapshot, TerminalModes};
     use std::sync::Arc;
 
     #[test]
@@ -327,5 +331,45 @@ mod tests {
             "wgpu adapter: {} ({}, {})",
             report.adapter_name, report.backend, report.device_type
         );
+    }
+
+    #[tokio::test]
+    async fn headless_terminal_renderer_draws_real_terminal_geometry() {
+        let mut renderer = match HeadlessTerminalRenderer::new(800, 480).await {
+            Ok(renderer) => renderer,
+            Err(WindowRendererError::Adapter(error))
+                if std::env::var_os("CSHELL_REQUIRE_GPU").is_none() =>
+            {
+                eprintln!(
+                    "skipping terminal GPU probe because this runner has no adapter: {error}"
+                );
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let mut cells = vec![Cell::default(); 24 * 80];
+        for (cell, character) in cells.iter_mut().zip("CShell GPU 回显".chars()) {
+            *cell = Cell::new(character, CellWidth::Single, Default::default());
+        }
+        let snapshot = Arc::new(FrameSnapshot {
+            generation: 1,
+            rows: 24,
+            cols: 80,
+            cursor_row: 0,
+            cursor_col: 13,
+            cursor_appearance: Default::default(),
+            terminal_modes: TerminalModes::default(),
+            cells,
+        });
+        let mut surface = TerminalSurfaceModel::default();
+        assert!(surface.submit_snapshot(snapshot));
+        let frame = surface
+            .prepare_frame(0, 24)
+            .unwrap_or_else(|| panic!("terminal frame must be prepared"));
+        let report = renderer
+            .render_frame(&frame)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(report.vertices > 0);
+        assert!(!renderer.adapter_info().0.is_empty());
     }
 }

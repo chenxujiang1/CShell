@@ -838,6 +838,353 @@ pub enum WindowRendererError {
     DeviceLost,
     #[error("wgpu surface returned a validation failure")]
     SurfaceValidation,
+    #[error("wgpu submission did not complete: {0}")]
+    Poll(#[from] wgpu::PollError),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeadlessRenderReport {
+    pub vertices: u32,
+    pub gpu_completion: Duration,
+}
+
+/// Persistent offscreen renderer used by transport-to-GPU performance gates.
+///
+/// Device, pipeline and atlas initialization happen once. Every measured frame
+/// follows the production terminal path: shape visible cells, upload dirty atlas
+/// rectangles and vertices, execute `terminal.wgsl`, submit, then wait for that
+/// exact submission to complete.
+pub struct HeadlessTerminalRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    target: wgpu::Texture,
+    target_view: wgpu::TextureView,
+    pipeline: wgpu::RenderPipeline,
+    atlas_texture: wgpu::Texture,
+    atlas_bind_group: wgpu::BindGroup,
+    atlas: GlyphAtlas,
+    vertex_buffer: wgpu::Buffer,
+    vertex_capacity: usize,
+    width: u32,
+    height: u32,
+    adapter_name: String,
+    backend: String,
+    device_type: String,
+    device_lost: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for HeadlessTerminalRenderer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HeadlessTerminalRenderer")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("adapter_name", &self.adapter_name)
+            .field("backend", &self.backend)
+            .field("device_type", &self.device_type)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HeadlessTerminalRenderer {
+    pub async fn new(width: u32, height: u32) -> Result<Self, WindowRendererError> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            })
+            .await?;
+        let info = adapter.get_info();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("cshell-headless-terminal-device"),
+                ..Default::default()
+            })
+            .await?;
+        let device_lost = Arc::new(AtomicBool::new(false));
+        let callback_flag = Arc::clone(&device_lost);
+        device.set_device_lost_callback(move |_reason, _message| {
+            callback_flag.store(true, Ordering::Release);
+        });
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cshell-headless-terminal-target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas = GlyphAtlas::build()?;
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cshell-headless-glyph-atlas"),
+            size: wgpu::Extent3d {
+                width: ATLAS_WIDTH,
+                height: ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            atlas_texture.as_image_copy(),
+            &atlas.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ATLAS_WIDTH * ATLAS_BYTES_PER_PIXEL),
+                rows_per_image: Some(ATLAS_HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: ATLAS_WIDTH,
+                height: ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cshell-headless-glyph-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cshell-headless-glyph-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cshell-headless-glyph-bind-group"),
+            layout: &atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cshell-headless-terminal-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("terminal.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cshell-headless-terminal-pipeline-layout"),
+            bind_group_layouts: &[Some(&atlas_layout)],
+            immediate_size: 0,
+        });
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x2,
+                1 => Float32x2,
+                2 => Float32x4,
+                3 => Uint32
+            ],
+        };
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cshell-headless-terminal-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(vertex_layout)],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let vertex_capacity = 1024;
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cshell-headless-terminal-vertices"),
+            size: vertex_capacity as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Ok(Self {
+            device,
+            queue,
+            target,
+            target_view,
+            pipeline,
+            atlas_texture,
+            atlas_bind_group,
+            atlas,
+            vertex_buffer,
+            vertex_capacity,
+            width,
+            height,
+            adapter_name: info.name,
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+            device_lost,
+        })
+    }
+
+    #[must_use]
+    pub fn adapter_info(&self) -> (&str, &str, &str) {
+        (&self.adapter_name, &self.backend, &self.device_type)
+    }
+
+    pub fn render_frame(
+        &mut self,
+        frame: &TerminalSurfaceFrame,
+    ) -> Result<HeadlessRenderReport, WindowRendererError> {
+        if self.device_lost.load(Ordering::Acquire) {
+            return Err(WindowRendererError::DeviceLost);
+        }
+        let viewport = TerminalViewport {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        };
+        let vertices = build_vertices(
+            &frame.snapshot,
+            &mut self.atlas,
+            self.width,
+            self.height,
+            viewport,
+            frame.plan.visible_rows.clone(),
+            &TerminalDecorations::default(),
+            true,
+        );
+        if let Some(upload) = self.atlas.take_dirty_upload() {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.atlas_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: upload.origin[0],
+                        y: upload.origin[1],
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &upload.bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(upload.size[0] * ATLAS_BYTES_PER_PIXEL),
+                    rows_per_image: Some(upload.size[1]),
+                },
+                wgpu::Extent3d {
+                    width: upload.size[0],
+                    height: upload.size[1],
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let bytes = bytemuck::cast_slice(&vertices);
+        if bytes.len() > self.vertex_capacity {
+            self.vertex_capacity = bytes.len().next_power_of_two();
+            self.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cshell-headless-terminal-vertices"),
+                size: self.vertex_capacity as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !bytes.is_empty() {
+            self.queue.write_buffer(&self.vertex_buffer, 0, bytes);
+        }
+        let vertex_count = vertices.len().min(u32::MAX as usize) as u32;
+        let started = Instant::now();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cshell-headless-terminal-frame"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cshell-headless-terminal-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.012,
+                            g: 0.016,
+                            b: 0.024,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if vertex_count > 0 {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.atlas_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                pass.draw(0..vertex_count, 0..1);
+            }
+        }
+        let submission = self.queue.submit([encoder.finish()]);
+        self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(5)),
+        })?;
+        let gpu_completion = started.elapsed();
+        std::hint::black_box(&self.target);
+        Ok(HeadlessRenderReport {
+            vertices: vertex_count,
+            gpu_completion,
+        })
+    }
 }
 
 pub struct WindowRenderer {

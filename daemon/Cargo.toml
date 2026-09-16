@@ -19,6 +19,9 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+cshell-render = { path = "../crates/cshell-render" }
+rand.workspace = true
+russh.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
@@ -33,6 +36,10 @@ harness = false
 
 [[bench]]
 name = "ipc_fanout"
+harness = false
+
+[[bench]]
+name = "echo_latency"
 harness = false
 
 [lints]

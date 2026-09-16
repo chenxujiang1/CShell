@@ -302,6 +302,10 @@ pub enum SshError {
     ConnectionTimeout,
     #[error("SSH command channel closed without an exit status")]
     MissingExitStatus,
+    #[error("SSH server rejected the {0} channel request")]
+    ChannelRequestRejected(&'static str),
+    #[error("SSH channel closed while waiting for the {0} request acknowledgement")]
+    ChannelClosedDuringRequest(&'static str),
     #[error("SFTP subsystem failed: {0}")]
     Sftp(#[from] cshell_sftp::SftpError),
     #[error("SSH forwarding I/O failed: {0}")]
@@ -321,6 +325,165 @@ pub struct ExecResult {
     pub exit_status: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalDataStream {
+    Stdout,
+    Extended(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TerminalEvent {
+    Data {
+        stream: TerminalDataStream,
+        data: Vec<u8>,
+    },
+    ExitStatus(u32),
+    ExitSignal {
+        signal: String,
+        core_dumped: bool,
+        message: String,
+        language: String,
+    },
+    FlowControl(bool),
+    WindowAdjusted(u32),
+    Eof,
+    Closed,
+    RequestSucceeded,
+    RequestFailed,
+}
+
+pub struct SshTerminalReader {
+    channel: russh::ChannelReadHalf,
+}
+
+impl std::fmt::Debug for SshTerminalReader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshTerminalReader")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SshTerminalReader {
+    pub async fn next_event(&mut self) -> Option<TerminalEvent> {
+        loop {
+            let message = self.channel.wait().await?;
+            let event = match message {
+                russh::ChannelMsg::Data { data } => TerminalEvent::Data {
+                    stream: TerminalDataStream::Stdout,
+                    data: data.to_vec(),
+                },
+                russh::ChannelMsg::ExtendedData { data, ext } => TerminalEvent::Data {
+                    stream: TerminalDataStream::Extended(ext),
+                    data: data.to_vec(),
+                },
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    TerminalEvent::ExitStatus(exit_status)
+                }
+                russh::ChannelMsg::ExitSignal {
+                    signal_name,
+                    core_dumped,
+                    error_message,
+                    lang_tag,
+                } => TerminalEvent::ExitSignal {
+                    signal: format!("{signal_name:?}"),
+                    core_dumped,
+                    message: error_message,
+                    language: lang_tag,
+                },
+                russh::ChannelMsg::XonXoff { client_can_do } => {
+                    TerminalEvent::FlowControl(client_can_do)
+                }
+                russh::ChannelMsg::WindowAdjusted { new_size } => {
+                    TerminalEvent::WindowAdjusted(new_size)
+                }
+                russh::ChannelMsg::Eof => TerminalEvent::Eof,
+                russh::ChannelMsg::Close => TerminalEvent::Closed,
+                russh::ChannelMsg::Success => TerminalEvent::RequestSucceeded,
+                russh::ChannelMsg::Failure => TerminalEvent::RequestFailed,
+                _ => continue,
+            };
+            return Some(event);
+        }
+    }
+}
+
+pub struct SshTerminalWriter {
+    channel: russh::ChannelWriteHalf<russh::client::Msg>,
+}
+
+impl std::fmt::Debug for SshTerminalWriter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshTerminalWriter")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SshTerminalWriter {
+    pub async fn send_input(&self, data: impl Into<Vec<u8>>) -> Result<(), SshError> {
+        self.channel.data_bytes(data.into()).await?;
+        Ok(())
+    }
+
+    pub async fn resize(
+        &self,
+        rows: u32,
+        cols: u32,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) -> Result<(), SshError> {
+        self.channel
+            .window_change(cols, rows, pixel_width, pixel_height)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn close(&self) -> Result<(), SshError> {
+        self.channel.eof().await?;
+        self.channel.close().await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct SshTerminal {
+    reader: SshTerminalReader,
+    writer: SshTerminalWriter,
+}
+
+impl SshTerminal {
+    #[must_use]
+    pub fn split(self) -> (SshTerminalReader, SshTerminalWriter) {
+        (self.reader, self.writer)
+    }
+
+    pub async fn send_input(&self, data: impl Into<Vec<u8>>) -> Result<(), SshError> {
+        self.writer.send_input(data).await
+    }
+
+    pub async fn next_event(&mut self) -> Option<TerminalEvent> {
+        self.reader.next_event().await
+    }
+
+    pub async fn resize(
+        &self,
+        rows: u32,
+        cols: u32,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) -> Result<(), SshError> {
+        self.writer
+            .resize(rows, cols, pixel_width, pixel_height)
+            .await
+    }
+
+    pub async fn close(&self) -> Result<(), SshError> {
+        self.writer.close().await
+    }
+}
+
 pub struct RusshClient {
     pub(crate) session: russh::client::Handle<VerifiedClient>,
     pub(crate) forward_routes: ForwardRoutes,
@@ -335,6 +498,21 @@ impl std::fmt::Debug for RusshClient {
 }
 
 impl RusshClient {
+    pub async fn open_terminal(&self, rows: u32, cols: u32) -> Result<SshTerminal, SshError> {
+        let mut channel = self.session.channel_open_session().await?;
+        channel
+            .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+            .await?;
+        await_channel_request(&mut channel, "PTY").await?;
+        channel.request_shell(true).await?;
+        await_channel_request(&mut channel, "shell").await?;
+        let (reader, writer) = channel.split();
+        Ok(SshTerminal {
+            reader: SshTerminalReader { channel: reader },
+            writer: SshTerminalWriter { channel: writer },
+        })
+    }
+
     pub async fn connect_certificate<A>(
         address: A,
         username: impl Into<String>,
@@ -696,6 +874,24 @@ impl RusshClient {
     }
 }
 
+async fn await_channel_request(
+    channel: &mut russh::Channel<russh::client::Msg>,
+    request: &'static str,
+) -> Result<(), SshError> {
+    loop {
+        match channel.wait().await {
+            Some(russh::ChannelMsg::Success) => return Ok(()),
+            Some(russh::ChannelMsg::Failure) => {
+                return Err(SshError::ChannelRequestRejected(request));
+            }
+            Some(russh::ChannelMsg::Close | russh::ChannelMsg::Eof) | None => {
+                return Err(SshError::ChannelClosedDuringRequest(request));
+            }
+            Some(_) => {}
+        }
+    }
+}
+
 async fn connect_verified<A>(
     address: A,
     host_key: PinnedHostKey,
@@ -927,6 +1123,7 @@ mod tests {
     use std::borrow::Cow;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     #[test]
     fn modern_policy_is_the_default() {
@@ -1202,6 +1399,39 @@ mod tests {
             session.close(channel)?;
             Ok(())
         }
+
+        async fn shell_request(
+            &mut self,
+            channel: ChannelId,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            let Some(channel_stream) = self.channels.remove(&channel) else {
+                session.channel_failure(channel)?;
+                return Ok(());
+            };
+            session.channel_success(channel)?;
+            tokio::spawn(async move {
+                let (reader, mut writer) = tokio::io::split(channel_stream.into_stream());
+                let mut reader = BufReader::new(reader);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    let Ok(read) = reader.read_until(b'\n', &mut line).await else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    if writer.write_all(b"ACK:").await.is_err()
+                        || writer.write_all(&line).await.is_err()
+                        || writer.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            Ok(())
+        }
     }
 
     async fn spawn_protocol_server(
@@ -1316,6 +1546,47 @@ mod tests {
         assert_eq!(result.exit_status, 0);
         assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
         assert!(result.stderr.is_empty());
+        client.disconnect().await.unwrap();
+        await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interactive_terminal_streams_input_output_and_resizes() {
+        let (address, fingerprint, server) = spawn_protocol_server(None).await;
+        let client = RusshClient::connect_password(
+            address,
+            "cshell",
+            "phase0",
+            PinnedHostKey::sha256(fingerprint),
+        )
+        .await
+        .unwrap();
+        let mut terminal = client.open_terminal(24, 80).await.unwrap();
+        terminal.resize(24, 80, 800, 480).await.unwrap();
+        terminal.send_input(b"round-trip\n".to_vec()).await.unwrap();
+
+        let output = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut output = Vec::new();
+            loop {
+                if let Some(super::TerminalEvent::Data {
+                    stream: super::TerminalDataStream::Stdout,
+                    data,
+                }) = terminal.next_event().await
+                {
+                    output.extend_from_slice(&data);
+                    if output
+                        .windows(b"ACK:round-trip\n".len())
+                        .any(|window| window == b"ACK:round-trip\n")
+                    {
+                        break output;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(output.ends_with(b"ACK:round-trip\n"));
+        terminal.close().await.unwrap();
         client.disconnect().await.unwrap();
         await_protocol_server(server).await;
     }

@@ -97,6 +97,12 @@ impl LocalSessionAttachment {
             &snapshot,
         ))
     }
+
+    /// Returns the latest-frame notification source without transferring session ownership.
+    #[must_use]
+    pub fn snapshots(&self) -> crate::LatestSnapshot {
+        self.handle.snapshots()
+    }
 }
 
 /// Daemon session directory with short global lock scope and per-session locking.
