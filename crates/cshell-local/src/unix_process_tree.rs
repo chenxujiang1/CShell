@@ -32,17 +32,20 @@ impl ProcessTree {
         if !self.active {
             return Ok(());
         }
-        let foreground_pgid = foreground_pgid.filter(|pgid| *pgid != self.pgid && *pgid > 0);
+        let root_pgid = (self.session_id(self.pgid) == Some(self.pgid)).then_some(self.pgid);
+        let foreground_pgid = foreground_pgid.filter(|pgid| {
+            *pgid != self.pgid && *pgid > 0 && self.session_id(*pgid) == Some(self.pgid)
+        });
         self.signal_group(foreground_pgid, libc::SIGTERM)?;
-        self.signal_group(Some(self.pgid), libc::SIGTERM)?;
+        self.signal_group(root_pgid, libc::SIGTERM)?;
         let deadline = Instant::now() + TERM_GRACE;
-        while (self.group_exists(foreground_pgid)? || self.group_exists(Some(self.pgid))?)
+        while (self.group_exists(foreground_pgid)? || self.group_exists(root_pgid)?)
             && Instant::now() < deadline
         {
             thread::sleep(Duration::from_millis(10));
         }
         self.signal_group(foreground_pgid, libc::SIGKILL)?;
-        self.signal_group(Some(self.pgid), libc::SIGKILL)?;
+        self.signal_group(root_pgid, libc::SIGKILL)?;
         self.active = false;
         Ok(())
     }
@@ -54,6 +57,19 @@ impl ProcessTree {
         // SAFETY: portable-pty creates a new session with PGID equal to the
         // child PID; a negative PGID targets one group within that session.
         if unsafe { libc::kill(-pgid, signal) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(()),
+            Some(libc::EPERM) => self.signal_process(pgid, signal),
+            _ => Err(error),
+        }
+    }
+
+    fn signal_process(&self, pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
+        // SAFETY: pid is a positive process-group leader previously reported by the PTY.
+        if unsafe { libc::kill(pid, signal) } == 0 {
             return Ok(());
         }
         let error = io::Error::last_os_error();
@@ -73,11 +89,30 @@ impl ProcessTree {
             return Ok(true);
         }
         let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(false),
+            Some(libc::EPERM) => self.process_exists(pgid),
+            _ => Err(error),
+        }
+    }
+
+    fn process_exists(&self, pid: libc::pid_t) -> io::Result<bool> {
+        // SAFETY: signal 0 only checks whether the positive PID is signalable.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
             Ok(false)
         } else {
             Err(error)
         }
+    }
+
+    fn session_id(&self, pid: libc::pid_t) -> Option<libc::pid_t> {
+        // SAFETY: getsid is read-only and pid was returned as a live PTY PGID.
+        let session_id = unsafe { libc::getsid(pid) };
+        (session_id > 0).then_some(session_id)
     }
 }
 
