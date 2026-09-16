@@ -773,7 +773,7 @@ CShell/
 
 资源门禁分为两个层级。每次提交的四目标原生 CI 使用固定且适合 GitHub 标准 runner 的压力档：100 个停止读取的已认证订阅持续 15 秒、20,000 次动态图集淘汰，以及 1 GiB journal 的写入、1,000 次随机冷分页和检查点重开；四个平台使用相同正确性、内存和延迟上限。正式验收仍执行 100 客户端持续 60 秒、完整 60 秒输出管线和 100 GiB journal 容量门禁。标准 GitHub runner 仅有 14 GB SSD，CI 压力档不能替代在本地或专用大容量 runner 上执行的正式容量门禁。
 
-四目标原生 CI 同时执行回显延迟门禁：复用已初始化的离屏 wgpu 设备、固定容量字形图集和生产 `terminal.wgsl`，分别以受控真实本地 PTY 子进程及完成密码认证和严格 SHA-256 主机密钥校验的回环 SSH2 交互 PTY 产生 80 个回显样本（另有 10 次预热）。计时从输入提交开始，覆盖 transport、journal、ANSI 解析、不可变快照、可见区字形/顶点构建与上传、真实 GPU draw submission 及该 submission completion；P95 必须小于 16.7 ms，P99 必须小于 33 ms，并单独报告 GPU completion 分位数。正式门禁只能通过 `cargo xtask echo-latency-bench`（或包含它的 `native-ci-bench`）启动，普通 `cargo test --all-targets` 只验证基准目标可执行，不能因无 GPU 的通用测试 runner 误报失败；无窗口门禁优先申请高性能适配器，仅在申请失败时显式申请 fallback adapter，Linux 原生门禁 runner 安装 Mesa Vulkan 软件适配器并仍执行完整提交与完成等待。该无窗口门禁不声称覆盖桌面 compositor 或显示器扫描输出，真实 window surface/present 仍由各平台窗口门禁验收。
+四目标原生 CI 同时执行回显延迟门禁：复用已初始化的离屏 wgpu 设备、固定容量字形图集和生产 `terminal.wgsl`，分别以受控真实本地 PTY 子进程及完成密码认证和严格 SHA-256 主机密钥校验的回环 SSH2 交互 PTY 产生 80 个回显样本（另有 10 次预热）。计时从输入提交开始，覆盖 transport、journal、ANSI 解析、不可变快照、可见区字形/顶点构建与上传、真实 GPU draw submission 及该 submission completion；P95 必须小于 16.7 ms，P99 必须小于 33 ms，并单独报告 GPU completion 分位数。SSH 客户端连接默认启用 `TCP_NODELAY`，避免交互式小包被 Nagle 与 delayed ACK 组合引入约一个确认周期的额外延迟。正式门禁只能通过 `cargo xtask echo-latency-bench`（或包含它的 `native-ci-bench`）启动，普通 `cargo test --all-targets` 只验证基准目标可执行，不能因无 GPU 的通用测试 runner 误报失败；无窗口门禁优先申请高性能适配器，仅在申请失败时显式申请 fallback adapter，Linux 原生门禁 runner 安装 Mesa Vulkan 软件适配器并仍执行完整提交与完成等待。该无窗口门禁不声称覆盖桌面 compositor 或显示器扫描输出，真实 window surface/present 仍由各平台窗口门禁验收。
 
 ### Phase 1：可用的 SSH 与本地终端客户端，14～16 周
 

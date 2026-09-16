@@ -83,7 +83,13 @@ impl RusshProvider {
 
     #[must_use]
     pub fn client_config(&self) -> russh::client::Config {
-        russh::client::Config::default()
+        // Interactive terminal traffic consists of many small latency-sensitive
+        // packets. Avoid the Nagle/delayed-ACK interaction that otherwise adds
+        // roughly one Linux delayed-ACK interval to echo responses.
+        russh::client::Config {
+            nodelay: true,
+            ..Default::default()
+        }
     }
 }
 
@@ -1138,7 +1144,8 @@ mod tests {
     #[test]
     fn backend_type_is_hidden_behind_provider() {
         let provider = RusshProvider::default();
-        let _config = provider.client_config();
+        let config = provider.client_config();
+        assert!(config.nodelay);
         assert_eq!(provider.name(), "russh");
     }
 

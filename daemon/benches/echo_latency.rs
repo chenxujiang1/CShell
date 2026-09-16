@@ -463,6 +463,9 @@ async fn spawn_ssh_echo_server() -> Result<
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+        stream
+            .set_nodelay(true)
+            .map_err(|error| error.to_string())?;
         let running = russh::server::run_stream(Arc::new(config), stream, EchoSshServer::default())
             .await
             .map_err(|error| error.to_string())?;
