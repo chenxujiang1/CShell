@@ -60,6 +60,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux software Vulkan adapter
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libvulkan1 mesa-vulkan-drivers
       - run: cargo xtask native-ci-bench
 
   msrv:

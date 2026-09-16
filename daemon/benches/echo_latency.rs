@@ -27,6 +27,12 @@ fn main() -> ExitCode {
     if env::args().nth(1).as_deref() == Some(CHILD_MODE) {
         return echo_child();
     }
+    if env::var_os("CSHELL_REQUIRE_GPU").is_none() {
+        println!(
+            "echo latency gate skipped; run `cargo xtask echo-latency-bench` to require a real GPU adapter"
+        );
+        return ExitCode::SUCCESS;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
