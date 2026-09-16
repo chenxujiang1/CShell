@@ -891,14 +891,25 @@ impl HeadlessTerminalRenderer {
         let width = width.max(1);
         let height = height.max(1);
         let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })
-            .await?;
+        let primary_options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        };
+        let adapter = match instance.request_adapter(&primary_options).await {
+            Ok(adapter) => adapter,
+            Err(_) => {
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: true,
+                        apply_limit_buckets: false,
+                    })
+                    .await?
+            }
+        };
         let info = adapter.get_info();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
