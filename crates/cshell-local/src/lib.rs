@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[cfg(unix)]
+mod unix_guardian;
+#[cfg(unix)]
 mod unix_process_tree;
 #[cfg(windows)]
 mod windows_process_tree;
@@ -18,6 +20,9 @@ mod windows_process_tree;
 use unix_process_tree::ProcessTree;
 #[cfg(windows)]
 use windows_process_tree::ProcessTree;
+
+#[cfg(unix)]
+pub use unix_guardian::{PTY_GUARDIAN_MODE_ARG, run_pty_guardian_from_args};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum WorkingDirectoryPolicy {
@@ -113,6 +118,24 @@ impl fmt::Debug for PtySession {
 
 impl PtySession {
     pub fn spawn(profile: &LocalProfile, size: TerminalSize) -> Result<Self, LocalPtyError> {
+        Self::spawn_inner(profile, size, None)
+    }
+
+    #[cfg(unix)]
+    pub fn spawn_guarded(
+        profile: &LocalProfile,
+        size: TerminalSize,
+        guardian_executable: impl AsRef<std::path::Path>,
+    ) -> Result<Self, LocalPtyError> {
+        Self::spawn_inner(profile, size, Some(guardian_executable.as_ref()))
+    }
+
+    fn spawn_inner(
+        profile: &LocalProfile,
+        size: TerminalSize,
+        #[cfg(unix)] guardian_executable: Option<&std::path::Path>,
+        #[cfg(windows)] _guardian_executable: Option<&std::path::Path>,
+    ) -> Result<Self, LocalPtyError> {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: size.rows,
@@ -122,8 +145,28 @@ impl PtySession {
             })
             .map_err(|error| LocalPtyError::Open(error.to_string()))?;
 
-        let mut command = CommandBuilder::new(&profile.program);
-        command.args(&profile.args);
+        #[cfg(unix)]
+        let mut command = guardian_executable.map_or_else(
+            || {
+                let mut command = CommandBuilder::new(&profile.program);
+                command.args(&profile.args);
+                command
+            },
+            |guardian| {
+                let mut command = CommandBuilder::new(guardian);
+                command.arg(PTY_GUARDIAN_MODE_ARG);
+                command.arg(std::process::id().to_string());
+                command.arg(&profile.program);
+                command.args(&profile.args);
+                command
+            },
+        );
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = CommandBuilder::new(&profile.program);
+            command.args(&profile.args);
+            command
+        };
         for (key, value) in &profile.env_overrides {
             command.env(key, value);
         }

@@ -110,6 +110,8 @@ impl LocalSessionAttachment {
 pub struct LocalSessionRegistry {
     journal_root: PathBuf,
     ingress_capacity: usize,
+    #[cfg(unix)]
+    guardian_executable: Option<PathBuf>,
     sessions: RwLock<BTreeMap<SessionId, Arc<Mutex<ManagedLocalSession>>>>,
 }
 
@@ -123,8 +125,21 @@ impl LocalSessionRegistry {
         Ok(Self {
             journal_root,
             ingress_capacity: ingress_capacity.max(1),
+            #[cfg(unix)]
+            guardian_executable: None,
             sessions: RwLock::new(BTreeMap::new()),
         })
+    }
+
+    #[cfg(unix)]
+    pub fn new_with_guardian(
+        journal_root: impl AsRef<Path>,
+        ingress_capacity: usize,
+        guardian_executable: impl AsRef<Path>,
+    ) -> Result<Self, SessionRegistryError> {
+        let mut registry = Self::new(journal_root, ingress_capacity)?;
+        registry.guardian_executable = Some(guardian_executable.as_ref().to_path_buf());
+        Ok(registry)
     }
 
     pub fn spawn_local(
@@ -134,6 +149,20 @@ impl LocalSessionRegistry {
     ) -> Result<LocalSessionAttachment, SessionRegistryError> {
         let session_id = SessionId::new();
         let journal_path = self.journal_path(session_id);
+        #[cfg(unix)]
+        let session = match &self.guardian_executable {
+            Some(guardian) => LocalTerminalSession::spawn_guarded(
+                profile,
+                size,
+                journal_path,
+                self.ingress_capacity,
+                guardian,
+            )?,
+            None => {
+                LocalTerminalSession::spawn(profile, size, journal_path, self.ingress_capacity)?
+            }
+        };
+        #[cfg(windows)]
         let session =
             LocalTerminalSession::spawn(profile, size, journal_path, self.ingress_capacity)?;
         let attachment = LocalSessionAttachment {

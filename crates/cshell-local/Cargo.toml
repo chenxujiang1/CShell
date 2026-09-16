@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "cshell-pty-guardian"
+path = "src/bin/guardian.rs"
+
 [dependencies]
 cshell-domain = { path = "../cshell-domain" }
 portable-pty.workspace = true

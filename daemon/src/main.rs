@@ -11,8 +11,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
+fn main() -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    if let Some(code) = cshell_local::run_pty_guardian_from_args()? {
+        std::process::exit(code);
+    }
+    run_daemon()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn run_daemon() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -53,6 +61,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(PathBuf::from)
         .or_else(|| runtime_paths.as_ref().map(RuntimePaths::journal_root))
         .ok_or("CSHELL_JOURNAL_ROOT is required with an explicit daemon endpoint")?;
+    #[cfg(unix)]
+    let registry = Arc::new(LocalSessionRegistry::new_with_guardian(
+        journal_root,
+        256,
+        std::env::current_exe()?,
+    )?);
+    #[cfg(windows)]
     let registry = Arc::new(LocalSessionRegistry::new(journal_root, 256)?);
 
     if std::env::var_os("CSHELL_START_LOCAL").is_some_and(|value| value == "1") {

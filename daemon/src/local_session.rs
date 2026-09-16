@@ -236,12 +236,46 @@ impl LocalTerminalSession {
         journal_path: impl AsRef<Path>,
         ingress_capacity: usize,
     ) -> Result<Self, LocalSessionError> {
+        Self::spawn_inner(profile, size, journal_path.as_ref(), ingress_capacity, None)
+    }
+
+    #[cfg(unix)]
+    pub fn spawn_guarded(
+        profile: &LocalProfile,
+        size: TerminalSize,
+        journal_path: impl AsRef<Path>,
+        ingress_capacity: usize,
+        guardian_executable: impl AsRef<Path>,
+    ) -> Result<Self, LocalSessionError> {
+        Self::spawn_inner(
+            profile,
+            size,
+            journal_path.as_ref(),
+            ingress_capacity,
+            Some(guardian_executable.as_ref()),
+        )
+    }
+
+    fn spawn_inner(
+        profile: &LocalProfile,
+        size: TerminalSize,
+        journal_path: &Path,
+        ingress_capacity: usize,
+        #[cfg(unix)] guardian_executable: Option<&Path>,
+        #[cfg(windows)] _guardian_executable: Option<&Path>,
+    ) -> Result<Self, LocalSessionError> {
         let pipeline = TerminalPipeline::spawn(journal_path, size, ingress_capacity)?;
         let ingress = pipeline.ingress().ok_or(LocalSessionError::Closed)?;
         let snapshots = pipeline.snapshots();
         let responses = pipeline.responses();
         let line_index = pipeline.line_index();
 
+        #[cfg(unix)]
+        let mut pty = match guardian_executable {
+            Some(guardian) => PtySession::spawn_guarded(profile, size, guardian)?,
+            None => PtySession::spawn(profile, size)?,
+        };
+        #[cfg(windows)]
         let mut pty = PtySession::spawn(profile, size)?;
         let mut reader = pty.take_reader()?;
         let pty = Arc::new(Mutex::new(pty));

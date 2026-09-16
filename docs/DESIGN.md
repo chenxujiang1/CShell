@@ -308,7 +308,7 @@ TerminalSession
 - 本地终端与 SSH 终端共用 VT 模型、主题、Xterm 256/True Color、字体、高亮、搜索、热/冷滚动、日志、标签、分屏和快捷键。
 - GUI 崩溃时本地进程继续由 daemon 托管；关闭仍有前台进程的标签必须询问“关闭进程、仅关闭视图或取消”。
 - 本地终端不能只保存 shell 主进程句柄。Windows 为 ConPTY 主进程创建启用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的私有 Job Object，显式关闭使用 `TerminateJobObject`，daemon 进程退出导致句柄关闭时由内核清理后代；Linux/macOS 利用 PTY 启动前的 `setsid`，同时监督 shell 根进程组和通过 `tcgetpgrp` 取得且经 `getsid` 确认仍属于该 PTY session 的当前前台作业进程组，关闭时先发送 `SIGTERM`，宽限 300 ms 后发送 `SIGKILL`。macOS 组信号因组内任一不可授权成员返回 `EPERM` 时退回对已验证组长 PID 的信号，禁止对未经 session 校验的复用 PGID 发信号。监督初始化失败时必须终止并回收已启动的主进程，不能返回半托管会话。
-- 进程生命周期测试必须让 PTY 主进程再派生真实孙进程；Unix 测试中的孙进程还必须切换到独立前台 PGID，并以持续心跳验证关闭后已经停止，不能只检查直接 shell 的退出状态。Windows Job Object 同时覆盖 daemon 正常退出与不可恢复崩溃；Unix 显式关闭覆盖 shell 与当前前台作业，主动脱离控制终端的后台 daemon 以及 `cshelld` 被 `SIGKILL` 后的自动清理由后续独立 guardian 方案验收，未完成前不得声称 Unix 异常退出无孤儿进程。
+- 进程生命周期测试必须让 PTY 主进程再派生真实孙进程；Unix 测试中的孙进程还必须切换到独立前台 PGID，并以持续心跳验证关闭后已经停止，不能只检查直接 shell 的退出状态。Windows Job Object 同时覆盖 daemon 正常退出与不可恢复崩溃。Linux/macOS 的生产 PTY 在 `setsid` 后先进入同一可执行文件的最小 guardian 模式，再由 guardian 启动真实 shell；该模式必须在 tracing、线程和异步运行时初始化前执行。guardian 记录显式传入的 owner PID，忽略自身 `SIGHUP`、阻塞并轮询 `SIGTERM`，同时检测 `getppid` 变化；真实 shell 在 `exec` 前恢复默认 `SIGHUP` 和空信号掩码。owner 正常关闭、被 `SIGKILL`、shell 自行退出时，guardian 以 `ps` 的 PID/PPID/session 快照收集同一 PTY session 及仍可追踪的后代，逐 PID 发送 `SIGTERM`，宽限 150 ms 后发送 `SIGKILL`。验收必须让真实 shell 忽略 `SIGHUP` 并持续写心跳，再强杀 owner，确认 guardian、shell 和心跳均停止。已完成双重 fork、脱离原 session 且被系统接管的 daemon 不属于 PTY 所有权边界，不能仅凭祖先快照可靠识别，产品不得声称会终止这类显式脱管进程。
 - clone 默认复制 Profile 并启动新进程，不声称复制原进程状态。shell integration 仅用于 cwd、命令边界和退出状态等增强信息，缺失时基础终端仍完整工作。
 - 本地进程继承环境前先应用平台脱敏/覆盖策略；工作区恢复默认只恢复标签和 Profile，不自动重新执行上次命令。
 
