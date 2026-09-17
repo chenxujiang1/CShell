@@ -4,8 +4,8 @@ mod terminal_search;
 mod visual_corpus;
 mod window_e2e;
 
-use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};
-use cshell_ipc::HistorySearchDirection;
+use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers, SessionId};
+use cshell_ipc::{HistorySearchDirection, MAX_TERMINAL_INPUT_BYTES};
 use cshell_render::{
     EguiFrame, LogDecorations, LogReflowLayout, LogReflowRequest, LogScrollbarState,
     LogSearchMatch, LogSourceId, LogSurfaceError, LogSurfaceModel, MAX_TERMINAL_SEARCH_QUERY_BYTES,
@@ -67,6 +67,7 @@ struct DesktopApp {
     cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
     terminal_selecting: bool,
     terminal_click: TerminalClickState,
+    pending_paste: Option<PendingPaste>,
     wheel_row_accumulator: f64,
     modifiers: ModifiersState,
     cursor_blink: CursorBlinkState,
@@ -84,6 +85,18 @@ struct LogReflowWorker {
 enum LogScrollbarAction {
     FollowTail,
     JumpTo(u64),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PasteDecision {
+    Immediate(String),
+    Confirm(String),
+}
+
+struct PendingPaste {
+    text: String,
+    session_id: SessionId,
+    session_title: String,
 }
 
 impl LogReflowWorker {
@@ -407,6 +420,12 @@ impl ApplicationHandler for DesktopApp {
                 }
                 window.request_redraw();
             }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.resize(window.inner_size());
+                }
+                window.request_redraw();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
                 if self.terminal_selecting
@@ -424,11 +443,16 @@ impl ApplicationHandler for DesktopApp {
                 state,
                 button: MouseButton::Left,
                 ..
-            } if self.log_surface.is_none() => match state {
+            } if self.log_surface.is_none() && self.pending_paste.is_none() => match state {
                 ElementState::Pressed if !egui_consumed => {
                     if let Some(position) = self.cursor_position
                         && let Some(point) = self.terminal_point_at(position)
                     {
+                        self.egui_context.memory_mut(|memory| {
+                            if let Some(focused) = memory.focused() {
+                                memory.surrender_focus(focused);
+                            }
+                        });
                         let click_count = register_terminal_click(
                             &mut self.terminal_click,
                             point,
@@ -466,35 +490,82 @@ impl ApplicationHandler for DesktopApp {
                     window.request_redraw();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if is_terminal_search_shortcut(&event, self.modifiers) =>
-            {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if is_terminal_search_shortcut(&event, self.modifiers) => {
                 self.terminal_search_open = true;
                 self.terminal_search_focus_requested = true;
                 window.request_redraw();
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if self.terminal_search_open
-                    && event.state == ElementState::Pressed
-                    && event.logical_key == Key::Named(NamedKey::Escape) =>
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if self.terminal_search_open
+                && event.state == ElementState::Pressed
+                && event.logical_key == Key::Named(NamedKey::Escape) =>
             {
                 self.close_terminal_search();
                 window.request_redraw();
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if !egui_consumed && self.log_surface.is_none() =>
-            {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if !egui_consumed && self.log_surface.is_none() && self.pending_paste.is_none() => {
                 if is_terminal_copy_shortcut(&event, self.modifiers) {
                     if let (Some(selection), Some(snapshot)) = (
                         self.terminal_decorations.selection,
                         self.terminal_surface.latest_snapshot(),
                     ) {
                         match selection.text(snapshot) {
-                            Ok(text) => self.egui_context.copy_text(text),
+                            Ok(text) => {
+                                if let Some(state) = &mut self.egui_state {
+                                    state.set_clipboard_text(text);
+                                }
+                                self.view_model.input_warning = None;
+                            }
                             Err(error) => {
+                                self.view_model.input_warning = Some(error.to_string());
                                 tracing::warn!(%error, "terminal selection copy rejected")
                             }
                         }
+                    }
+                    window.request_redraw();
+                    return;
+                }
+                if is_terminal_paste_shortcut(&event, self.modifiers) {
+                    let text = self
+                        .egui_state
+                        .as_mut()
+                        .and_then(|state| state.clipboard_text());
+                    match decide_terminal_paste(text) {
+                        Ok(PasteDecision::Confirm(text)) => {
+                            if let Some(session_id) = self.active_terminal_session_id() {
+                                let session_title = self
+                                    .view_model
+                                    .sessions
+                                    .iter()
+                                    .find(|session| session.id == session_id)
+                                    .map_or_else(
+                                        || session_id.to_string(),
+                                        |session| session.title.clone(),
+                                    );
+                                self.pending_paste = Some(PendingPaste {
+                                    text,
+                                    session_id,
+                                    session_title,
+                                });
+                                self.view_model.input_warning = None;
+                            } else {
+                                self.view_model.input_warning =
+                                    Some("当前标签没有可用终端，粘贴未发送".to_owned());
+                            }
+                        }
+                        Ok(PasteDecision::Immediate(text)) => self.submit_paste(text, &window),
+                        Err(error) => self.view_model.input_warning = Some(error),
                     }
                     window.request_redraw();
                     return;
@@ -518,7 +589,10 @@ impl ApplicationHandler for DesktopApp {
                 }
             }
             WindowEvent::Ime(Ime::Commit(text))
-                if !egui_consumed && self.log_surface.is_none() && !text.is_empty() =>
+                if !egui_consumed
+                    && self.log_surface.is_none()
+                    && self.pending_paste.is_none()
+                    && !text.is_empty() =>
             {
                 if let Some(daemon) = &self.daemon {
                     if daemon.send_input(InputAction::Text(text)) {
@@ -579,6 +653,8 @@ impl ApplicationHandler for DesktopApp {
                 let mut search_changed = false;
                 let mut search_navigation = 0_i8;
                 let mut close_search = false;
+                let mut confirm_paste = false;
+                let mut cancel_paste = false;
                 let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
                     if let Some(state) = scrollbar_state {
@@ -661,6 +737,34 @@ impl ApplicationHandler for DesktopApp {
                                 }
                             });
                     }
+                    if let Some(pending) = &self.pending_paste {
+                        egui::Window::new("确认粘贴到终端")
+                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                            .collapsible(false)
+                            .resizable(false)
+                            .show(ui.ctx(), |ui| {
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    "内容包含换行或控制字符，确认后将发送到当前终端",
+                                );
+                                ui.label(format!(
+                                    "目标：{} ({})",
+                                    pending.session_title, pending.session_id
+                                ));
+                                ui.label(format!("{} 字节", pending.text.len()));
+                                egui::ScrollArea::vertical()
+                                    .max_height(180.0)
+                                    .show(ui, |ui| {
+                                        ui.monospace(paste_preview(&pending.text));
+                                    });
+                                ui.horizontal(|ui| {
+                                    cancel_paste = ui.button("取消").clicked();
+                                    confirm_paste = ui.button("确认发送").clicked();
+                                });
+                                cancel_paste |=
+                                    ui.input(|input| input.key_pressed(egui::Key::Escape));
+                            });
+                    }
                 });
                 if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
                     match action {
@@ -682,6 +786,16 @@ impl ApplicationHandler for DesktopApp {
                     event_loop,
                     platform_output,
                 );
+                if cancel_paste {
+                    self.pending_paste = None;
+                } else if confirm_paste && let Some(pending) = self.pending_paste.take() {
+                    if self.active_terminal_session_id() == Some(pending.session_id) {
+                        self.submit_paste(pending.text, &window);
+                    } else {
+                        self.view_model.input_warning =
+                            Some("目标终端已切换，粘贴已取消".to_owned());
+                    }
+                }
                 if close_search {
                     self.close_terminal_search();
                 } else {
@@ -794,6 +908,32 @@ impl ApplicationHandler for DesktopApp {
 }
 
 impl DesktopApp {
+    fn active_terminal_session_id(&self) -> Option<SessionId> {
+        let view = self.daemon.as_ref()?.view();
+        let session_id = view.session_id?;
+        (view.connected && self.view_model.selected == Some(session_id)).then_some(session_id)
+    }
+
+    fn submit_paste(&mut self, text: String, window: &Window) {
+        let accepted = self.active_terminal_session_id().is_some_and(|_| {
+            let Some(daemon) = &self.daemon else {
+                return false;
+            };
+            daemon.send_input(InputAction::Paste {
+                text,
+                bracketed: true,
+            })
+        });
+        if accepted {
+            self.view_model.input_warning = None;
+            self.cursor_blink.note_activity(std::time::Instant::now());
+        } else {
+            self.view_model.input_warning = Some("终端未连接或输入队列已满，粘贴未发送".to_owned());
+            tracing::warn!("terminal paste was not accepted by the daemon client");
+        }
+        window.request_redraw();
+    }
+
     fn bump_terminal_decorations(&mut self) {
         self.terminal_decorations.revision = self.terminal_decorations.revision.wrapping_add(1);
     }
@@ -974,6 +1114,66 @@ fn is_terminal_copy_shortcut(event: &winit::event::KeyEvent, modifiers: Modifier
     event.state == ElementState::Pressed
         && (modifiers.super_key() || (modifiers.control_key() && modifiers.shift_key()))
         && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+}
+
+fn is_terminal_paste_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
+    matches_terminal_paste_shortcut(event.state, event.repeat, &event.logical_key, modifiers)
+}
+
+fn matches_terminal_paste_shortcut(
+    state: ElementState,
+    repeat: bool,
+    key: &Key,
+    modifiers: ModifiersState,
+) -> bool {
+    state == ElementState::Pressed
+        && !repeat
+        && !modifiers.alt_key()
+        && ((matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
+            && (modifiers.super_key() || (modifiers.control_key() && modifiers.shift_key())))
+            || (key == &Key::Named(NamedKey::Insert)
+                && modifiers.shift_key()
+                && !modifiers.control_key()
+                && !modifiers.super_key()))
+}
+
+fn requires_paste_confirmation(text: &str) -> bool {
+    text.chars().any(char::is_control)
+}
+
+fn decide_terminal_paste(text: Option<String>) -> Result<PasteDecision, String> {
+    let text = text
+        .filter(|text| !text.is_empty())
+        .ok_or("剪贴板没有可用文本")?;
+    if text.len() > MAX_TERMINAL_INPUT_BYTES {
+        return Err(format!(
+            "粘贴内容超过 {} MiB 上限，未发送",
+            MAX_TERMINAL_INPUT_BYTES / (1024 * 1024)
+        ));
+    }
+    if requires_paste_confirmation(&text) {
+        Ok(PasteDecision::Confirm(text))
+    } else {
+        Ok(PasteDecision::Immediate(text))
+    }
+}
+
+fn paste_preview(text: &str) -> String {
+    let mut preview = String::new();
+    let mut chars = text.chars();
+    for ch in chars.by_ref().take(400) {
+        match ch {
+            '\n' => preview.push_str("\\n\n"),
+            '\r' => preview.push_str("\\r"),
+            '\t' => preview.push_str("\\t"),
+            ch if ch.is_control() => preview.push_str(&format!("\\u{{{:x}}}", u32::from(ch))),
+            ch => preview.push(ch),
+        }
+    }
+    if chars.next().is_some() {
+        preview.push_str("\n…（仅预览前 400 个字符）");
+    }
+    preview
 }
 
 fn is_terminal_search_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
@@ -1242,12 +1442,91 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LogScrollbarAction, TERMINAL_MULTI_CLICK_INTERVAL, TerminalCellPoint, TerminalClickState,
-        TerminalViewport, log_scrollbar_action, register_terminal_click, terminal_point_at,
+        LogScrollbarAction, PasteDecision, TERMINAL_MULTI_CLICK_INTERVAL, TerminalCellPoint,
+        TerminalClickState, TerminalViewport, decide_terminal_paste, log_scrollbar_action,
+        matches_terminal_paste_shortcut, paste_preview, register_terminal_click, terminal_point_at,
         truncate_utf8_bytes,
     };
     use std::time::{Duration, Instant};
-    use winit::dpi::PhysicalPosition;
+    use winit::{
+        dpi::PhysicalPosition,
+        event::ElementState,
+        keyboard::{Key, ModifiersState, NamedKey},
+    };
+
+    #[test]
+    fn paste_shortcuts_require_a_single_pressed_command_chord() {
+        let v = Key::Character("v".into());
+        let insert = Key::Named(NamedKey::Insert);
+        for modifiers in [
+            ModifiersState::SUPER,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ] {
+            assert!(matches_terminal_paste_shortcut(
+                ElementState::Pressed,
+                false,
+                &v,
+                modifiers
+            ));
+            assert!(!matches_terminal_paste_shortcut(
+                ElementState::Released,
+                false,
+                &v,
+                modifiers
+            ));
+            assert!(!matches_terminal_paste_shortcut(
+                ElementState::Pressed,
+                true,
+                &v,
+                modifiers
+            ));
+        }
+        assert!(matches_terminal_paste_shortcut(
+            ElementState::Pressed,
+            false,
+            &insert,
+            ModifiersState::SHIFT
+        ));
+        assert!(!matches_terminal_paste_shortcut(
+            ElementState::Pressed,
+            false,
+            &v,
+            ModifiersState::CONTROL
+        ));
+        assert!(!matches_terminal_paste_shortcut(
+            ElementState::Pressed,
+            false,
+            &v,
+            ModifiersState::SUPER | ModifiersState::ALT
+        ));
+    }
+
+    #[test]
+    fn paste_decision_bounds_input_and_requires_explicit_confirmation_for_controls() {
+        assert_eq!(
+            decide_terminal_paste(Some("中文🙂".to_owned())),
+            Ok(PasteDecision::Immediate("中文🙂".to_owned()))
+        );
+        for text in [
+            "echo one\necho two",
+            "echo one\r",
+            "echo\tword",
+            "x\u{1b}[31m",
+        ] {
+            assert_eq!(
+                decide_terminal_paste(Some(text.to_owned())),
+                Ok(PasteDecision::Confirm(text.to_owned()))
+            );
+        }
+        assert!(decide_terminal_paste(None).is_err());
+        assert!(decide_terminal_paste(Some(String::new())).is_err());
+        assert!(
+            decide_terminal_paste(Some("x".repeat(cshell_ipc::MAX_TERMINAL_INPUT_BYTES + 1)))
+                .is_err()
+        );
+        assert_eq!(paste_preview("中\n\t\u{1b}"), "中\\n\n\\t\\u{1b}");
+        assert!(paste_preview(&"🙂".repeat(401)).contains("仅预览前 400 个字符"));
+    }
 
     #[test]
     fn scrollbar_maps_track_positions_to_stable_line_ids_and_tail_mode() {

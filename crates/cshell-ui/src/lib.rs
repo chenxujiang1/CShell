@@ -15,6 +15,7 @@ pub struct WorkbenchViewModel {
     pub selected: Option<SessionId>,
     pub daemon_connected: bool,
     pub daemon_status_detail: String,
+    pub input_warning: Option<String>,
     pub terminal_generation: Option<u64>,
 }
 
@@ -33,6 +34,9 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             ui.label(status);
             if !model.daemon_status_detail.is_empty() {
                 ui.label(&model.daemon_status_detail);
+            }
+            if let Some(warning) = &model.input_warning {
+                ui.colored_label(egui::Color32::LIGHT_RED, warning);
             }
         });
     });

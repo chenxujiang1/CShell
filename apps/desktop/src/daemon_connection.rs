@@ -1298,7 +1298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn desktop_worker_input_executes_in_a_real_pty_and_updates_its_snapshot() {
+    async fn desktop_worker_paste_executes_in_a_real_pty_and_updates_its_snapshot() {
         const READY_MARKER: &str = "CSHELL_DESKTOP_READY";
         const MARKER: &str = "CSHELL_DESKTOP_EXECUTED";
         // Native CI runners can spend several seconds starting the shell and
@@ -1384,7 +1384,10 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(connection.send_input(InputAction::Text(format!("echo {MARKER}\r"))));
+        assert!(connection.send_input(InputAction::Paste {
+            text: format!("echo {MARKER}\r"),
+            bracketed: true,
+        }));
 
         let output_deadline = tokio::time::Instant::now() + PTY_E2E_TIMEOUT;
         loop {
