@@ -1,5 +1,6 @@
 mod cursor_blink;
 mod daemon_connection;
+mod terminal_accessibility;
 mod terminal_search;
 mod visual_corpus;
 mod window_e2e;
@@ -24,9 +25,19 @@ use terminal_search::{TerminalSearchRequest, TerminalSearchWorker};
 use tracing::info;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
+
+enum DesktopEvent {
+    AccessKit(egui_winit::accesskit_winit::Event),
+}
+
+impl From<egui_winit::accesskit_winit::Event> for DesktopEvent {
+    fn from(event: egui_winit::accesskit_winit::Event) -> Self {
+        Self::AccessKit(event)
+    }
+}
 
 const SESSION_LOG_ARGUMENT: &str = "--session-log";
 const TERMINAL_MULTI_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -39,6 +50,7 @@ struct TerminalClickState {
 
 #[derive(Default)]
 struct DesktopApp {
+    accesskit_proxy: Option<EventLoopProxy<DesktopEvent>>,
     window: Option<Arc<Window>>,
     renderer: Option<WindowRenderer>,
     egui_context: egui::Context,
@@ -135,7 +147,7 @@ impl Drop for LogReflowWorker {
     }
 }
 
-impl ApplicationHandler for DesktopApp {
+impl ApplicationHandler<DesktopEvent> for DesktopApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -143,25 +155,31 @@ impl ApplicationHandler for DesktopApp {
         match event_loop.create_window(
             WindowAttributes::default()
                 .with_title("CShell Phase 0")
-                .with_inner_size(winit::dpi::LogicalSize::new(1200.0, 760.0)),
+                .with_inner_size(winit::dpi::LogicalSize::new(1200.0, 760.0))
+                .with_visible(false),
         ) {
             Ok(window) => {
                 let window = Arc::new(window);
                 self.window_active = true;
                 info!(window_id = ?window.id(), "desktop shell created");
-                self.egui_state = Some(egui_winit::State::new(
+                let mut egui_state = egui_winit::State::new(
                     self.egui_context.clone(),
                     egui::ViewportId::ROOT,
                     window.as_ref(),
                     Some(window.scale_factor() as f32),
                     window.theme(),
                     None,
-                ));
+                );
+                if let Some(proxy) = &self.accesskit_proxy {
+                    egui_state.init_accesskit(event_loop, &window, proxy.clone());
+                }
+                self.egui_state = Some(egui_state);
                 self.last_renderer_attempt = Some(std::time::Instant::now());
                 match initialize_renderer(Arc::clone(&window)) {
                     Ok(renderer) => self.renderer = Some(renderer),
                     Err(error) => tracing::error!(%error, "cannot initialize terminal renderer"),
                 }
+                window.set_visible(true);
                 window.request_redraw();
                 self.window = Some(window);
             }
@@ -170,6 +188,41 @@ impl ApplicationHandler for DesktopApp {
                 event_loop.exit();
             }
         }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: DesktopEvent) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let DesktopEvent::AccessKit(event) = event;
+        if event.window_id != window.id() {
+            return;
+        }
+        match event.window_event {
+            egui_winit::accesskit_winit::WindowEvent::InitialTreeRequested => {
+                self.egui_context.enable_accesskit();
+            }
+            egui_winit::accesskit_winit::WindowEvent::ActionRequested(request) => {
+                if request.action == egui::accesskit::Action::Focus
+                    && request.target_node
+                        == terminal_accessibility::terminal_node_id().accesskit_id()
+                    && self.log_surface.is_none()
+                    && self.pending_paste.is_none()
+                {
+                    self.egui_context.memory_mut(|memory| {
+                        if let Some(focused) = memory.focused() {
+                            memory.surrender_focus(focused);
+                        }
+                    });
+                } else if let Some(state) = &mut self.egui_state {
+                    state.on_accesskit_action_request(request);
+                }
+            }
+            egui_winit::accesskit_winit::WindowEvent::AccessibilityDeactivated => {
+                self.egui_context.disable_accesskit();
+            }
+        }
+        window.request_redraw();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -660,6 +713,14 @@ impl ApplicationHandler for DesktopApp {
                     if let Some(state) = scrollbar_state {
                         scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
                     }
+                    if self.log_surface.is_none() {
+                        terminal_accessibility::add_terminal_node(
+                            ui.ctx(),
+                            terminal_rect,
+                            self.terminal_surface.latest_snapshot().map(AsRef::as_ref),
+                            self.terminal_decorations.selection,
+                        );
+                    }
                     if self.terminal_search_open {
                         egui::Window::new("查找终端")
                             .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
@@ -775,12 +836,22 @@ impl ApplicationHandler for DesktopApp {
                     }
                 }
                 let egui::FullOutput {
-                    platform_output,
+                    mut platform_output,
                     mut textures_delta,
                     shapes,
                     pixels_per_point,
                     ..
                 } = full_output;
+                if self.window_active
+                    && self.log_surface.is_none()
+                    && self.pending_paste.is_none()
+                    && self
+                        .egui_context
+                        .memory(|memory| memory.focused().is_none())
+                    && let Some(update) = &mut platform_output.accesskit_update
+                {
+                    update.focus = terminal_accessibility::terminal_node_id().accesskit_id();
+                }
                 egui_state.handle_platform_output_with_event_loop(
                     &window,
                     event_loop,
@@ -1379,7 +1450,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<DesktopEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let arguments: Vec<_> = std::env::args().collect();
     let show_visual_corpus = arguments
@@ -1402,6 +1473,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .transpose()?
     };
     let mut app = DesktopApp {
+        accesskit_proxy: Some(event_loop.create_proxy()),
         daemon,
         terminal_search: Some(TerminalSearchWorker::start()?),
         ..DesktopApp::default()
