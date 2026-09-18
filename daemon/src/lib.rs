@@ -7,6 +7,7 @@ mod local_session;
 mod session_ipc;
 mod session_registry;
 
+pub use cshell_vault::{KeychainError, ProbeId, Secret, SystemKeychain};
 pub use exit_monitor::{SessionExitMonitor, SessionExitMonitorError};
 pub use frame_subscription::{SubscriptionFrame, SubscriptionStats, TerminalFrameSubscription};
 pub use ipc_server::{IpcServerError, IpcServerStats, SessionIpcServer};

@@ -14,6 +14,7 @@ members = [
     "crates/cshell-ssh",
     "crates/cshell-terminal",
     "crates/cshell-ui",
+    "crates/cshell-vault",
     "xtask",
 ]
 
@@ -39,6 +40,7 @@ epaint_default_fonts = "=0.36.1"
 futures = "0.3"
 guillotiere = "=0.7.0"
 libc = "=0.2.189"
+keyring = "=4.2.0"
 memchr = "2"
 portable-pty = "=0.9.0"
 prost = "=0.14.4"
@@ -58,6 +60,7 @@ unicode-width = "=0.2.2"
 wgpu = "=30.0.1"
 winit = "=0.30.13"
 windows-sys = "=0.61.2"
+zeroize = "=1.9.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

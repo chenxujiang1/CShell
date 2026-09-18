@@ -13,6 +13,7 @@ cshell-local = { path = "../crates/cshell-local" }
 cshell-output-store = { path = "../crates/cshell-output-store" }
 cshell-ssh = { path = "../crates/cshell-ssh" }
 cshell-terminal = { path = "../crates/cshell-terminal" }
+cshell-vault = { path = "../crates/cshell-vault" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

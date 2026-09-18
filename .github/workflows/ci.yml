@@ -44,6 +44,21 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
+      - name: Install Linux Secret Service
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes dbus-user-session gnome-keyring
+      - name: Native Linux keychain round trip
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            printf %s cshell-ci-ephemeral | gnome-keyring-daemon --components=secrets --unlock >/dev/null
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshell-vault native_roundtrip --locked --target ${{ matrix.target }}
+          '
+      - name: Native Windows/macOS keychain round trip
+        if: runner.os != 'Linux'
+        env:
+          CSHELL_KEYCHAIN_NATIVE_TEST: '1'
+        run: cargo test -p cshell-vault native_roundtrip --locked --target ${{ matrix.target }}
 
   native-resource-gates:
     strategy:
