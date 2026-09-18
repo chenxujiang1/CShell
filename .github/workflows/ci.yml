@@ -100,7 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux virtual display and software Vulkan adapter
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes xvfb xauth libvulkan1 mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install --yes xvfb xauth libxkbcommon-x11-0 libvulkan1 mesa-vulkan-drivers
       - name: Run Linux window recovery with a CPU adapter
         if: runner.os == 'Linux'
         env:
