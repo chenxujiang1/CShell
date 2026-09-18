@@ -828,6 +828,8 @@ pub enum WindowRendererError {
     CreateSurface(#[from] wgpu::CreateSurfaceError),
     #[error("no compatible adapter for the window surface: {0}")]
     Adapter(#[from] wgpu::RequestAdapterError),
+    #[error("the fallback window adapter is not a CPU renderer")]
+    SoftwareAdapterUnavailable,
     #[error("cannot create window rendering device: {0}")]
     Device(#[from] wgpu::RequestDeviceError),
     #[error("window surface has no supported configuration")]
@@ -1221,6 +1223,7 @@ pub struct WindowRenderer {
     vertex_count: u32,
     geometry_key: Option<GeometryKey>,
     device_lost: Arc<AtomicBool>,
+    cpu_adapter: bool,
 }
 
 impl std::fmt::Debug for WindowRenderer {
@@ -1238,16 +1241,46 @@ impl std::fmt::Debug for WindowRenderer {
 
 impl WindowRenderer {
     pub async fn new(window: Arc<Window>) -> Result<Self, WindowRendererError> {
+        Self::new_with_adapter_preference(window, false).await
+    }
+
+    /// Request a CPU adapter for a recovered window surface.
+    pub async fn new_software(window: Arc<Window>) -> Result<Self, WindowRendererError> {
+        Self::new_with_adapter_preference(window, true).await
+    }
+
+    async fn new_with_adapter_preference(
+        window: Arc<Window>,
+        software_only: bool,
+    ) -> Result<Self, WindowRendererError> {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })
-            .await?;
+        let fallback_options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: true,
+            apply_limit_buckets: false,
+        };
+        let adapter = if software_only {
+            instance.request_adapter(&fallback_options).await?
+        } else {
+            match instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                    apply_limit_buckets: false,
+                })
+                .await
+            {
+                Ok(adapter) => adapter,
+                Err(_) => instance.request_adapter(&fallback_options).await?,
+            }
+        };
+        let cpu_adapter = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+        if software_only && !cpu_adapter {
+            return Err(WindowRendererError::SoftwareAdapterUnavailable);
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("cshell-window-device"),
@@ -1420,7 +1453,19 @@ impl WindowRenderer {
             vertex_count: 0,
             geometry_key: None,
             device_lost,
+            cpu_adapter,
         })
+    }
+
+    #[must_use]
+    pub fn is_cpu_adapter(&self) -> bool {
+        self.cpu_adapter
+    }
+
+    /// Exercises the same device-loss recovery path as the wgpu callback.
+    #[doc(hidden)]
+    pub fn simulate_device_loss(&self) {
+        self.device_lost.store(true, Ordering::Release);
     }
 
     #[must_use]

@@ -10,8 +10,9 @@ use cshell_ipc::{HistorySearchDirection, MAX_TERMINAL_INPUT_BYTES};
 use cshell_render::{
     EguiFrame, LogDecorations, LogReflowLayout, LogReflowRequest, LogScrollbarState,
     LogSearchMatch, LogSourceId, LogSurfaceError, LogSurfaceModel, MAX_TERMINAL_SEARCH_QUERY_BYTES,
-    TerminalCellPoint, TerminalDecorations, TerminalSelection, TerminalSelectionMode,
-    TerminalSurfaceModel, TerminalViewport, WindowRenderer, validate_terminal_search_query,
+    RenderOutcome, TerminalCellPoint, TerminalDecorations, TerminalSelection,
+    TerminalSelectionMode, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
+    WindowRendererError, validate_terminal_search_query,
 };
 use cshell_ui::{WorkbenchMenuCommand, WorkbenchViewModel};
 use cursor_blink::CursorBlinkState;
@@ -56,6 +57,8 @@ struct DesktopApp {
     egui_context: egui::Context,
     egui_state: Option<egui_winit::State>,
     last_renderer_attempt: Option<std::time::Instant>,
+    renderer_recovering: bool,
+    renderer_needs_font_upload: bool,
     view_model: WorkbenchViewModel,
     daemon: Option<DesktopDaemonConnection>,
     terminal_surface: TerminalSurfaceModel,
@@ -175,7 +178,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
                 self.egui_state = Some(egui_state);
                 self.last_renderer_attempt = Some(std::time::Instant::now());
-                match initialize_renderer(Arc::clone(&window)) {
+                match initialize_renderer(Arc::clone(&window), false) {
                     Ok(renderer) => self.renderer = Some(renderer),
                     Err(error) => tracing::error!(%error, "cannot initialize terminal renderer"),
                 }
@@ -407,8 +410,15 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             && let Some(window) = &self.window
         {
             self.last_renderer_attempt = Some(std::time::Instant::now());
-            match initialize_renderer(Arc::clone(window)) {
+            match initialize_renderer(Arc::clone(window), self.renderer_recovering) {
                 Ok(renderer) => {
+                    self.renderer_needs_font_upload = true;
+                    if self.renderer_recovering
+                        && let Some(e2e) = &mut self.window_e2e
+                    {
+                        e2e.note_renderer_recovered(renderer.is_cpu_adapter());
+                    }
+                    self.renderer_recovering = false;
                     self.renderer = Some(renderer);
                     redraw_needed = true;
                 }
@@ -876,6 +886,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     pixels_per_point,
                     ..
                 } = full_output;
+                if self.renderer_needs_font_upload {
+                    let image = self.egui_context.fonts(|fonts| fonts.image());
+                    textures_delta.push(
+                        egui::TextureId::default(),
+                        egui::epaint::ImageDelta::full(image, Default::default()),
+                    );
+                }
                 if self.window_active
                     && self.log_surface.is_none()
                     && self.pending_paste.is_none()
@@ -992,12 +1009,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 // renderer recreates egui's font texture; clear this frame's abandoned deltas.
                 textures_delta.clear();
                 match render_result {
-                    Ok(_outcome) => {
-                        if let (Some(e2e), Some(log_surface)) =
-                            (&mut self.window_e2e, &mut self.log_surface)
+                    Ok(outcome) => {
+                        self.renderer_needs_font_upload = false;
+                        if outcome == RenderOutcome::Presented
+                            && let (Some(e2e), Some(log_surface)) =
+                                (&mut self.window_e2e, &mut self.log_surface)
                         {
                             e2e.on_present(log_surface, &window, viewport_rows);
+                            if e2e.should_inject_device_loss() {
+                                renderer.simulate_device_loss();
+                            }
                         }
+                    }
+                    Err(WindowRendererError::DeviceLost) => {
+                        tracing::warn!("window rendering device was lost; recreating renderer");
+                        self.renderer = None;
+                        self.renderer_recovering = true;
                     }
                     Err(error) => {
                         if let Some(e2e) = &mut self.window_e2e {
@@ -1005,6 +1032,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                         tracing::error!(%error, "terminal frame rendering failed");
                         self.renderer = None;
+                        self.renderer_recovering = true;
                     }
                 }
             }
@@ -1474,10 +1502,19 @@ fn log_scrollbar_action(progress: f32, total_line_count: u64) -> LogScrollbarAct
     LogScrollbarAction::JumpTo(line_id)
 }
 
-fn initialize_renderer(window: Arc<Window>) -> Result<WindowRenderer, Box<dyn Error>> {
+fn initialize_renderer(
+    window: Arc<Window>,
+    prefer_software: bool,
+) -> Result<WindowRenderer, Box<dyn Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    if prefer_software {
+        match runtime.block_on(WindowRenderer::new_software(Arc::clone(&window))) {
+            Ok(renderer) => return Ok(renderer),
+            Err(error) => tracing::warn!(%error, "software window adapter unavailable"),
+        }
+    }
     Ok(runtime.block_on(WindowRenderer::new(window))?)
 }
 

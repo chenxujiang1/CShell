@@ -19,6 +19,9 @@ pub struct WindowE2e {
     reflows: u64,
     requested_resizes: u64,
     observed_resizes: u64,
+    device_loss_injected: bool,
+    renderer_recoveries: u64,
+    software_recoveries: u64,
     failure: Option<String>,
 }
 
@@ -32,6 +35,9 @@ impl WindowE2e {
             reflows: 0,
             requested_resizes: 0,
             observed_resizes: 0,
+            device_loss_injected: false,
+            renderer_recoveries: 0,
+            software_recoveries: 0,
             failure: None,
         }
     }
@@ -54,6 +60,20 @@ impl WindowE2e {
         if size.width > 0 && size.height > 0 && self.requested_resizes > 0 {
             self.observed_resizes += 1;
         }
+    }
+
+    pub fn should_inject_device_loss(&mut self) -> bool {
+        if self.presents >= 24 && !self.device_loss_injected {
+            self.device_loss_injected = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn note_renderer_recovered(&mut self, software_adapter: bool) {
+        self.renderer_recoveries += 1;
+        self.software_recoveries += u64::from(software_adapter);
     }
 
     pub fn fail(&mut self, message: impl Into<String>) {
@@ -98,15 +118,17 @@ impl WindowE2e {
             && self.pages >= 4
             && self.reflows >= 4
             && self.requested_resizes >= 5
-            && self.observed_resizes >= 4;
+            && self.observed_resizes >= 4
+            && self.renderer_recoveries >= 1;
         if self.started.elapsed() >= Duration::from_secs(30) && !done {
             self.fail(format!(
-                "window E2E timeout: presents={}, pages={}, reflows={}, resize={}/{}",
+                "window E2E timeout: presents={}, pages={}, reflows={}, resize={}/{}, device recoveries={}",
                 self.presents,
                 self.pages,
                 self.reflows,
                 self.observed_resizes,
-                self.requested_resizes
+                self.requested_resizes,
+                self.renderer_recoveries
             ));
             return true;
         }
@@ -118,8 +140,14 @@ impl WindowE2e {
             return Err(failure.clone());
         }
         println!(
-            "log window E2E passed: {} presents, {} pages, {} reflows, {}/{} resizes",
-            self.presents, self.pages, self.reflows, self.observed_resizes, self.requested_resizes
+            "log window E2E passed: {} presents, {} pages, {} reflows, {}/{} resizes, {} device recoveries ({} software)",
+            self.presents,
+            self.pages,
+            self.reflows,
+            self.observed_resizes,
+            self.requested_resizes,
+            self.renderer_recoveries,
+            self.software_recoveries
         );
         Ok(())
     }
