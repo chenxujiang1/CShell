@@ -83,6 +83,33 @@ jobs:
           CSHELL_ALLOW_SOFTWARE_GPU: '1'
         run: bash .github/scripts/run-with-diagnostics.sh cargo xtask native-ci-bench
 
+  window-recovery-gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-15
+          - macos-15-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux virtual display and software Vulkan adapter
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes xvfb xauth libvulkan1 mesa-vulkan-drivers
+      - name: Run Linux window recovery with a CPU adapter
+        if: runner.os == 'Linux'
+        env:
+          CSHELL_REQUIRE_SOFTWARE_RECOVERY: '1'
+        run: xvfb-run -a bash .github/scripts/run-with-diagnostics.sh cargo xtask log-window-e2e
+      - name: Run Windows/macOS window recovery
+        if: runner.os != 'Linux'
+        run: bash .github/scripts/run-with-diagnostics.sh cargo xtask log-window-e2e
+
   msrv:
     runs-on: ubuntu-latest
     steps:

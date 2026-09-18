@@ -382,7 +382,7 @@ mod tests {
         assert!(stats.rejected_connections >= 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn slow_subscribers_under_pty_flood_do_not_block_a_control_connection() {
         const SLOW_CLIENTS: usize = 100;
         const MIN_FLOOD_GENERATIONS: u64 = 100;
@@ -453,6 +453,7 @@ mod tests {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+        let control_started = tokio::time::Instant::now();
         let control_result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             #[cfg(windows)]
             let mut control = transport::connect(&endpoint).await.unwrap();
@@ -490,7 +491,10 @@ mod tests {
         .await;
         assert!(
             control_result.is_ok(),
-            "slow subscribers blocked an independent control connection"
+            "slow subscribers blocked an independent control connection after {:?}; generation={}, stats={:?}",
+            control_started.elapsed(),
+            attachment.full_frame().unwrap().generation,
+            server.stats(),
         );
 
         drop(slow_clients);

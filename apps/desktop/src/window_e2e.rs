@@ -22,6 +22,7 @@ pub struct WindowE2e {
     device_loss_injected: bool,
     renderer_recoveries: u64,
     software_recoveries: u64,
+    require_software_recovery: bool,
     failure: Option<String>,
 }
 
@@ -38,6 +39,8 @@ impl WindowE2e {
             device_loss_injected: false,
             renderer_recoveries: 0,
             software_recoveries: 0,
+            require_software_recovery: std::env::var_os("CSHELL_REQUIRE_SOFTWARE_RECOVERY")
+                .is_some(),
             failure: None,
         }
     }
@@ -119,16 +122,18 @@ impl WindowE2e {
             && self.reflows >= 4
             && self.requested_resizes >= 5
             && self.observed_resizes >= 4
-            && self.renderer_recoveries >= 1;
+            && self.renderer_recoveries >= 1
+            && (!self.require_software_recovery || self.software_recoveries >= 1);
         if self.started.elapsed() >= Duration::from_secs(30) && !done {
             self.fail(format!(
-                "window E2E timeout: presents={}, pages={}, reflows={}, resize={}/{}, device recoveries={}",
+                "window E2E timeout: presents={}, pages={}, reflows={}, resize={}/{}, device recoveries={}, software recoveries={}",
                 self.presents,
                 self.pages,
                 self.reflows,
                 self.observed_resizes,
                 self.requested_resizes,
-                self.renderer_recoveries
+                self.renderer_recoveries,
+                self.software_recoveries
             ));
             return true;
         }
