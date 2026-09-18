@@ -55,6 +55,8 @@
 
 `P0` 是首个可用版本，`P1` 构成多主机产品核心，`P2` 达到成熟桌面对标，`P3+` 是桌面 v1.0 后的 X11、其他架构和 Android。
 
+本节的 `P0/P1/P2` 是功能优先级，不等同于第 18 节及开发计划中的工程 `Phase 0/1/2`。首个可日常使用的单主机版本仍在工程 Phase 1 完成后验收。
+
 | 能力域 | P0 | P1 | P2/P3+ |
 |---|---|---|---|
 | SSH 连接 | SSH2、密码/密钥/agent、known_hosts、keepalive、单跳 | 多级跳板、代理、连接复用、L/R/D 转发 | PKCS#11、OpenSSH CA、GSSAPI/FIDO2 按需求补齐 |
@@ -771,7 +773,7 @@ CShell/
 - 100 SSH 连接并发，GUI 不订阅输出时连接与任务正常运行。
 - russh 的 password/key/keyboard-interactive、SFTP、跳板、L/R/D 转发。
 - known_hosts 严格校验和 agent/Pageant。
-- Windows/macOS/Linux 钥匙串及保险库原型；macOS 两种架构和 Linux 两种窗口系统均有物理机或虚拟机冒烟测试。
+- Windows/macOS/Linux 系统钥匙串的最小写入、读取、删除和失败恢复原型；完整 Vault 留到 Phase 1。四目标原生 CI 与可自动化的窗口/平台测试属于工程门槛，真实读屏、IME 候选窗和视觉主观体验在使用中持续优化，不作为 Phase 0 的人工阻断项；见 [ADR-0005](adr/0005-phase0-engineering-gate.md)。
 
 输出为 ADR、火焰图、帧时序和可重复 benchmark，不做漂亮 UI。终端管线或 SSH provider 任一未通过都必须在此阶段更换，不能拖到产品后期。
 

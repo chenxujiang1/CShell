@@ -13,7 +13,7 @@ use cshell_render::{
     TerminalCellPoint, TerminalDecorations, TerminalSelection, TerminalSelectionMode,
     TerminalSurfaceModel, TerminalViewport, WindowRenderer, validate_terminal_search_query,
 };
-use cshell_ui::WorkbenchViewModel;
+use cshell_ui::{WorkbenchMenuCommand, WorkbenchViewModel};
 use cursor_blink::CursorBlinkState;
 use daemon_connection::{
     DesktopConnectionConfig, DesktopDaemonConnection, DesktopHistorySearchRequest,
@@ -208,6 +208,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         == terminal_accessibility::terminal_node_id().accesskit_id()
                     && self.log_surface.is_none()
                     && self.pending_paste.is_none()
+                    && !self.view_model.about_open
                 {
                     self.egui_context.memory_mut(|memory| {
                         if let Some(focused) = memory.focused() {
@@ -482,6 +483,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
                 if self.terminal_selecting
+                    && !self.view_model.about_open
                     && let Some(point) = self.terminal_point_at(position)
                     && let Some(selection) = &mut self.terminal_decorations.selection
                     && selection.focus != point
@@ -496,41 +498,46 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 state,
                 button: MouseButton::Left,
                 ..
-            } if self.log_surface.is_none() && self.pending_paste.is_none() => match state {
-                ElementState::Pressed if !egui_consumed => {
-                    if let Some(position) = self.cursor_position
-                        && let Some(point) = self.terminal_point_at(position)
-                    {
-                        self.egui_context.memory_mut(|memory| {
-                            if let Some(focused) = memory.focused() {
-                                memory.surrender_focus(focused);
-                            }
-                        });
-                        let click_count = register_terminal_click(
-                            &mut self.terminal_click,
-                            point,
-                            std::time::Instant::now(),
-                        );
-                        self.terminal_decorations.selection = Some(TerminalSelection {
-                            anchor: point,
-                            focus: point,
-                            mode: if self.modifiers.alt_key() {
-                                TerminalSelectionMode::Block
-                            } else if click_count == 3 {
-                                TerminalSelectionMode::Line
-                            } else {
-                                TerminalSelectionMode::Character
-                            },
-                        });
-                        self.terminal_decorations.revision =
-                            self.terminal_decorations.revision.wrapping_add(1);
-                        self.terminal_selecting = true;
-                        window.request_redraw();
+            } if self.log_surface.is_none()
+                && self.pending_paste.is_none()
+                && !self.view_model.about_open =>
+            {
+                match state {
+                    ElementState::Pressed if !egui_consumed => {
+                        if let Some(position) = self.cursor_position
+                            && let Some(point) = self.terminal_point_at(position)
+                        {
+                            self.egui_context.memory_mut(|memory| {
+                                if let Some(focused) = memory.focused() {
+                                    memory.surrender_focus(focused);
+                                }
+                            });
+                            let click_count = register_terminal_click(
+                                &mut self.terminal_click,
+                                point,
+                                std::time::Instant::now(),
+                            );
+                            self.terminal_decorations.selection = Some(TerminalSelection {
+                                anchor: point,
+                                focus: point,
+                                mode: if self.modifiers.alt_key() {
+                                    TerminalSelectionMode::Block
+                                } else if click_count == 3 {
+                                    TerminalSelectionMode::Line
+                                } else {
+                                    TerminalSelectionMode::Character
+                                },
+                            });
+                            self.terminal_decorations.revision =
+                                self.terminal_decorations.revision.wrapping_add(1);
+                            self.terminal_selecting = true;
+                            window.request_redraw();
+                        }
                     }
+                    ElementState::Released => self.terminal_selecting = false,
+                    ElementState::Pressed => {}
                 }
-                ElementState::Released => self.terminal_selecting = false,
-                ElementState::Pressed => {}
-            },
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
@@ -547,7 +554,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 event,
                 is_synthetic: false,
                 ..
-            } if is_terminal_search_shortcut(&event, self.modifiers) => {
+            } if !self.view_model.about_open
+                && self.pending_paste.is_none()
+                && is_terminal_search_shortcut(&event, self.modifiers) =>
+            {
                 self.terminal_search_open = true;
                 self.terminal_search_focus_requested = true;
                 window.request_redraw();
@@ -557,6 +567,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 is_synthetic: false,
                 ..
             } if self.terminal_search_open
+                && !self.view_model.about_open
                 && event.state == ElementState::Pressed
                 && event.logical_key == Key::Named(NamedKey::Escape) =>
             {
@@ -567,7 +578,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 event,
                 is_synthetic: false,
                 ..
-            } if !egui_consumed && self.log_surface.is_none() && self.pending_paste.is_none() => {
+            } if !egui_consumed
+                && self.log_surface.is_none()
+                && self.pending_paste.is_none()
+                && !self.view_model.about_open =>
+            {
                 if is_terminal_copy_shortcut(&event, self.modifiers) {
                     if let (Some(selection), Some(snapshot)) = (
                         self.terminal_decorations.selection,
@@ -645,6 +660,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 if !egui_consumed
                     && self.log_surface.is_none()
                     && self.pending_paste.is_none()
+                    && !self.view_model.about_open
                     && !text.is_empty() =>
             {
                 if let Some(daemon) = &self.daemon {
@@ -667,7 +683,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             && cursor.y >= f64::from(viewport.y)
                             && cursor.y < f64::from(viewport.y.saturating_add(viewport.height))
                     });
-                if over_terminal && self.viewport_rows > 0 {
+                if over_terminal
+                    && self.viewport_rows > 0
+                    && !self.view_model.about_open
+                    && self.pending_paste.is_none()
+                {
                     let rows = match delta {
                         MouseScrollDelta::LineDelta(_, vertical) => f64::from(vertical) * 3.0,
                         MouseScrollDelta::PixelDelta(position) => {
@@ -713,7 +733,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     if let Some(state) = scrollbar_state {
                         scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
                     }
-                    if self.log_surface.is_none() {
+                    if self.log_surface.is_none() && !self.view_model.about_open {
                         terminal_accessibility::add_terminal_node(
                             ui.ctx(),
                             terminal_rect,
@@ -721,7 +741,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             self.terminal_decorations.selection,
                         );
                     }
-                    if self.terminal_search_open {
+                    if self.terminal_search_open && !self.view_model.about_open {
                         egui::Window::new("查找终端")
                             .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
                             .collapsible(false)
@@ -798,7 +818,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                                 }
                             });
                     }
-                    if let Some(pending) = &self.pending_paste {
+                    if let Some(pending) = &self.pending_paste
+                        && !self.view_model.about_open
+                    {
                         egui::Window::new("确认粘贴到终端")
                             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                             .collapsible(false)
@@ -827,6 +849,18 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             });
                     }
                 });
+                if self.view_model.about_open {
+                    self.terminal_selecting = false;
+                }
+                match self.view_model.menu_command.take() {
+                    Some(WorkbenchMenuCommand::SearchTerminal) => {
+                        self.terminal_search_open = true;
+                        self.terminal_search_focus_requested = true;
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::Quit) => event_loop.exit(),
+                    None => {}
+                }
                 if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
                     match action {
                         LogScrollbarAction::FollowTail => surface.follow_tail(),
@@ -845,6 +879,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 if self.window_active
                     && self.log_surface.is_none()
                     && self.pending_paste.is_none()
+                    && !self.view_model.about_open
                     && self
                         .egui_context
                         .memory(|memory| memory.focused().is_none())
