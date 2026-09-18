@@ -1015,7 +1015,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             && let (Some(e2e), Some(log_surface)) =
                                 (&mut self.window_e2e, &mut self.log_surface)
                         {
-                            e2e.on_present(log_surface, &window, viewport_rows);
+                            e2e.on_present(
+                                log_surface,
+                                &window,
+                                viewport_rows,
+                                renderer.rendered_vertices(),
+                            );
                             if e2e.should_inject_device_loss() {
                                 renderer.simulate_device_loss();
                             }

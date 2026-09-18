@@ -1458,6 +1458,11 @@ impl WindowRenderer {
     }
 
     #[must_use]
+    pub fn rendered_vertices(&self) -> u32 {
+        self.vertex_count
+    }
+
+    #[must_use]
     pub fn is_cpu_adapter(&self) -> bool {
         self.cpu_adapter
     }

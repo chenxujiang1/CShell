@@ -85,7 +85,16 @@ impl WindowE2e {
         }
     }
 
-    pub fn on_present(&mut self, surface: &mut LogSurfaceModel, window: &Window, rows: u16) {
+    pub fn on_present(
+        &mut self,
+        surface: &mut LogSurfaceModel,
+        window: &Window,
+        rows: u16,
+        rendered_vertices: u32,
+    ) {
+        if rendered_vertices == 0 {
+            self.fail("window E2E presented an empty log frame");
+        }
         self.presents += 1;
         let delta = if self.presents < 58 { -73 } else { 89 };
         surface.scroll_visual_rows(delta, rows.max(1));
