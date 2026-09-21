@@ -1,6 +1,6 @@
 use cshell_ipc::{
-    DiscoveryRecord, Envelope, Handshake, RuntimePaths, client_handshake, envelope, features,
-    read_envelope, transport, write_envelope,
+    DiscoveryRecord, Envelope, Handshake, ProfileOperation, ProfileRequest, ProfileStatus,
+    RuntimePaths, client_handshake, envelope, features, read_envelope, transport, write_envelope,
 };
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -12,6 +12,7 @@ impl ChildGuard {
     fn spawn(runtime_root: &std::path::Path) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_cshelld"))
             .env("CSHELL_RUNTIME_DIR", runtime_root)
+            .env("CSHELL_PROFILE_DB", runtime_root.join("cshell.db"))
             .env("RUST_LOG", "off")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -67,8 +68,11 @@ async fn wait_until_ready(child: &mut Child, paths: &RuntimePaths) -> DiscoveryR
                     record.daemon_instance_id.to_vec(),
                     record.instance_token.to_vec(),
                 );
-                handshake.feature_bits = features::FULL_FRAME_RECOVERY | features::PRIORITY_STREAMS;
-                if client_handshake(&mut stream, 1, handshake).await.is_ok() {
+                handshake.feature_bits = features::FULL_FRAME_RECOVERY
+                    | features::PRIORITY_STREAMS
+                    | features::PROFILE_CONTROL;
+                if let Ok(negotiated) = client_handshake(&mut stream, 1, handshake).await {
+                    assert_ne!(negotiated.feature_bits & features::PROFILE_CONTROL, 0);
                     write_envelope(
                         &mut stream,
                         &Envelope {
@@ -88,6 +92,31 @@ async fn wait_until_ready(child: &mut Child, paths: &RuntimePaths) -> DiscoveryR
                         response.payload,
                         Some(envelope::Payload::SessionListResponse(_))
                     ));
+                    write_envelope(
+                        &mut stream,
+                        &Envelope {
+                            request_id: 3,
+                            deadline_unix_ms: 0,
+                            payload: Some(envelope::Payload::ProfileRequest(ProfileRequest {
+                                operation: ProfileOperation::List as i32,
+                                expected_revision: 0,
+                                changes: vec![],
+                                import_json: vec![],
+                                import_policy: 0,
+                            })),
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("Profile list request must send: {error}"));
+                    let response = read_envelope(&mut stream).await.unwrap_or_else(|error| {
+                        panic!("Profile list response must arrive: {error}")
+                    });
+                    assert_eq!(response.request_id, 3);
+                    let Some(envelope::Payload::ProfileResponse(profile)) = response.payload else {
+                        panic!("daemon must return a Profile response");
+                    };
+                    assert_eq!(profile.status, ProfileStatus::Ok as i32);
+                    assert!(profile.catalog.is_some());
                     return record;
                 }
             }

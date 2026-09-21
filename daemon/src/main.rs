@@ -5,7 +5,11 @@ use cshell_ipc::{
 };
 use cshell_local::LocalProfile;
 use cshell_ssh::{RusshProvider, SshProvider};
-use cshelld::{LocalSessionRegistry, SessionExitMonitor, SessionIpcServer, SessionIpcService};
+use cshell_storage::SqliteProfileRepository;
+use cshelld::{
+    LocalSessionRegistry, ProfileIpcService, SessionExitMonitor, SessionIpcServer,
+    SessionIpcService,
+};
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,6 +98,8 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
     let listener = LocalListener::bind(&PathBuf::from(&endpoint))?;
 
+    let profile_repository = SqliteProfileRepository::open(profile_database_path()?).await?;
+    let profiles = Arc::new(ProfileIpcService::new(profile_repository));
     let server = SessionIpcServer::new(
         listener,
         HandshakePolicy::with_instance_id(
@@ -103,9 +109,10 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
                 | features::PRIORITY_STREAMS
                 | features::LOG_PAGING
                 | features::TERMINAL_CONTROL
-                | features::HISTORY_SEARCH,
+                | features::HISTORY_SEARCH
+                | features::PROFILE_CONTROL,
         ),
-        SessionIpcService::new(Arc::clone(&registry)),
+        SessionIpcService::new(Arc::clone(&registry)).with_profiles(profiles),
     );
     let _discovery_publication = runtime_paths
         .as_ref()
@@ -165,4 +172,34 @@ fn required_hex<const N: usize>(name: &'static str) -> Result<[u8; N], Box<dyn E
             .map_err(|_| format!("{name} contains invalid hexadecimal data"))?;
     }
     Ok(decoded)
+}
+
+fn profile_database_path() -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(path) = std::env::var_os("CSHELL_PROFILE_DB") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(root) = std::env::var_os("CSHELL_DATA_DIR") {
+        return Ok(PathBuf::from(root).join("cshell.db"));
+    }
+    #[cfg(windows)]
+    let root = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or("LOCALAPPDATA is required for Profile storage")?
+        .join("CShell");
+    #[cfg(target_os = "macos")]
+    let root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is required for Profile storage")?
+        .join("Library")
+        .join("Application Support")
+        .join("CShell");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let root = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+        .ok_or("HOME or XDG_DATA_HOME is required for Profile storage")?
+        .join("cshell");
+    Ok(root.join("cshell.db"))
 }

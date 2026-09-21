@@ -1,5 +1,7 @@
 //! Daemon-owned ordered terminal pipeline used by the Phase 0 vertical slice.
 
+mod profile_ipc;
+
 mod exit_monitor;
 mod frame_subscription;
 mod ipc_server;
@@ -14,6 +16,7 @@ pub use ipc_server::{IpcServerError, IpcServerStats, SessionIpcServer};
 pub use local_session::{
     LocalSessionError, LocalSessionExit, LocalTerminalHandle, LocalTerminalSession,
 };
+pub use profile_ipc::ProfileIpcService;
 pub use session_ipc::{SessionIpcError, SessionIpcService};
 pub use session_registry::{
     LocalSessionAttachment, LocalSessionInfo, LocalSessionRegistry, SessionRegistryError,

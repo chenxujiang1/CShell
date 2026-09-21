@@ -1,6 +1,13 @@
 //! Use-case ports. Infrastructure crates implement these interfaces.
 
+mod profile_import;
 mod profiles;
+
+pub use profile_import::{
+    ImportAction, ImportConflictPolicy, ImportItemKind, ImportItemPreview,
+    MAX_PROFILE_IMPORT_BYTES, PROFILE_IMPORT_FORMAT, PROFILE_IMPORT_VERSION, ProfileImportDocument,
+    ProfileImportError, ProfileImportPreview,
+};
 
 pub use profiles::{
     CatalogChange, CatalogError, CatalogPreview, CatalogSnapshot, ChangeOutcome, ProfileCatalog,

@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 cshell-domain = { path = "../cshell-domain" }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [lints]

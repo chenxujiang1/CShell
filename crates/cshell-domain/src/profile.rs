@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProfileKind {
     Ssh,
     Local,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalOverrides {
     pub terminal_type: Option<String>,
     pub theme: Option<String>,
@@ -19,6 +21,7 @@ pub struct TerminalOverrides {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalDefaults {
     pub terminal_type: String,
     pub theme: String,
@@ -36,6 +39,7 @@ impl Default for TerminalDefaults {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileFolder {
     pub id: FolderId,
     pub name: String,
@@ -44,6 +48,7 @@ pub struct ProfileFolder {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileRecord {
     pub id: ProfileId,
     pub name: String,

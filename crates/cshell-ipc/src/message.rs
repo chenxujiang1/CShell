@@ -11,7 +11,7 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 8;
+pub const PROTOCOL_MINOR: u32 = 9;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -29,6 +29,7 @@ pub mod features {
     pub const LOG_PAGING: u64 = 1 << 3;
     pub const TERMINAL_CONTROL: u64 = 1 << 4;
     pub const HISTORY_SEARCH: u64 = 1 << 5;
+    pub const PROFILE_CONTROL: u64 = 1 << 6;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1521,7 +1522,7 @@ pub struct Envelope {
     pub deadline_unix_ms: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1533,6 +1534,7 @@ pub mod envelope {
         SessionCreateResponse, SessionListRequest, SessionListResponse, SnapshotRequest,
         TerminalControlResponse, TerminalInputRequest, TerminalResizeRequest,
     };
+    use crate::{ProfileRequest, ProfileResponse};
     use prost::Oneof;
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -1579,6 +1581,10 @@ pub mod envelope {
         HistorySearchRequest(HistorySearchRequest),
         #[prost(message, tag = "30")]
         HistorySearchResult(HistorySearchResult),
+        #[prost(message, tag = "31")]
+        ProfileRequest(ProfileRequest),
+        #[prost(message, tag = "32")]
+        ProfileResponse(ProfileResponse),
     }
 }
 

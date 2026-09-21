@@ -32,13 +32,13 @@ enum DesktopEndpointSource {
 }
 
 #[derive(Clone, Debug)]
-struct ResolvedDesktopEndpoint {
+pub(crate) struct ResolvedDesktopEndpoint {
     #[cfg(windows)]
-    endpoint: String,
+    pub(crate) endpoint: String,
     #[cfg(unix)]
-    endpoint: PathBuf,
-    instance_token: [u8; 32],
-    daemon_instance_id: [u8; 16],
+    pub(crate) endpoint: PathBuf,
+    pub(crate) instance_token: [u8; 32],
+    pub(crate) daemon_instance_id: [u8; 16],
 }
 
 #[derive(Clone, Debug, Default)]
@@ -179,7 +179,7 @@ impl DesktopConnectionConfig {
         self
     }
 
-    fn resolve(&self) -> Result<ResolvedDesktopEndpoint, DesktopConnectionError> {
+    pub(crate) fn resolve(&self) -> Result<ResolvedDesktopEndpoint, DesktopConnectionError> {
         match &self.source {
             DesktopEndpointSource::Explicit(endpoint) => Ok(endpoint.clone()),
             DesktopEndpointSource::Discovery(paths) => {

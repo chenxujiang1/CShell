@@ -158,12 +158,15 @@ where
         & (features::FULL_FRAME_RECOVERY
             | features::LOG_PAGING
             | features::TERMINAL_CONTROL
-            | features::HISTORY_SEARCH)
+            | features::HISTORY_SEARCH
+            | features::PROFILE_CONTROL)
         == 0
     {
         return Err(ConnectionError::SessionServiceRequired);
     }
-    service.serve_connection(stream).await?;
+    service
+        .serve_connection_with_features(stream, negotiated.feature_bits)
+        .await?;
     Ok(())
 }
 

@@ -1100,6 +1100,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cshell-domain",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -1275,17 +1277,21 @@ dependencies = [
 name = "cshelld"
 version = "0.1.0"
 dependencies = [
+ "cshell-application",
  "cshell-domain",
  "cshell-ipc",
  "cshell-local",
  "cshell-output-store",
  "cshell-render",
  "cshell-ssh",
+ "cshell-storage",
  "cshell-terminal",
  "cshell-vault",
  "libc",
  "rand",
  "russh",
+ "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

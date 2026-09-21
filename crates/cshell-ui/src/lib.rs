@@ -24,6 +24,7 @@ pub struct WorkbenchViewModel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkbenchMenuCommand {
     SearchTerminal,
+    Profiles,
     Quit,
 }
 
@@ -36,6 +37,10 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             ui.menu_button("菜单", |ui| {
                 if ui.button("查找终端").clicked() {
                     model.menu_command = Some(WorkbenchMenuCommand::SearchTerminal);
+                    ui.close();
+                }
+                if ui.button("管理 Profiles").clicked() {
+                    model.menu_command = Some(WorkbenchMenuCommand::Profiles);
                     ui.close();
                 }
                 if ui.button("关于 CShell").clicked() {

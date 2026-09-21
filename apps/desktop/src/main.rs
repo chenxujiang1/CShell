@@ -1,5 +1,7 @@
 mod cursor_blink;
 mod daemon_connection;
+mod profile_connection;
+mod profile_panel;
 mod terminal_accessibility;
 mod terminal_search;
 mod visual_corpus;
@@ -20,6 +22,8 @@ use daemon_connection::{
     DesktopConnectionConfig, DesktopDaemonConnection, DesktopHistorySearchRequest,
     DesktopHistorySearchResponse,
 };
+use profile_connection::DesktopProfileConnection;
+use profile_panel::ProfilePanel;
 use std::error::Error;
 use std::sync::Arc;
 use terminal_search::{TerminalSearchRequest, TerminalSearchWorker};
@@ -61,6 +65,8 @@ struct DesktopApp {
     renderer_needs_font_upload: bool,
     view_model: WorkbenchViewModel,
     daemon: Option<DesktopDaemonConnection>,
+    profiles: Option<DesktopProfileConnection>,
+    profile_panel: ProfilePanel,
     terminal_surface: TerminalSurfaceModel,
     terminal_decorations: TerminalDecorations,
     terminal_search: Option<TerminalSearchWorker>,
@@ -285,6 +291,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                 }
             }
+        }
+        if let Some(profiles) = &self.profiles {
+            redraw_needed |= self.profile_panel.sync(&profiles.view());
         }
         if let Some(daemon) = &self.daemon {
             let view = daemon.view();
@@ -738,8 +747,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let mut close_search = false;
                 let mut confirm_paste = false;
                 let mut cancel_paste = false;
+                let mut profile_command = None;
                 let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
+                    profile_command = self.profile_panel.draw(ui.ctx());
                     if let Some(state) = scrollbar_state {
                         scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
                     }
@@ -868,8 +879,18 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         self.terminal_search_focus_requested = true;
                         window.request_redraw();
                     }
+                    Some(WorkbenchMenuCommand::Profiles) => {
+                        self.profile_panel.open = true;
+                        if let Some(profiles) = &self.profiles {
+                            profiles.request(profile_connection::ProfileClientCommand::Refresh);
+                        }
+                        window.request_redraw();
+                    }
                     Some(WorkbenchMenuCommand::Quit) => event_loop.exit(),
                     None => {}
+                }
+                if let (Some(profiles), Some(command)) = (&self.profiles, profile_command) {
+                    profiles.request(command);
                 }
                 if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
                     match action {
@@ -1542,16 +1563,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let run_window_e2e = arguments
         .iter()
         .any(|argument| argument == window_e2e::ARGUMENT);
-    let daemon = if show_visual_corpus || show_log_corpus || run_window_e2e {
+    let daemon_config = if show_visual_corpus || show_log_corpus || run_window_e2e {
         None
     } else {
         DesktopConnectionConfig::from_env()?
-            .map(|config| DesktopDaemonConnection::start(config.with_log_pages(show_session_log)))
-            .transpose()?
     };
+    let profiles = daemon_config
+        .clone()
+        .map(DesktopProfileConnection::start)
+        .transpose()?;
+    let daemon = daemon_config
+        .map(|config| DesktopDaemonConnection::start(config.with_log_pages(show_session_log)))
+        .transpose()?;
     let mut app = DesktopApp {
         accesskit_proxy: Some(event_loop.create_proxy()),
         daemon,
+        profiles,
         terminal_search: Some(TerminalSearchWorker::start()?),
         ..DesktopApp::default()
     };

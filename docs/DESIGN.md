@@ -577,6 +577,8 @@ await cshell.ui.showResults(run.id);
 
 导入流程为“解析 → 预览 → 冲突处理 → 提交”，失败不能产生半条会话。加密密码若无法合法解密，则只导入元数据并要求用户重新绑定凭据。解析器使用公开样本和用户提供文件做 clean-room 实现，不复制商业产品代码。
 
+P1-010 首先支持无凭据的 CShell Profile 元数据 JSON：顶层固定为 `format: "cshell.profile-catalog"`、`version: 1`、`folders` 与 `profiles` 数组。每项使用 UUID、名称、父文件夹/所属文件夹、可继承的终端设置；Profile 另含 `kind`（`ssh`/`local`）、标签和收藏状态。单文件上限 1 MiB、最多 2048 项，导入文件内部须自洽且不得包含 secret。预览按当前 catalog revision 展示创建、跳过、替换或冲突；默认遇冲突停止，用户可选跳过或替换。提交重新校验同一份预览文件与 revision，并在一个 SQLite 事务内应用整批变更。OpenSSH 和商业客户端格式解析仍按 P1-090 的优先级实现。
+
 ### 13.2 导出
 
 - 默认导出不含 secret 的版本化 JSON。

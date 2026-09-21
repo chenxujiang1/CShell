@@ -1,6 +1,6 @@
 use crate::{
-    LocalSessionError, LocalSessionInfo, LocalSessionRegistry, SessionRegistryError,
-    SubscriptionFrame, TerminalFrameSubscription,
+    LocalSessionError, LocalSessionInfo, LocalSessionRegistry, ProfileIpcService,
+    SessionRegistryError, SubscriptionFrame, TerminalFrameSubscription,
 };
 use cshell_ipc::{
     Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
@@ -39,6 +39,7 @@ pub enum SessionIpcError {
 #[derive(Clone, Debug)]
 pub struct SessionIpcService {
     registry: Arc<LocalSessionRegistry>,
+    profiles: Option<Arc<ProfileIpcService>>,
 }
 
 #[derive(Debug)]
@@ -50,7 +51,16 @@ struct DispatchResult {
 impl SessionIpcService {
     #[must_use]
     pub const fn new(registry: Arc<LocalSessionRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            profiles: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_profiles(mut self, profiles: Arc<ProfileIpcService>) -> Self {
+        self.profiles = Some(profiles);
+        self
     }
 
     pub fn handle_request(&self, request: Envelope) -> Result<Envelope, SessionIpcError> {
@@ -63,7 +73,7 @@ impl SessionIpcService {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let request = read_envelope(stream).await?;
-        let response = self.handle_request(request)?;
+        let response = self.dispatch_any(request).await?.response;
         write_envelope(stream, &response).await?;
         Ok(())
     }
@@ -73,12 +83,25 @@ impl SessionIpcService {
     /// The reader owns its half of the stream so reads are never cancelled midway
     /// through a length-prefixed frame. The writer polls a latest-only subscription;
     /// slow clients therefore coalesce generations instead of accumulating snapshots.
-    pub async fn serve_connection<S>(&self, mut stream: S) -> Result<(), SessionIpcError>
+    pub async fn serve_connection<S>(&self, stream: S) -> Result<(), SessionIpcError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.serve_connection_with_features(stream, u64::MAX).await
+    }
+
+    pub async fn serve_connection_with_features<S>(
+        &self,
+        mut stream: S,
+        negotiated_features: u64,
+    ) -> Result<(), SessionIpcError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let initial_request = read_envelope(&mut stream).await?;
-        let initial = self.dispatch(initial_request)?;
+        let initial = self
+            .dispatch_with_features(initial_request, negotiated_features)
+            .await?;
         let mut subscription = initial.subscription;
         write_envelope(&mut stream, &initial.response).await?;
 
@@ -107,7 +130,7 @@ impl SessionIpcService {
                         Err(error) if is_client_disconnect(&error) => break Ok(()),
                         Err(error) => break Err(SessionIpcError::Transport(error)),
                     };
-                    let dispatched = match self.dispatch(request) {
+                    let dispatched = match self.dispatch_with_features(request, negotiated_features).await {
                         Ok(dispatched) => dispatched,
                         Err(error) => break Err(error),
                     };
@@ -143,6 +166,47 @@ impl SessionIpcService {
         };
         reader_worker.abort();
         result
+    }
+
+    async fn dispatch_any(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
+        self.dispatch_with_features(request, u64::MAX).await
+    }
+
+    async fn dispatch_with_features(
+        &self,
+        request: Envelope,
+        negotiated_features: u64,
+    ) -> Result<DispatchResult, SessionIpcError> {
+        if let Some(envelope::Payload::ProfileRequest(profile_request)) = &request.payload {
+            let response = if negotiated_features & cshell_ipc::features::PROFILE_CONTROL == 0 {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    detail: "Profile control was not negotiated".to_owned(),
+                }
+            } else if let Some(profiles) = &self.profiles {
+                profiles.handle(profile_request.clone()).await
+            } else {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unavailable as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    detail: "Profile storage is unavailable".to_owned(),
+                }
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::ProfileResponse(response)),
+                },
+                subscription: None,
+            });
+        }
+        self.dispatch(request)
     }
 
     fn dispatch(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {

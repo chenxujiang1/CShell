@@ -7,11 +7,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+cshell-application = { path = "../crates/cshell-application" }
 cshell-domain = { path = "../crates/cshell-domain" }
 cshell-ipc = { path = "../crates/cshell-ipc" }
 cshell-local = { path = "../crates/cshell-local" }
 cshell-output-store = { path = "../crates/cshell-output-store" }
 cshell-ssh = { path = "../crates/cshell-ssh" }
+cshell-storage = { path = "../crates/cshell-storage" }
 cshell-terminal = { path = "../crates/cshell-terminal" }
 cshell-vault = { path = "../crates/cshell-vault" }
 tokio.workspace = true
@@ -23,6 +25,8 @@ thiserror.workspace = true
 cshell-render = { path = "../crates/cshell-render" }
 rand.workspace = true
 russh.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]

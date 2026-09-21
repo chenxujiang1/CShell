@@ -4,6 +4,7 @@ mod codec;
 mod discovery;
 mod handshake;
 mod message;
+mod profile;
 mod replica;
 mod subscription;
 pub mod transport;
@@ -37,3 +38,11 @@ pub use replica::{
     ApplyResult, ReplicaError, ReplicaState, TerminalReplicaError, TerminalReplicaState,
 };
 pub use subscription::{ClientFrameUpdate, SubscriptionClientError, TerminalSubscriptionReplica};
+
+pub use profile::{
+    MAX_PROFILE_CONTROL_CHANGES, ProfileCatalogData, ProfileChange, ProfileCodecError,
+    ProfileDefaultsData, ProfileFolderData, ProfileImportAction, ProfileImportItemData,
+    ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData, ProfileKindData,
+    ProfileOperation, ProfileRecordData, ProfileRequest, ProfileResponse, ProfileStatus,
+    ProfileTerminalOverridesData, decode_id, profile_change,
+};
