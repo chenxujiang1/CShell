@@ -1,5 +1,5 @@
 [package]
-name = "cshell-application"
+name = "cshell-storage"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,15 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+cshell-application = { path = "../cshell-application" }
 cshell-domain = { path = "../cshell-domain" }
+sqlx.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

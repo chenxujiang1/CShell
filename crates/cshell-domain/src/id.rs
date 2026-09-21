@@ -47,6 +47,8 @@ macro_rules! domain_id {
 }
 
 domain_id!(ConnectionId);
+domain_id!(FolderId);
+domain_id!(ProfileId);
 domain_id!(SessionId);
 domain_id!(TargetId);
 domain_id!(TaskId);

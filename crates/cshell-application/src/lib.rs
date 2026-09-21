@@ -1,5 +1,12 @@
 //! Use-case ports. Infrastructure crates implement these interfaces.
 
+mod profiles;
+
+pub use profiles::{
+    CatalogChange, CatalogError, CatalogPreview, CatalogSnapshot, ChangeOutcome, ProfileCatalog,
+    ProfileQuery, ProfileRepository, ProfileRepositoryError, ProfileService, ProfileServiceError,
+};
+
 use async_trait::async_trait;
 use cshell_domain::{InputAction, SessionId, TerminalSize};
 use std::fmt::Debug;

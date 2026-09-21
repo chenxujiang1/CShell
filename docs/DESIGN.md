@@ -5,7 +5,7 @@
 > 首发平台：Windows x64、Linux x64、macOS arm64/x64  
 > 后续平台：Windows/Linux ARM64、Android  
 > 核心范围：SSH、SFTP、本地终端、多标签同步输入与批量执行
-> 开发实施基线：[DEVELOPMENT.md](DEVELOPMENT.md)
+> 开发实施计划与进度记录仅在本地维护，不纳入 Git。
 
 ## 1. 结论
 
@@ -750,7 +750,7 @@ CShell/
 ├─ docs/
 │  ├─ adr/
 │  ├─ threat-model/
-│  ├─ DEVELOPMENT.md           # 开发实施、任务编号和验收基线
+│  ├─ DEVELOPMENT.md           # 本地实施计划，不纳入 Git
 │  └─ DESIGN.md
 ├─ xtask/                      # 构建、资源生成和性能基准入口
 └─ Cargo.toml

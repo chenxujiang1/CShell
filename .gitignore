@@ -50,11 +50,9 @@ id_dsa
 # Internal development plans and progress records
 /DEVELOPMENT.md
 /STATUS.md
-/docs/DEVELOPMENT.md
-/docs/phase*/
-/docs/dev/
-/docs/progress/
-/docs/status/
+/docs/*
+!/docs/DESIGN.md
+!/docs/adr/
 
 # Editors, operating systems and temporary files
 /.idea/

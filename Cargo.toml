@@ -11,6 +11,7 @@ members = [
     "crates/cshell-output-store",
     "crates/cshell-render",
     "crates/cshell-sftp",
+    "crates/cshell-storage",
     "crates/cshell-ssh",
     "crates/cshell-terminal",
     "crates/cshell-ui",
@@ -49,6 +50,7 @@ regex = "=1.13.1"
 russh = { version = "=0.63.1", default-features = false, features = ["ring"] }
 russh-sftp = "=3.0.0"
 serde = { version = "1", features = ["derive", "rc"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

@@ -6,8 +6,6 @@ CShell 是一个首发覆盖 Windows x64、Linux x64、macOS arm64/x64 的开源
 
 性能关键路径采用 Rust 后台核心、原生终端模型、`winit + wgpu` GPU 视口和磁盘分段日志；`egui` 只承载非性能关键的工作台控件，不使用 WebView 或普通文本控件承担终端解析与大日志渲染。
 
-当前仓库处于 Phase 0 架构原型实现阶段。产品与架构方案见 [docs/DESIGN.md](docs/DESIGN.md)，后续开发、任务拆分和验收统一按照 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 执行。
-
-Phase 0 当前正在开发；完成项、验证结果、已知阻断与下一步见 [docs/phase0/STATUS.md](docs/phase0/STATUS.md)。
+Phase 0 工程准入已通过，现已开始 Phase 1 初期开发。产品与架构方案见 [docs/DESIGN.md](docs/DESIGN.md)。开发计划、进度与验收过程记录仅在本地维护，不纳入 Git。
 
 当前明确不做：RDP、串口、TELNET、RLOGIN、自动更新、代码签名和发布流程。X11 转发预留协议边界，在桌面 v1.0 稳定后规划。
