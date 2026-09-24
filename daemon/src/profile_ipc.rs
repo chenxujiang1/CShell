@@ -3,7 +3,9 @@ use cshell_application::{
     ImportItemKind, ProfileImportError, ProfileImportPreview, ProfileRepositoryError,
     ProfileService, ProfileServiceError,
 };
-use cshell_domain::{FolderId, ProfileFolder, ProfileId, ProfileRecord, SshConnectionRecord};
+use cshell_domain::{
+    FolderId, ProfileFolder, ProfileId, ProfileRecord, SshAuthMethod, SshConnectionRecord,
+};
 use cshell_ipc::{
     MAX_PROFILE_CONTROL_CHANGES, ProfileCatalogData, ProfileChange, ProfileCodecError,
     ProfileDefaultsData, ProfileFolderData, ProfileImportAction, ProfileImportItemData,
@@ -13,7 +15,8 @@ use cshell_ipc::{
 };
 use cshell_storage::SqliteProfileRepository;
 use cshell_vault::{
-    ProfilePasswordBinding, ProfilePasswordRef, Secret, SystemProfilePasswordVault,
+    ProfileKeyPassphraseRef, ProfilePasswordBinding, ProfilePasswordRef, Secret,
+    SystemProfileKeyPassphraseVault, SystemProfilePasswordVault,
 };
 
 #[derive(Debug)]
@@ -149,6 +152,79 @@ impl ProfileIpcService {
                 } else {
                     if !request.credential_secret.is_empty() {
                         return Err(invalid("delete password must not contain a secret"));
+                    }
+                    tokio::task::spawn_blocking(move || vault.delete(&reference)).await
+                };
+                result
+                    .map_err(|_| {
+                        (
+                            ProfileStatus::Unavailable,
+                            "credential vault task failed".into(),
+                        )
+                    })?
+                    .map_err(|error| {
+                        (
+                            ProfileStatus::Unavailable,
+                            format!("system keychain: {error:?}"),
+                        )
+                    })?;
+                Ok(ProfileResponse {
+                    status: ProfileStatus::Ok as i32,
+                    revision: snapshot.revision,
+                    catalog: None,
+                    preview: None,
+                    detail: String::new(),
+                })
+            }
+            ProfileOperation::SetKeyPassphrase | ProfileOperation::DeleteKeyPassphrase => {
+                let id = ProfileId::from_bytes(
+                    decode_id(&request.credential_profile_id)
+                        .map_err(|error| invalid(error.to_string()))?,
+                );
+                let snapshot = self.service.load().await.map_err(service_error)?.snapshot();
+                if snapshot.revision != request.expected_revision {
+                    return Err((
+                        ProfileStatus::Conflict,
+                        "Profile catalog changed; refresh before editing credentials".into(),
+                    ));
+                }
+                let profile = snapshot
+                    .profiles
+                    .iter()
+                    .find(|profile| {
+                        profile.id == id && profile.kind == cshell_domain::ProfileKind::Ssh
+                    })
+                    .ok_or_else(|| invalid("SSH Profile does not exist"))?;
+                let target = snapshot
+                    .ssh_connections
+                    .iter()
+                    .find(|connection| connection.profile_id == profile.id)
+                    .ok_or_else(|| invalid("SSH Profile target does not exist"))?;
+                if !matches!(
+                    target.auth_method,
+                    SshAuthMethod::PrivateKey | SshAuthMethod::Certificate
+                ) {
+                    return Err(invalid("SSH Profile does not use a private key"));
+                }
+                let key_path = target
+                    .private_key_path
+                    .clone()
+                    .ok_or_else(|| invalid("SSH Profile has no private key reference"))?;
+                let reference =
+                    ProfileKeyPassphraseRef::from_profile_bytes(*id.as_uuid().as_bytes());
+                let vault = SystemProfileKeyPassphraseVault::new();
+                let result = if operation == ProfileOperation::SetKeyPassphrase {
+                    if request.credential_secret.is_empty()
+                        || request.credential_secret.len() > 4096
+                    {
+                        return Err(invalid("key passphrase must contain 1 to 4096 bytes"));
+                    }
+                    let secret = Secret::new(request.credential_secret);
+                    tokio::task::spawn_blocking(move || vault.write(&reference, &key_path, &secret))
+                        .await
+                } else {
+                    if !request.credential_secret.is_empty() {
+                        return Err(invalid("delete key passphrase must not contain a secret"));
                     }
                     tokio::task::spawn_blocking(move || vault.delete(&reference)).await
                 };

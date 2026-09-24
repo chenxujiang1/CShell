@@ -3,7 +3,7 @@ use crate::{
     SessionRegistryError, SshSession, SshSessionError, SshSessionRegistry, SubscriptionFrame,
     TerminalFrameSubscription,
 };
-use cshell_domain::{ProfileId, SessionId, TerminalSize};
+use cshell_domain::{ProfileId, SessionId, SshAgentBackend, SshAuthMethod, TerminalSize};
 use cshell_ipc::{
     Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
     LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse, SessionCreateResponse,
@@ -12,14 +12,16 @@ use cshell_ipc::{
     read_envelope, write_envelope,
 };
 use cshell_output_store::{JournalColor, JournalStyle};
-use cshell_ssh::KnownHostsVerifier;
+use cshell_ssh::{AgentBackend, KnownHostsVerifier, SshCertificate, SshPrivateKey};
 use cshell_terminal::{Color, Style};
 use cshell_vault::{
-    KeychainError, ProfilePasswordBinding, ProfilePasswordRef, SystemProfilePasswordVault,
+    KeychainError, ProfileKeyPassphraseRef, ProfilePasswordBinding, ProfilePasswordRef,
+    SystemProfileKeyPassphraseVault, SystemProfilePasswordVault,
 };
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
 pub enum SessionIpcError {
@@ -237,6 +239,30 @@ impl SessionIpcService {
                     preview: None,
                     detail: "SSH Profile credentials were not negotiated".into(),
                 }
+            } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_AUTH == 0
+                && (matches!(
+                    cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                    Ok(cshell_ipc::ProfileOperation::SetKeyPassphrase
+                        | cshell_ipc::ProfileOperation::DeleteKeyPassphrase)
+                ) || profile_request.changes.iter().any(|change| {
+                    matches!(
+                        change.change.as_ref(),
+                        Some(cshell_ipc::profile_change::Change::UpsertSshConnection(value))
+                            if value.auth_method != 0
+                                || value.private_key_path.is_some()
+                                || value.certificate_path.is_some()
+                                || value.agent_backend != 0
+                                || value.agent_identity.is_some()
+                    )
+                }))
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    detail: "SSH Profile authentication was not negotiated".into(),
+                }
             } else if let Some(profiles) = &self.profiles {
                 profiles.handle(profile_request).await
             } else {
@@ -365,23 +391,91 @@ impl SessionIpcService {
         .await
         .map_err(|_| "known_hosts loading failed")?
         .map_err(|error| format!("strict known_hosts check cannot start: {error}"))?;
-        let reference = ProfilePasswordRef::from_profile_bytes(*profile_id.as_uuid().as_bytes());
-        let binding = ProfilePasswordBinding {
-            host: target.host.clone(),
-            port: target.port,
-            username: target.username.clone(),
+        let authentication = match target.auth_method {
+            SshAuthMethod::Password => {
+                let reference =
+                    ProfilePasswordRef::from_profile_bytes(*profile_id.as_uuid().as_bytes());
+                let binding = ProfilePasswordBinding {
+                    host: target.host.clone(),
+                    port: target.port,
+                    username: target.username.clone(),
+                };
+                let secret = tokio::task::spawn_blocking(move || {
+                    SystemProfilePasswordVault::new().read(&reference, &binding)
+                })
+                .await
+                .map_err(|_| "system keychain task failed")?
+                .map_err(|error| match error {
+                    KeychainError::BindingMismatch => "SSH target changed; save its password again",
+                    _ => "password unavailable in system keychain; save it from the Profile editor",
+                })?;
+                let password = String::from_utf8(secret.expose().to_vec())
+                    .map_err(|_| "stored password is not valid UTF-8")?;
+                crate::ssh_session::SshAuthentication::Password(password)
+            }
+            SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
+                let path = target
+                    .private_key_path
+                    .as_deref()
+                    .ok_or("SSH Profile has no private key reference")?;
+                let encoded = read_ssh_auth_file(path, "private key").await?;
+                let private_key = match SshPrivateKey::decode_openssh(&encoded, None) {
+                    Ok(private_key) => private_key,
+                    Err(unprotected_error) => {
+                        let reference = ProfileKeyPassphraseRef::from_profile_bytes(
+                            *profile_id.as_uuid().as_bytes(),
+                        );
+                        let key_path = path.to_owned();
+                        let secret = tokio::task::spawn_blocking(move || {
+                            SystemProfileKeyPassphraseVault::new().read(&reference, &key_path)
+                        })
+                        .await
+                        .map_err(|_| "system keychain task failed")?
+                        .map_err(|error| match error {
+                            KeychainError::Missing => format!(
+                                "private key cannot be opened without a passphrase: {unprotected_error}"
+                            ),
+                            KeychainError::BindingMismatch => {
+                                "private key path changed; save its passphrase again".into()
+                            }
+                            _ => "key passphrase unavailable in system keychain".into(),
+                        })?;
+                        let passphrase = Zeroizing::new(
+                            String::from_utf8(secret.expose().to_vec())
+                                .map_err(|_| "stored key passphrase is not valid UTF-8")?,
+                        );
+                        SshPrivateKey::decode_openssh(&encoded, Some(&passphrase))
+                            .map_err(|error| format!("private key unavailable: {error}"))?
+                    }
+                };
+                if target.auth_method == SshAuthMethod::Certificate {
+                    let path = target
+                        .certificate_path
+                        .as_deref()
+                        .ok_or("SSH Profile has no certificate reference")?;
+                    let encoded = read_ssh_auth_file(path, "certificate").await?;
+                    let certificate = SshCertificate::decode_openssh(&encoded)
+                        .map_err(|error| format!("certificate unavailable: {error}"))?;
+                    crate::ssh_session::SshAuthentication::Certificate {
+                        private_key,
+                        certificate: Box::new(certificate),
+                    }
+                } else {
+                    crate::ssh_session::SshAuthentication::PrivateKey(private_key)
+                }
+            }
+            SshAuthMethod::Agent => {
+                let backend = match target.agent_backend {
+                    SshAgentBackend::Auto => AgentBackend::Auto,
+                    SshAgentBackend::OpenSsh => AgentBackend::OpenSsh,
+                    SshAgentBackend::Pageant => AgentBackend::Pageant,
+                };
+                crate::ssh_session::SshAuthentication::Agent {
+                    backend,
+                    identity_fingerprint: target.agent_identity.clone(),
+                }
+            }
         };
-        let secret = tokio::task::spawn_blocking(move || {
-            SystemProfilePasswordVault::new().read(&reference, &binding)
-        })
-        .await
-        .map_err(|_| "system keychain task failed")?
-        .map_err(|error| match error {
-            KeychainError::BindingMismatch => "SSH target changed; save its password again",
-            _ => "password unavailable in system keychain; save it from the Profile editor",
-        })?;
-        let password = String::from_utf8(secret.expose().to_vec())
-            .map_err(|_| "stored password is not valid UTF-8")?;
         let id = SessionId::new();
         let size = TerminalSize::cells(rows, cols);
         let session = SshSession::connect(
@@ -390,7 +484,7 @@ impl SessionIpcService {
             crate::ssh_session::SshConnect {
                 username: target.username,
                 verifier,
-                password,
+                authentication,
             },
             size,
             &self.registry.journal_path(id),
@@ -638,6 +732,31 @@ impl SessionIpcService {
             result.err().unwrap_or(TerminalControlStatus::Accepted),
         )
     }
+}
+
+async fn read_ssh_auth_file(path: &str, label: &str) -> Result<Zeroizing<String>, String> {
+    const MAX_AUTH_FILE_BYTES: u64 = 1024 * 1024;
+    let path = std::path::Path::new(path);
+    if !path.is_absolute() {
+        return Err(format!("{label} reference must be an absolute path"));
+    }
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| format!("{label} file is unavailable"))?;
+    if !metadata.is_file() || metadata.len() > MAX_AUTH_FILE_BYTES {
+        return Err(format!("{label} must be a file no larger than 1 MiB"));
+    }
+    let bytes = Zeroizing::new(
+        tokio::fs::read(path)
+            .await
+            .map_err(|_| format!("{label} file cannot be read"))?,
+    );
+    if bytes.len() as u64 > MAX_AUTH_FILE_BYTES {
+        return Err(format!("{label} file exceeds 1 MiB"));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map(Zeroizing::new)
+        .map_err(|_| format!("{label} file is not UTF-8"))
 }
 
 fn default_known_hosts_path() -> Result<std::path::PathBuf, String> {

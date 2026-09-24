@@ -8,6 +8,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const PROBE_SERVICE: &str = "org.cshell.phase0.keychain-probe";
 const PROFILE_PASSWORD_SERVICE: &str = "org.cshell.profile.password";
+const PROFILE_KEY_PASSPHRASE_SERVICE: &str = "org.cshell.profile.key-passphrase";
 static PROBE_OPERATIONS: Mutex<()> = Mutex::new(());
 
 /// Opaque account name for one temporary probe entry.
@@ -272,6 +273,99 @@ impl SystemProfilePasswordVault {
     }
 
     pub fn delete(&self, id: &ProfilePasswordRef) -> Result<(), KeychainError> {
+        let _guard = PROBE_OPERATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match Self::entry(id)?
+            .delete_credential()
+            .map_err(map_native_error)
+        {
+            Ok(()) | Err(KeychainError::Missing) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Opaque reference to a key passphrase in the system keychain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileKeyPassphraseRef(String);
+
+impl ProfileKeyPassphraseRef {
+    #[must_use]
+    pub fn from_profile_bytes(id: [u8; 16]) -> Self {
+        Self(Uuid::from_bytes(id).to_string())
+    }
+}
+
+const KEY_PASSPHRASE_MAGIC: &[u8] = b"CSHELLKEY1";
+
+#[derive(Debug, Default)]
+pub struct SystemProfileKeyPassphraseVault;
+
+impl SystemProfileKeyPassphraseVault {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn entry(id: &ProfileKeyPassphraseRef) -> Result<keyring::Entry, KeychainError> {
+        keyring::Entry::new(PROFILE_KEY_PASSPHRASE_SERVICE, &id.0).map_err(map_native_error)
+    }
+
+    pub fn write(
+        &self,
+        id: &ProfileKeyPassphraseRef,
+        key_path: &str,
+        secret: &Secret,
+    ) -> Result<(), KeychainError> {
+        let path_len =
+            u16::try_from(key_path.len()).map_err(|_| KeychainError::InvalidCredential)?;
+        let secret_len =
+            u16::try_from(secret.expose().len()).map_err(|_| KeychainError::InvalidCredential)?;
+        if path_len == 0 || secret_len == 0 || secret_len > 4096 {
+            return Err(KeychainError::InvalidCredential);
+        }
+        let mut encoded = Zeroizing::new(Vec::with_capacity(
+            KEY_PASSPHRASE_MAGIC.len() + 4 + key_path.len() + secret.expose().len(),
+        ));
+        encoded.extend_from_slice(KEY_PASSPHRASE_MAGIC);
+        encoded.extend_from_slice(&path_len.to_be_bytes());
+        encoded.extend_from_slice(key_path.as_bytes());
+        encoded.extend_from_slice(&secret_len.to_be_bytes());
+        encoded.extend_from_slice(secret.expose());
+        let _guard = PROBE_OPERATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::entry(id)?
+            .set_secret(&encoded)
+            .map_err(map_native_error)
+    }
+
+    pub fn read(
+        &self,
+        id: &ProfileKeyPassphraseRef,
+        key_path: &str,
+    ) -> Result<Secret, KeychainError> {
+        let _guard = PROBE_OPERATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let encoded = Zeroizing::new(Self::entry(id)?.get_secret().map_err(map_native_error)?);
+        if !encoded.starts_with(KEY_PASSPHRASE_MAGIC) {
+            return Err(KeychainError::InvalidCredential);
+        }
+        let mut cursor = KEY_PASSPHRASE_MAGIC.len();
+        let stored_path = take_part(&encoded, &mut cursor)?;
+        let passphrase = take_part(&encoded, &mut cursor)?;
+        if cursor != encoded.len() || passphrase.is_empty() || passphrase.len() > 4096 {
+            return Err(KeychainError::InvalidCredential);
+        }
+        if stored_path != key_path.as_bytes() {
+            return Err(KeychainError::BindingMismatch);
+        }
+        Ok(Secret::new(passphrase.to_vec()))
+    }
+
+    pub fn delete(&self, id: &ProfileKeyPassphraseRef) -> Result<(), KeychainError> {
         let _guard = PROBE_OPERATIONS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

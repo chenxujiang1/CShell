@@ -66,6 +66,35 @@ pub struct SshConnectionRecord {
     pub host: String,
     pub port: u16,
     pub username: String,
+    #[serde(default)]
+    pub auth_method: SshAuthMethod,
+    #[serde(default)]
+    pub private_key_path: Option<String>,
+    #[serde(default)]
+    pub certificate_path: Option<String>,
+    #[serde(default)]
+    pub agent_backend: SshAgentBackend,
+    #[serde(default)]
+    pub agent_identity: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthMethod {
+    #[default]
+    Password,
+    PrivateKey,
+    Certificate,
+    Agent,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAgentBackend {
+    #[default]
+    Auto,
+    OpenSsh,
+    Pageant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

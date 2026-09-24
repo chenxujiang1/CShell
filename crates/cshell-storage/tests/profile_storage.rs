@@ -2,7 +2,7 @@ use cshell_application::{
     CatalogChange, CatalogSnapshot, ProfileCatalog, ProfileRepository, ProfileService,
 };
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SettingSource,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SettingSource, SshAuthMethod,
     SshConnectionRecord, TerminalOverrides,
 };
 use cshell_storage::{SqliteProfileRepository, StorageError, restore_backup};
@@ -241,16 +241,16 @@ async fn future_schema_is_not_downgraded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("future.db");
     let pool = raw_pool(&path).await?;
-    query("PRAGMA user_version = 3").execute(&pool).await?;
+    query("PRAGMA user_version = 4").execute(&pool).await?;
     pool.close().await;
     assert!(matches!(
         SqliteProfileRepository::open(&path).await,
-        Err(StorageError::UnsupportedSchema(3))
+        Err(StorageError::UnsupportedSchema(4))
     ));
     assert!(backups(temp.path())?.is_empty());
     let pool = raw_pool(&path).await?;
     let version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     pool.close().await;
     Ok(())
 }
@@ -266,6 +266,11 @@ async fn ssh_target_round_trip_and_failed_update_are_atomic() -> Result<(), Box<
         host: "server.example.com".into(),
         port: 2222,
         username: "alice".into(),
+        auth_method: SshAuthMethod::Certificate,
+        private_key_path: Some("/keys/server".into()),
+        certificate_path: Some("/keys/server-cert.pub".into()),
+        agent_backend: Default::default(),
+        agent_identity: None,
     };
     service
         .apply_batch(
@@ -304,6 +309,49 @@ async fn ssh_target_round_trip_and_failed_update_are_atomic() -> Result<(), Box<
     assert_eq!(intact.revision, 1);
     assert_eq!(intact.ssh_connections, vec![target]);
     service.into_repository().close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_ssh_target_migrates_with_backup_and_password_default() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("v2.db");
+    let id = ProfileId::new();
+    let pool = raw_pool(&path).await?;
+    query("CREATE TABLE profile_catalog_meta (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, terminal_type TEXT NOT NULL, theme TEXT NOT NULL, logging INTEGER NOT NULL)").execute(&pool).await?;
+    query("CREATE TABLE profile_folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, terminal_type TEXT, theme TEXT, logging INTEGER)").execute(&pool).await?;
+    query("CREATE TABLE profile_records (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind INTEGER NOT NULL, folder_id TEXT, favorite INTEGER NOT NULL, terminal_type TEXT, theme TEXT, logging INTEGER)").execute(&pool).await?;
+    query("CREATE TABLE profile_tags (profile_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(profile_id, tag))").execute(&pool).await?;
+    query("CREATE TABLE profile_ssh_connections (profile_id TEXT PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL, username TEXT NOT NULL)").execute(&pool).await?;
+    query("INSERT INTO profile_catalog_meta VALUES (1, 4, 'xterm-256color', 'default', 0)")
+        .execute(&pool)
+        .await?;
+    query("INSERT INTO profile_records (id, name, kind, folder_id, favorite) VALUES (?1, 'legacy', 0, NULL, 0)").bind(id.to_string()).execute(&pool).await?;
+    query("INSERT INTO profile_ssh_connections VALUES (?1, 'example.com', 22, 'alice')")
+        .bind(id.to_string())
+        .execute(&pool)
+        .await?;
+    query("PRAGMA user_version = 2").execute(&pool).await?;
+    pool.close().await;
+
+    let repository = SqliteProfileRepository::open(&path).await?;
+    let snapshot = repository.load().await?;
+    assert_eq!(snapshot.revision, 4);
+    assert_eq!(snapshot.ssh_connections.len(), 1);
+    assert_eq!(
+        snapshot.ssh_connections[0].auth_method,
+        SshAuthMethod::Password
+    );
+    assert_eq!(snapshot.ssh_connections[0].private_key_path, None);
+    repository.close().await;
+    let backup_paths = backups(temp.path())?;
+    assert_eq!(backup_paths.len(), 1);
+    let backup_pool = raw_pool(&backup_paths[0]).await?;
+    let version: i64 = query_scalar("PRAGMA user_version")
+        .fetch_one(&backup_pool)
+        .await?;
+    assert_eq!(version, 2);
+    backup_pool.close().await;
     Ok(())
 }
 

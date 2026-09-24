@@ -4,8 +4,8 @@ use cshell_application::{
     CatalogSnapshot, ProfileCatalog, ProfileRepository, ProfileRepositoryError,
 };
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
-    TerminalDefaults, TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAgentBackend, SshAuthMethod,
+    SshConnectionRecord, TerminalDefaults, TerminalOverrides,
 };
 use sqlx::{Row, SqlitePool, query};
 use std::collections::{BTreeSet, HashMap};
@@ -126,7 +126,7 @@ impl ProfileRepository for SqliteProfileRepository {
             profiles[*index].tags.insert(tag);
         }
         let connection_rows = query(
-            "SELECT profile_id, host, port, username FROM profile_ssh_connections ORDER BY profile_id",
+            "SELECT profile_id, host, port, username, auth_method, private_key_path, certificate_path, agent_backend, agent_identity FROM profile_ssh_connections ORDER BY profile_id",
         )
         .fetch_all(&mut *tx)
         .await
@@ -140,6 +140,22 @@ impl ProfileRepository for SqliteProfileRepository {
                 host: row.try_get("host").map_err(corrupt)?,
                 port: u16::try_from(port).map_err(|_| ProfileRepositoryError::Corrupt)?,
                 username: row.try_get("username").map_err(corrupt)?,
+                auth_method: match row.try_get::<i64, _>("auth_method").map_err(corrupt)? {
+                    0 => SshAuthMethod::Password,
+                    1 => SshAuthMethod::PrivateKey,
+                    2 => SshAuthMethod::Certificate,
+                    3 => SshAuthMethod::Agent,
+                    _ => return Err(ProfileRepositoryError::Corrupt),
+                },
+                private_key_path: row.try_get("private_key_path").map_err(corrupt)?,
+                certificate_path: row.try_get("certificate_path").map_err(corrupt)?,
+                agent_backend: match row.try_get::<i64, _>("agent_backend").map_err(corrupt)? {
+                    0 => SshAgentBackend::Auto,
+                    1 => SshAgentBackend::OpenSsh,
+                    2 => SshAgentBackend::Pageant,
+                    _ => return Err(ProfileRepositoryError::Corrupt),
+                },
+                agent_identity: row.try_get("agent_identity").map_err(corrupt)?,
             });
         }
         tx.commit()
@@ -259,13 +275,27 @@ impl ProfileRepository for SqliteProfileRepository {
         }
         for connection in &next.ssh_connections {
             query(
-                "INSERT INTO profile_ssh_connections (profile_id, host, port, username)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO profile_ssh_connections (profile_id, host, port, username, auth_method, private_key_path, certificate_path, agent_backend, agent_identity)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .bind(connection.profile_id.to_string())
             .bind(&connection.host)
             .bind(i64::from(connection.port))
             .bind(&connection.username)
+            .bind(match connection.auth_method {
+                SshAuthMethod::Password => 0_i64,
+                SshAuthMethod::PrivateKey => 1,
+                SshAuthMethod::Certificate => 2,
+                SshAuthMethod::Agent => 3,
+            })
+            .bind(&connection.private_key_path)
+            .bind(&connection.certificate_path)
+            .bind(match connection.agent_backend {
+                SshAgentBackend::Auto => 0_i64,
+                SshAgentBackend::OpenSsh => 1,
+                SshAgentBackend::Pageant => 2,
+            })
+            .bind(&connection.agent_identity)
             .execute(&mut *tx)
             .await
             .map_err(|_| ProfileRepositoryError::Unavailable)?;

@@ -258,3 +258,29 @@ fn native_profile_password_roundtrip() {
     let _ = vault.delete(&id);
     assert_eq!(result, Ok(()));
 }
+
+#[test]
+fn native_profile_key_passphrase_is_bound_to_key_path() {
+    if std::env::var_os("CSHELL_KEYCHAIN_NATIVE_TEST").is_none() {
+        return;
+    }
+    let vault = SystemProfileKeyPassphraseVault::new();
+    let id = ProfileKeyPassphraseRef::from_profile_bytes(*Uuid::now_v7().as_bytes());
+    let secret = Secret::new(b"native-key-passphrase".to_vec());
+    let result = (|| {
+        vault.write(&id, "/keys/id_ed25519", &secret)?;
+        if vault.read(&id, "/keys/id_ed25519")?.expose() != secret.expose() {
+            return Err(KeychainError::OperationFailed);
+        }
+        if vault.read(&id, "/keys/other").err() != Some(KeychainError::BindingMismatch) {
+            return Err(KeychainError::OperationFailed);
+        }
+        vault.delete(&id)?;
+        if vault.read(&id, "/keys/id_ed25519").err() != Some(KeychainError::Missing) {
+            return Err(KeychainError::OperationFailed);
+        }
+        Ok(())
+    })();
+    let _ = vault.delete(&id);
+    assert_eq!(result, Ok(()));
+}

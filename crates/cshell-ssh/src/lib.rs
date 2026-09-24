@@ -321,6 +321,8 @@ pub enum SshError {
     AgentAuthentication(String),
     #[error("SSH agent returned {actual} identities; maximum is {maximum}")]
     AgentIdentityLimit { actual: usize, maximum: usize },
+    #[error("selected SSH agent identity is unavailable")]
+    AgentIdentityUnavailable,
     #[error("SSH agent backend {backend:?} is not supported on this platform")]
     AgentBackendUnsupported { backend: AgentBackend },
     #[error("no Windows SSH agent backend was available: {0}")]
@@ -719,10 +721,39 @@ impl RusshClient {
         })
     }
 
+    pub async fn connect_certificate_known_hosts(
+        username: impl Into<String>,
+        private_key: SshPrivateKey,
+        certificate: SshCertificate,
+        known_hosts: KnownHostsVerifier,
+    ) -> Result<Self, SshError> {
+        certificate.validate_private_key(&private_key)?;
+        let address = {
+            let (host, port) = known_hosts.target();
+            (host.to_owned(), port)
+        };
+        let (mut session, forward_routes) = connect_verified(address, known_hosts).await?;
+        authenticate_with_certificate(&mut session, username.into(), private_key, certificate)
+            .await?;
+        Ok(Self {
+            session,
+            forward_routes,
+        })
+    }
+
     pub async fn connect_agent_known_hosts(
         username: impl Into<String>,
         known_hosts: KnownHostsVerifier,
         backend: AgentBackend,
+    ) -> Result<Self, SshError> {
+        Self::connect_agent_known_hosts_identity(username, known_hosts, backend, None).await
+    }
+
+    pub async fn connect_agent_known_hosts_identity(
+        username: impl Into<String>,
+        known_hosts: KnownHostsVerifier,
+        backend: AgentBackend,
+        identity_fingerprint: Option<&str>,
     ) -> Result<Self, SshError> {
         let address = {
             let (host, port) = known_hosts.target();
@@ -733,7 +764,13 @@ impl RusshClient {
             tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, connect_agent_backend(backend))
                 .await
                 .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
-        authenticate_with_agent(&mut session, username.into(), &mut agent).await?;
+        authenticate_with_agent_selected(
+            &mut session,
+            username.into(),
+            &mut agent,
+            identity_fingerprint,
+        )
+        .await?;
         Ok(Self {
             session,
             forward_routes,
@@ -1164,6 +1201,18 @@ async fn authenticate_with_agent<S>(
 where
     S: russh::keys::agent::client::AgentStream + Send + Unpin,
 {
+    authenticate_with_agent_selected(session, username, agent, None).await
+}
+
+async fn authenticate_with_agent_selected<S>(
+    session: &mut russh::client::Handle<VerifiedClient>,
+    username: String,
+    agent: &mut russh::keys::agent::client::AgentClient<S>,
+    identity_fingerprint: Option<&str>,
+) -> Result<(), SshError>
+where
+    S: russh::keys::agent::client::AgentStream + Send + Unpin,
+{
     let identities = tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, agent.request_identities())
         .await
         .map_err(|_elapsed| SshError::AuthenticationTimeout)?
@@ -1174,7 +1223,18 @@ where
             maximum: MAX_AGENT_IDENTITIES,
         });
     }
+    let mut selected_identity_found = false;
     for identity in identities {
+        if let Some(requested) = identity_fingerprint {
+            let fingerprint = identity
+                .public_key()
+                .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                .to_string();
+            if fingerprint != requested {
+                continue;
+            }
+            selected_identity_found = true;
+        }
         let hash_alg = if identity.public_key().algorithm().is_rsa() {
             match session.best_supported_rsa_hash().await? {
                 Some(Some(hash)) => Some(hash),
@@ -1211,7 +1271,11 @@ where
             return Ok(());
         }
     }
-    Err(SshError::AuthenticationRejected)
+    if identity_fingerprint.is_some() && !selected_identity_found {
+        Err(SshError::AgentIdentityUnavailable)
+    } else {
+        Err(SshError::AuthenticationRejected)
+    }
 }
 
 #[cfg(test)]
@@ -1220,7 +1284,7 @@ mod tests {
     use super::{
         AgentBackend, AlgorithmPolicy, KeyboardInteractiveChallenge, KnownHostsVerifier,
         PinnedHostKey, RusshClient, RusshProvider, SshCertificate, SshError, SshPrivateKey,
-        SshProvider, authenticate_with_agent, connect_verified,
+        SshProvider, authenticate_with_agent_selected, connect_verified,
     };
     use futures::stream;
     use rand::rng;
@@ -1806,6 +1870,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn encrypted_private_key_requires_matching_passphrase() {
+        let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let encrypted = key.encrypt(&mut rng(), "test-passphrase").unwrap();
+        let encoded = encrypted.to_openssh(LineEnding::LF).unwrap();
+        assert!(SshPrivateKey::decode_openssh(&encoded, None).is_err());
+        assert!(SshPrivateKey::decode_openssh(&encoded, Some("wrong")).is_err());
+        let decoded = SshPrivateKey::decode_openssh(&encoded, Some("test-passphrase")).unwrap();
+        assert_eq!(
+            decoded.sha256_fingerprint(),
+            key.fingerprint(HashAlg::Sha256).to_string()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn real_russh_openssh_user_certificate_auth_round_trip() {
         let user_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
@@ -1891,6 +1969,7 @@ mod tests {
     async fn real_russh_agent_signature_host_key_pty_and_exec_round_trip() {
         let rejected_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
         let accepted_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let identity_fingerprint = accepted_key.fingerprint(HashAlg::Sha256).to_string();
         let (address, fingerprint, server) =
             spawn_protocol_server(Some(accepted_key.public_key().clone())).await;
 
@@ -1909,9 +1988,14 @@ mod tests {
             connect_verified(address, PinnedHostKey::sha256(fingerprint))
                 .await
                 .unwrap();
-        authenticate_with_agent(&mut session, "cshell".to_owned(), &mut agent)
-            .await
-            .unwrap();
+        authenticate_with_agent_selected(
+            &mut session,
+            "cshell".to_owned(),
+            &mut agent,
+            Some(&identity_fingerprint),
+        )
+        .await
+        .unwrap();
         let client = RusshClient {
             session,
             forward_routes,

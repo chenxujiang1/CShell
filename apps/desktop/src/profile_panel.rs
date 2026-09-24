@@ -1,7 +1,7 @@
 use crate::profile_connection::{DesktopProfileCatalog, DesktopProfileView, ProfileClientCommand};
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
-    TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAgentBackend, SshAuthMethod,
+    SshConnectionRecord, TerminalOverrides,
 };
 use cshell_ipc::{
     ProfileChange, ProfileFolderData, ProfileImportAction, ProfileImportItemKind,
@@ -17,20 +17,38 @@ enum Selected {
     Profile(ProfileId),
 }
 
-#[derive(Debug)]
 struct ProfileDraft {
     record: ProfileRecord,
     tags: String,
     ssh_host: String,
     ssh_port: u16,
     ssh_username: String,
+    auth_method: SshAuthMethod,
+    private_key_path: String,
+    certificate_path: String,
+    agent_backend: SshAgentBackend,
+    agent_identity: String,
     password: String,
+    key_passphrase: String,
     had_ssh_connection: bool,
+}
+
+impl std::fmt::Debug for ProfileDraft {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfileDraft")
+            .field("profile_id", &self.record.id)
+            .field("auth_method", &self.auth_method)
+            .field("password", &"[REDACTED]")
+            .field("key_passphrase", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for ProfileDraft {
     fn drop(&mut self) {
         self.password.zeroize();
+        self.key_passphrase.zeroize();
     }
 }
 
@@ -258,31 +276,105 @@ impl ProfilePanel {
                                     });
                                     let saved_target = catalog.profiles.iter().any(|item| item.id == draft.record.id)
                                         && catalog.ssh_connections.iter().any(|item| item.profile_id == draft.record.id);
-                                    ui.label("Password is stored in the system keychain, never in the Profile database.");
                                     ui.label("SSH host key must match ~/.ssh/known_hosts; unknown or changed keys are blocked.");
-                                    ui.horizontal(|ui| {
-                                        ui.label("Password");
-                                        ui.add(egui::TextEdit::singleline(&mut draft.password).password(true).char_limit(4096));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.add_enabled(saved_target && !draft.password.is_empty(), egui::Button::new("Save password")).clicked() {
-                                            command = Some(ProfileClientCommand::SetPassword {
-                                                profile_id: draft.record.id,
-                                                expected_revision: catalog.revision,
-                                                password: std::mem::take(&mut draft.password).into_bytes(),
+                                    egui::ComboBox::from_label("Authentication")
+                                        .selected_text(match draft.auth_method {
+                                            SshAuthMethod::Password => "Password",
+                                            SshAuthMethod::PrivateKey => "Private key file",
+                                            SshAuthMethod::Certificate => "OpenSSH certificate",
+                                            SshAuthMethod::Agent => "SSH agent",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut draft.auth_method, SshAuthMethod::Password, "Password");
+                                            ui.selectable_value(&mut draft.auth_method, SshAuthMethod::PrivateKey, "Private key file");
+                                            ui.selectable_value(&mut draft.auth_method, SshAuthMethod::Certificate, "OpenSSH certificate");
+                                            ui.selectable_value(&mut draft.auth_method, SshAuthMethod::Agent, "SSH agent");
+                                        });
+                                    match draft.auth_method {
+                                        SshAuthMethod::Password => {
+                                            ui.label("Password is stored in the system keychain, never in the Profile database.");
+                                            ui.horizontal(|ui| {
+                                                ui.label("Password");
+                                                ui.add(egui::TextEdit::singleline(&mut draft.password).password(true).char_limit(4096));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.add_enabled(saved_target && !draft.password.is_empty(), egui::Button::new("Save password")).clicked() {
+                                                    command = Some(ProfileClientCommand::SetPassword {
+                                                        profile_id: draft.record.id,
+                                                        expected_revision: catalog.revision,
+                                                        password: std::mem::take(&mut draft.password).into_bytes(),
+                                                    });
+                                                }
+                                                if ui.add_enabled(saved_target, egui::Button::new("Remove password")).clicked() {
+                                                    draft.password.clear();
+                                                    command = Some(ProfileClientCommand::DeletePassword {
+                                                        profile_id: draft.record.id,
+                                                        expected_revision: catalog.revision,
+                                                    });
+                                                }
                                             });
                                         }
-                                        if ui.add_enabled(saved_target, egui::Button::new("Remove password")).clicked() {
-                                            draft.password.clear();
-                                            command = Some(ProfileClientCommand::DeletePassword {
-                                                profile_id: draft.record.id,
-                                                expected_revision: catalog.revision,
+                                        SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
+                                            ui.label("Use an absolute path to a key file readable by the daemon. Only its path is saved.");
+                                            ui.horizontal(|ui| {
+                                                ui.label("Private key path");
+                                                ui.text_edit_singleline(&mut draft.private_key_path);
+                                            });
+                                            if draft.auth_method == SshAuthMethod::Certificate {
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Certificate path");
+                                                    ui.text_edit_singleline(&mut draft.certificate_path);
+                                                });
+                                            }
+                                            ui.label("For encrypted keys, save the passphrase after saving the Profile. The passphrase stays in the system keychain.");
+                                            let saved_key_target = catalog.ssh_connections.iter().any(|item| {
+                                                item.profile_id == draft.record.id
+                                                    && item.auth_method == draft.auth_method
+                                                    && item.private_key_path.as_deref()
+                                                        == Some(draft.private_key_path.trim())
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Key passphrase");
+                                                ui.add(egui::TextEdit::singleline(&mut draft.key_passphrase).password(true).char_limit(4096));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.add_enabled(saved_key_target && !draft.key_passphrase.is_empty(), egui::Button::new("Save key passphrase")).clicked() {
+                                                    command = Some(ProfileClientCommand::SetKeyPassphrase {
+                                                        profile_id: draft.record.id,
+                                                        expected_revision: catalog.revision,
+                                                        passphrase: std::mem::take(&mut draft.key_passphrase).into_bytes(),
+                                                    });
+                                                }
+                                                if ui.add_enabled(saved_key_target, egui::Button::new("Remove key passphrase")).clicked() {
+                                                    draft.key_passphrase.clear();
+                                                    command = Some(ProfileClientCommand::DeleteKeyPassphrase {
+                                                        profile_id: draft.record.id,
+                                                        expected_revision: catalog.revision,
+                                                    });
+                                                }
                                             });
                                         }
-                                        if ui.add_enabled(saved_target, egui::Button::new("Open saved SSH Profile")).clicked() {
-                                            command = Some(ProfileClientCommand::OpenProfile(draft.record.id));
+                                        SshAuthMethod::Agent => {
+                                            egui::ComboBox::from_label("Agent backend")
+                                                .selected_text(match draft.agent_backend {
+                                                    SshAgentBackend::Auto => "Auto",
+                                                    SshAgentBackend::OpenSsh => "OpenSSH",
+                                                    SshAgentBackend::Pageant => "Pageant",
+                                                })
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut draft.agent_backend, SshAgentBackend::Auto, "Auto");
+                                                    ui.selectable_value(&mut draft.agent_backend, SshAgentBackend::OpenSsh, "OpenSSH");
+                                                    ui.selectable_value(&mut draft.agent_backend, SshAgentBackend::Pageant, "Pageant");
+                                                });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Identity SHA256 (optional)");
+                                                ui.text_edit_singleline(&mut draft.agent_identity);
+                                            });
                                         }
-                                    });
+                                    }
+                                    if ui.add_enabled(saved_target, egui::Button::new("Open saved SSH Profile")).clicked() {
+                                        command = Some(ProfileClientCommand::OpenProfile(draft.record.id));
+                                    }
                                 }
                                 let target_incomplete = draft.record.kind == ProfileKind::Ssh
                                     && (draft.ssh_host.trim().is_empty()
@@ -321,6 +413,11 @@ impl ProfilePanel {
                                                 host: draft.ssh_host.trim().to_owned(),
                                                 port: draft.ssh_port,
                                                 username: draft.ssh_username.trim().to_owned(),
+                                                auth_method: draft.auth_method,
+                                                private_key_path: optional_text(&draft.private_key_path),
+                                                certificate_path: optional_text(&draft.certificate_path),
+                                                agent_backend: draft.agent_backend,
+                                                agent_identity: optional_text(&draft.agent_identity),
                                             };
                                             changes.push(ProfileChange {
                                                 change: Some(
@@ -538,7 +635,19 @@ impl ProfilePanel {
             ssh_host: connection.map_or_else(String::new, |value| value.host.clone()),
             ssh_port: connection.map_or(22, |value| value.port),
             ssh_username: connection.map_or_else(String::new, |value| value.username.clone()),
+            auth_method: connection.map_or(SshAuthMethod::Password, |value| value.auth_method),
+            private_key_path: connection
+                .and_then(|value| value.private_key_path.clone())
+                .unwrap_or_default(),
+            certificate_path: connection
+                .and_then(|value| value.certificate_path.clone())
+                .unwrap_or_default(),
+            agent_backend: connection.map_or(SshAgentBackend::Auto, |value| value.agent_backend),
+            agent_identity: connection
+                .and_then(|value| value.agent_identity.clone())
+                .unwrap_or_default(),
             password: String::new(),
+            key_passphrase: String::new(),
             had_ssh_connection: connection.is_some(),
             record,
         });

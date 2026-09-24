@@ -2,7 +2,7 @@
 
 use cshell_domain::{
     FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, ResolvedField,
-    ResolvedTerminalSettings, SettingSource, SshConnectionRecord, TerminalDefaults,
+    ResolvedTerminalSettings, SettingSource, SshAuthMethod, SshConnectionRecord, TerminalDefaults,
     TerminalOverrides,
 };
 use std::collections::BTreeSet;
@@ -15,6 +15,7 @@ const MAX_BATCH_CHANGES: usize = 2048;
 const MAX_SEARCH_RESULTS: usize = 256;
 const MAX_SSH_HOST_BYTES: usize = 255;
 const MAX_SSH_USERNAME_BYTES: usize = 128;
+const MAX_SSH_REFERENCE_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CatalogSnapshot {
@@ -520,6 +521,25 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
         if connection.port == 0
             || !valid_target_field(&connection.host, MAX_SSH_HOST_BYTES)
             || !valid_target_field(&connection.username, MAX_SSH_USERNAME_BYTES)
+            || connection
+                .private_key_path
+                .as_deref()
+                .is_some_and(|value| !valid_reference(value))
+            || connection
+                .certificate_path
+                .as_deref()
+                .is_some_and(|value| !valid_reference(value))
+            || connection.agent_identity.as_deref().is_some_and(|value| {
+                !value.starts_with("SHA256:") || !valid_target_field(value, 128)
+            })
+            || match connection.auth_method {
+                SshAuthMethod::Password | SshAuthMethod::Agent => false,
+                SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
+                    connection.private_key_path.is_none()
+                }
+            }
+            || (connection.auth_method == SshAuthMethod::Certificate
+                && connection.certificate_path.is_none())
         {
             return Err(CatalogError::InvalidSshTarget);
         }
@@ -531,6 +551,12 @@ fn valid_target_field(value: &str, max_bytes: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_bytes
         && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SSH_REFERENCE_BYTES
         && !value.chars().any(char::is_control)
 }
 
@@ -690,6 +716,11 @@ mod tests {
             host: "server.example.com".into(),
             port: 22,
             username: "alice".into(),
+            auth_method: Default::default(),
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
         };
         assert!(matches!(
             catalog.preview_batch(&[CatalogChange::UpsertSshConnection(target.clone())]),
@@ -697,6 +728,33 @@ mod tests {
         ));
         let mut invalid = target.clone();
         invalid.port = 0;
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        let mut invalid = target.clone();
+        invalid.auth_method = SshAuthMethod::PrivateKey;
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid.clone()),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        invalid.private_key_path = Some("/keys/id_ed25519".into());
+        invalid.auth_method = SshAuthMethod::Certificate;
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid.clone()),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        invalid.auth_method = SshAuthMethod::Agent;
+        invalid.agent_identity = Some("invalid fingerprint".into());
         assert_eq!(
             catalog.preview_batch(&[
                 CatalogChange::UpsertProfile(record.clone()),

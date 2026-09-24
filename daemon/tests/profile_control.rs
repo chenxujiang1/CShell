@@ -1,7 +1,7 @@
 use cshell_application::{PROFILE_IMPORT_FORMAT, PROFILE_IMPORT_VERSION, ProfileImportDocument};
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
-    TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAuthMethod,
+    SshConnectionRecord, TerminalOverrides,
 };
 use cshell_ipc::{
     Envelope, ProfileChange, ProfileFolderData, ProfileImportPolicy, ProfileOperation,
@@ -104,6 +104,11 @@ async fn profile_control_previews_and_commits_import_once() -> Result<(), Box<dy
                     host: "srv.example.com".into(),
                     port: 22,
                     username: "alice".into(),
+                    auth_method: Default::default(),
+                    private_key_path: None,
+                    certificate_path: None,
+                    agent_backend: Default::default(),
+                    agent_identity: None,
                 }),
             )),
         },
@@ -207,6 +212,11 @@ async fn ssh_target_write_requires_negotiated_feature() -> Result<(), Box<dyn Er
                 host: "example.com".into(),
                 port: 22,
                 username: "alice".into(),
+                auth_method: Default::default(),
+                private_key_path: None,
+                certificate_path: None,
+                agent_backend: Default::default(),
+                agent_identity: None,
             }),
         )),
     });
@@ -261,6 +271,11 @@ async fn saved_ssh_profile_requires_keychain_password_before_connecting()
                     host: "127.0.0.1".into(),
                     port: 22,
                     username: "alice".into(),
+                    auth_method: Default::default(),
+                    private_key_path: None,
+                    certificate_path: None,
+                    agent_backend: Default::default(),
+                    agent_identity: None,
                 }),
             )),
         },
@@ -302,4 +317,94 @@ async fn saved_ssh_profile_requires_keychain_password_before_connecting()
         created.detail
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn saved_key_passphrase_control_is_bound_to_profile_key_path() -> Result<(), Box<dyn Error>> {
+    if std::env::var_os("CSHELL_KEYCHAIN_NATIVE_TEST").is_none() {
+        return Ok(());
+    }
+    use cshell_vault::{KeychainError, ProfileKeyPassphraseRef, SystemProfileKeyPassphraseVault};
+    let temp = tempfile::tempdir()?;
+    let repository = SqliteProfileRepository::open(temp.path().join("profiles.db")).await?;
+    let service = SessionIpcService::new(Arc::new(LocalSessionRegistry::new(
+        temp.path().join("journals"),
+        16,
+    )?))
+    .with_profiles(Arc::new(ProfileIpcService::new(repository)));
+    let folder_id = FolderId::new();
+    let profile_id = ProfileId::new();
+    let key_path = temp.path().join("id_ed25519");
+    let key_path = key_path.to_str().ok_or("key path is not UTF-8")?.to_owned();
+    let reference = ProfileKeyPassphraseRef::from_profile_bytes(*profile_id.as_uuid().as_bytes());
+    let vault = SystemProfileKeyPassphraseVault::new();
+    let result: Result<(), Box<dyn Error>> = async {
+        let mut create = request(ProfileOperation::ApplyChanges);
+        create.changes = vec![
+            ProfileChange {
+                change: Some(profile_change::Change::UpsertFolder(
+                    ProfileFolderData::from(&folder(folder_id, "SSH")),
+                )),
+            },
+            ProfileChange {
+                change: Some(profile_change::Change::UpsertProfile(
+                    ProfileRecordData::from(&profile(profile_id, "key", folder_id)),
+                )),
+            },
+            ProfileChange {
+                change: Some(profile_change::Change::UpsertSshConnection(
+                    SshConnectionData::from(&SshConnectionRecord {
+                        profile_id,
+                        host: "example.com".into(),
+                        port: 22,
+                        username: "alice".into(),
+                        auth_method: SshAuthMethod::PrivateKey,
+                        private_key_path: Some(key_path.clone()),
+                        certificate_path: None,
+                        agent_backend: Default::default(),
+                        agent_identity: None,
+                    }),
+                )),
+            },
+        ];
+        let created = exchange(&service, create).await?;
+        assert_eq!(
+            created.status,
+            ProfileStatus::Ok as i32,
+            "{}",
+            created.detail
+        );
+        let mut set = request(ProfileOperation::SetKeyPassphrase);
+        set.expected_revision = created.revision;
+        set.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+        set.credential_secret = b"test-passphrase".to_vec();
+        let saved = exchange(&service, set).await?;
+        assert_eq!(saved.status, ProfileStatus::Ok as i32, "{}", saved.detail);
+        assert_eq!(
+            vault
+                .read(&reference, &key_path)
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?
+                .expose(),
+            b"test-passphrase"
+        );
+        assert_eq!(
+            vault.read(&reference, "other-key").err(),
+            Some(KeychainError::BindingMismatch)
+        );
+        let mut remove = request(ProfileOperation::DeleteKeyPassphrase);
+        remove.expected_revision = created.revision;
+        remove.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+        assert_eq!(
+            exchange(&service, remove).await?.status,
+            ProfileStatus::Ok as i32
+        );
+        assert_eq!(
+            vault.read(&reference, &key_path).err(),
+            Some(KeychainError::Missing)
+        );
+        Ok(())
+    }
+    .await;
+    let _ = vault.delete(&reference);
+    result
 }

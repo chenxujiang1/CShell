@@ -31,7 +31,6 @@ pub struct DesktopProfileCatalog {
     pub ssh_connections: Vec<SshConnectionRecord>,
 }
 
-#[derive(Debug)]
 pub enum ProfileClientCommand {
     Refresh,
     OpenProfile(ProfileId),
@@ -41,6 +40,15 @@ pub enum ProfileClientCommand {
         password: Vec<u8>,
     },
     DeletePassword {
+        profile_id: ProfileId,
+        expected_revision: u64,
+    },
+    SetKeyPassphrase {
+        profile_id: ProfileId,
+        expected_revision: u64,
+        passphrase: Vec<u8>,
+    },
+    DeleteKeyPassphrase {
         profile_id: ProfileId,
         expected_revision: u64,
     },
@@ -55,6 +63,23 @@ pub enum ProfileClientCommand {
     CommitImport {
         expected_revision: u64,
     },
+}
+
+impl std::fmt::Debug for ProfileClientCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Refresh => "Refresh",
+            Self::OpenProfile(_) => "OpenProfile",
+            Self::SetPassword { .. } => "SetPassword([REDACTED])",
+            Self::DeletePassword { .. } => "DeletePassword",
+            Self::SetKeyPassphrase { .. } => "SetKeyPassphrase([REDACTED])",
+            Self::DeleteKeyPassphrase { .. } => "DeleteKeyPassphrase",
+            Self::Apply { .. } => "Apply",
+            Self::PreviewImport { .. } => "PreviewImport",
+            Self::CommitImport { .. } => "CommitImport",
+        };
+        formatter.write_str(name)
+    }
 }
 
 #[derive(Debug)]
@@ -150,6 +175,21 @@ async fn profile_worker(
                         outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
                         let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
                         publish_credential_result(&shared, result, "Password removed from system keychain");
+                    }
+                    ProfileClientCommand::SetKeyPassphrase { profile_id, expected_revision, passphrase } => {
+                        let mut outgoing = request(ProfileOperation::SetKeyPassphrase);
+                        outgoing.expected_revision = expected_revision;
+                        outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+                        outgoing.credential_secret = passphrase;
+                        let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
+                        publish_credential_result(&shared, result, "Key passphrase saved in system keychain");
+                    }
+                    ProfileClientCommand::DeleteKeyPassphrase { profile_id, expected_revision } => {
+                        let mut outgoing = request(ProfileOperation::DeleteKeyPassphrase);
+                        outgoing.expected_revision = expected_revision;
+                        outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+                        let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
+                        publish_credential_result(&shared, result, "Key passphrase removed from system keychain");
                     }
                     ProfileClientCommand::Refresh => {
                         publish_catalog(&shared, send(&config, request(ProfileOperation::List)).await.and_then(catalog_from_response));
@@ -261,7 +301,10 @@ async fn send(
 ) -> Result<ProfileResponse, String> {
     let timeout = if matches!(
         ProfileOperation::try_from(request.operation),
-        Ok(ProfileOperation::SetPassword | ProfileOperation::DeletePassword)
+        Ok(ProfileOperation::SetPassword
+            | ProfileOperation::DeletePassword
+            | ProfileOperation::SetKeyPassphrase
+            | ProfileOperation::DeleteKeyPassphrase)
     ) {
         std::time::Duration::from_secs(30)
     } else {
@@ -284,8 +327,10 @@ async fn send_inner(
         resolved.daemon_instance_id.to_vec(),
         resolved.instance_token.to_vec(),
     );
-    handshake.feature_bits =
-        features::PROFILE_CONTROL | features::SSH_PROFILE_TARGET | features::SSH_PROFILE_SESSION;
+    handshake.feature_bits = features::PROFILE_CONTROL
+        | features::SSH_PROFILE_TARGET
+        | features::SSH_PROFILE_SESSION
+        | features::SSH_PROFILE_AUTH;
     let negotiated = client_handshake(&mut stream, 1, handshake)
         .await
         .map_err(|error| error.to_string())?;
@@ -294,6 +339,7 @@ async fn send_inner(
     }
     if negotiated.feature_bits & features::SSH_PROFILE_TARGET == 0
         || negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0
+        || negotiated.feature_bits & features::SSH_PROFILE_AUTH == 0
     {
         return Err("daemon does not support SSH Profile sessions; restart the daemon".into());
     }

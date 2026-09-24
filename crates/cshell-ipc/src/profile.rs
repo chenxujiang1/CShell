@@ -1,8 +1,8 @@
 //! Bounded Profile control messages shared by desktop and daemon.
 
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
-    TerminalDefaults, TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAgentBackend, SshAuthMethod,
+    SshConnectionRecord, TerminalDefaults, TerminalOverrides,
 };
 use prost::{Enumeration, Message};
 use std::collections::BTreeSet;
@@ -37,6 +37,8 @@ pub enum ProfileOperation {
     CommitImport = 3,
     SetPassword = 4,
     DeletePassword = 5,
+    SetKeyPassphrase = 6,
+    DeleteKeyPassphrase = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -146,6 +148,33 @@ pub struct SshConnectionData {
     pub port: u32,
     #[prost(string, tag = "4")]
     pub username: String,
+    #[prost(enumeration = "SshAuthMethodData", tag = "5")]
+    pub auth_method: i32,
+    #[prost(string, optional, tag = "6")]
+    pub private_key_path: Option<String>,
+    #[prost(string, optional, tag = "7")]
+    pub certificate_path: Option<String>,
+    #[prost(enumeration = "SshAgentBackendData", tag = "8")]
+    pub agent_backend: i32,
+    #[prost(string, optional, tag = "9")]
+    pub agent_identity: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
+#[repr(i32)]
+pub enum SshAuthMethodData {
+    Password = 0,
+    PrivateKey = 1,
+    Certificate = 2,
+    Agent = 3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
+#[repr(i32)]
+pub enum SshAgentBackendData {
+    Auto = 0,
+    OpenSsh = 1,
+    Pageant = 2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -228,6 +257,10 @@ pub enum ProfileCodecError {
     InvalidKind,
     #[error("SSH port is invalid")]
     InvalidPort,
+    #[error("SSH authentication method is unknown")]
+    InvalidAuthMethod,
+    #[error("SSH agent backend is unknown")]
+    InvalidAgentBackend,
     #[error("Profile change is missing")]
     MissingChange,
     #[error("Profile request contains too many changes")]
@@ -352,6 +385,20 @@ impl From<&SshConnectionRecord> for SshConnectionData {
             host: value.host.clone(),
             port: u32::from(value.port),
             username: value.username.clone(),
+            auth_method: match value.auth_method {
+                SshAuthMethod::Password => SshAuthMethodData::Password,
+                SshAuthMethod::PrivateKey => SshAuthMethodData::PrivateKey,
+                SshAuthMethod::Certificate => SshAuthMethodData::Certificate,
+                SshAuthMethod::Agent => SshAuthMethodData::Agent,
+            } as i32,
+            private_key_path: value.private_key_path.clone(),
+            certificate_path: value.certificate_path.clone(),
+            agent_backend: match value.agent_backend {
+                SshAgentBackend::Auto => SshAgentBackendData::Auto,
+                SshAgentBackend::OpenSsh => SshAgentBackendData::OpenSsh,
+                SshAgentBackend::Pageant => SshAgentBackendData::Pageant,
+            } as i32,
+            agent_identity: value.agent_identity.clone(),
         }
     }
 }
@@ -367,6 +414,24 @@ impl TryFrom<SshConnectionData> for SshConnectionRecord {
                 .filter(|port| *port > 0)
                 .ok_or(ProfileCodecError::InvalidPort)?,
             username: value.username,
+            auth_method: match SshAuthMethodData::try_from(value.auth_method)
+                .map_err(|_| ProfileCodecError::InvalidAuthMethod)?
+            {
+                SshAuthMethodData::Password => SshAuthMethod::Password,
+                SshAuthMethodData::PrivateKey => SshAuthMethod::PrivateKey,
+                SshAuthMethodData::Certificate => SshAuthMethod::Certificate,
+                SshAuthMethodData::Agent => SshAuthMethod::Agent,
+            },
+            private_key_path: value.private_key_path,
+            certificate_path: value.certificate_path,
+            agent_backend: match SshAgentBackendData::try_from(value.agent_backend)
+                .map_err(|_| ProfileCodecError::InvalidAgentBackend)?
+            {
+                SshAgentBackendData::Auto => SshAgentBackend::Auto,
+                SshAgentBackendData::OpenSsh => SshAgentBackend::OpenSsh,
+                SshAgentBackendData::Pageant => SshAgentBackend::Pageant,
+            },
+            agent_identity: value.agent_identity,
         })
     }
 }

@@ -161,7 +161,8 @@ where
             | features::HISTORY_SEARCH
             | features::PROFILE_CONTROL
             | features::SSH_PROFILE_TARGET
-            | features::SSH_PROFILE_SESSION)
+            | features::SSH_PROFILE_SESSION
+            | features::SSH_PROFILE_AUTH)
         == 0
     {
         return Err(ConnectionError::SessionServiceRequired);

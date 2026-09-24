@@ -2,7 +2,10 @@ use crate::{LatestSnapshot, PipelineIngress, TerminalFrameSubscription, Terminal
 use cshell_domain::{InputAction, SessionId, TerminalSize};
 use cshell_ipc::FullFrame;
 use cshell_output_store::JournalLineIndex;
-use cshell_ssh::{KnownHostsVerifier, RusshClient, SshError, SshTerminalWriter, TerminalEvent};
+use cshell_ssh::{
+    AgentBackend, KnownHostsVerifier, RusshClient, SshCertificate, SshError, SshPrivateKey,
+    SshTerminalWriter, TerminalEvent,
+};
 use cshell_terminal::{InputEncoder, TerminalModes};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,7 +32,34 @@ pub enum SshSessionError {
 pub struct SshConnect {
     pub username: String,
     pub verifier: KnownHostsVerifier,
-    pub password: String,
+    pub authentication: SshAuthentication,
+}
+
+pub enum SshAuthentication {
+    Password(String),
+    PrivateKey(SshPrivateKey),
+    Certificate {
+        private_key: SshPrivateKey,
+        certificate: Box<SshCertificate>,
+    },
+    Agent {
+        backend: AgentBackend,
+        identity_fingerprint: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for SshAuthentication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password(_) => formatter.write_str("Password([REDACTED])"),
+            Self::PrivateKey(_) => formatter.write_str("PrivateKey([REDACTED])"),
+            Self::Certificate { .. } => formatter.write_str("Certificate([REDACTED])"),
+            Self::Agent { backend, .. } => formatter
+                .debug_struct("Agent")
+                .field("backend", backend)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 impl std::fmt::Debug for SshConnect {
@@ -38,7 +68,7 @@ impl std::fmt::Debug for SshConnect {
             .debug_struct("SshConnect")
             .field("username", &self.username)
             .field("verifier", &self.verifier)
-            .field("password", &"[REDACTED]")
+            .field("authentication", &self.authentication)
             .finish()
     }
 }
@@ -73,12 +103,48 @@ impl SshSession {
         journal_path: &Path,
         ingress_capacity: usize,
     ) -> Result<Self, SshSessionError> {
-        let client = RusshClient::connect_password_known_hosts(
-            connect.username,
-            connect.password,
-            connect.verifier,
-        )
-        .await?;
+        let client = match connect.authentication {
+            SshAuthentication::Password(password) => {
+                RusshClient::connect_password_known_hosts(
+                    connect.username,
+                    password,
+                    connect.verifier,
+                )
+                .await?
+            }
+            SshAuthentication::PrivateKey(private_key) => {
+                RusshClient::connect_public_key_known_hosts(
+                    connect.username,
+                    private_key,
+                    connect.verifier,
+                )
+                .await?
+            }
+            SshAuthentication::Certificate {
+                private_key,
+                certificate,
+            } => {
+                RusshClient::connect_certificate_known_hosts(
+                    connect.username,
+                    private_key,
+                    *certificate,
+                    connect.verifier,
+                )
+                .await?
+            }
+            SshAuthentication::Agent {
+                backend,
+                identity_fingerprint,
+            } => {
+                RusshClient::connect_agent_known_hosts_identity(
+                    connect.username,
+                    connect.verifier,
+                    backend,
+                    identity_fingerprint.as_deref(),
+                )
+                .await?
+            }
+        };
         let terminal = client
             .open_terminal(u32::from(size.rows), u32::from(size.cols))
             .await?;
@@ -336,7 +402,7 @@ mod tests {
     use cshell_domain::{InputAction, SessionId, TerminalSize};
     use cshell_ssh::KnownHostsVerifier;
     use rand::rng;
-    use russh::keys::ssh_key::{Algorithm, PrivateKey};
+    use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey};
     use russh::server::{Auth, Msg, Session};
     use russh::{Channel, ChannelId};
     use std::collections::HashMap;
@@ -346,6 +412,7 @@ mod tests {
     #[derive(Default)]
     struct EchoServer {
         channels: HashMap<ChannelId, Channel<Msg>>,
+        accepted_public_key: Option<PublicKey>,
     }
     impl russh::server::Handler for EchoServer {
         type Error = russh::Error;
@@ -355,6 +422,19 @@ mod tests {
             } else {
                 Auth::reject()
             })
+        }
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            public_key: &PublicKey,
+        ) -> Result<Auth, Self::Error> {
+            Ok(
+                if user == "cshell" && self.accepted_public_key.as_ref() == Some(public_key) {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                },
+            )
         }
         async fn channel_open_session(
             &mut self,
@@ -440,7 +520,7 @@ mod tests {
             SshConnect {
                 username: "cshell".into(),
                 verifier,
-                password: "phase1".into(),
+                authentication: super::SshAuthentication::Password("phase1".into()),
             },
             TerminalSize::cells(24, 80),
             &directory.path().join("remote.csjr"),
@@ -469,6 +549,191 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn strict_host_key_private_key_session_opens_terminal() {
+        let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let host_public = host_key.public_key().to_openssh().unwrap();
+        let client_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let private_key = cshell_ssh::SshPrivateKey::decode_openssh(
+            &client_key.to_openssh(LineEnding::LF).unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut config = russh::server::Config::default();
+        config.keys.push(host_key);
+        config.auth_rejection_time = std::time::Duration::from_millis(1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted_public_key = client_key.public_key().clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let running = russh::server::run_stream(
+                Arc::new(config),
+                stream,
+                EchoServer {
+                    channels: HashMap::new(),
+                    accepted_public_key: Some(accepted_public_key),
+                },
+            )
+            .await
+            .unwrap();
+            let _ = running.await;
+        });
+        let verifier = KnownHostsVerifier::parse(
+            &format!("[127.0.0.1]:{} {host_public}\n", address.port()),
+            "127.0.0.1",
+            address.port(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let session = SshSession::connect(
+            SessionId::new(),
+            "key".into(),
+            SshConnect {
+                username: "cshell".into(),
+                verifier,
+                authentication: super::SshAuthentication::PrivateKey(private_key),
+            },
+            TerminalSize::cells(24, 80),
+            &directory.path().join("key.csjr"),
+            16,
+        )
+        .await
+        .unwrap();
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_profile_private_key_reference_opens_verified_session() {
+        use crate::{LocalSessionRegistry, ProfileIpcService, SessionIpcService};
+        use cshell_domain::{
+            ProfileId, ProfileKind, ProfileRecord, SshAuthMethod, SshConnectionRecord,
+            TerminalOverrides,
+        };
+        use cshell_ipc::{
+            Envelope, ProfileChange, ProfileOperation, ProfileRecordData, ProfileRequest,
+            SessionCreateRequest, SshConnectionData, envelope, profile_change, read_envelope,
+            write_envelope,
+        };
+        use cshell_storage::SqliteProfileRepository;
+        use std::collections::BTreeSet;
+
+        let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let host_public = host_key.public_key().to_openssh().unwrap();
+        let client_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let accepted_public_key = client_key.public_key().clone();
+        let mut config = russh::server::Config::default();
+        config.keys.push(host_key);
+        config.auth_rejection_time = std::time::Duration::from_millis(1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let running = russh::server::run_stream(
+                Arc::new(config),
+                stream,
+                EchoServer {
+                    channels: HashMap::new(),
+                    accepted_public_key: Some(accepted_public_key),
+                },
+            )
+            .await
+            .unwrap();
+            let _ = running.await;
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let private_key_path = temp.path().join("id_ed25519");
+        std::fs::write(
+            &private_key_path,
+            client_key.to_openssh(LineEnding::LF).unwrap().as_bytes(),
+        )
+        .unwrap();
+        let known_hosts = temp.path().join("known_hosts");
+        std::fs::write(
+            &known_hosts,
+            format!("[127.0.0.1]:{} {host_public}\n", address.port()),
+        )
+        .unwrap();
+        let repository = SqliteProfileRepository::open(temp.path().join("profiles.db"))
+            .await
+            .unwrap();
+        let profiles = Arc::new(ProfileIpcService::new(repository));
+        let profile_id = ProfileId::new();
+        let created = profiles
+            .handle(ProfileRequest {
+                operation: ProfileOperation::ApplyChanges as i32,
+                expected_revision: 0,
+                changes: vec![
+                    ProfileChange {
+                        change: Some(profile_change::Change::UpsertProfile(
+                            ProfileRecordData::from(&ProfileRecord {
+                                id: profile_id,
+                                name: "key profile".into(),
+                                kind: ProfileKind::Ssh,
+                                folder_id: None,
+                                tags: BTreeSet::new(),
+                                favorite: false,
+                                terminal: TerminalOverrides::default(),
+                            }),
+                        )),
+                    },
+                    ProfileChange {
+                        change: Some(profile_change::Change::UpsertSshConnection(
+                            SshConnectionData::from(&SshConnectionRecord {
+                                profile_id,
+                                host: "127.0.0.1".into(),
+                                port: address.port(),
+                                username: "cshell".into(),
+                                auth_method: SshAuthMethod::PrivateKey,
+                                private_key_path: Some(private_key_path.to_str().unwrap().into()),
+                                certificate_path: None,
+                                agent_backend: Default::default(),
+                                agent_identity: None,
+                            }),
+                        )),
+                    },
+                ],
+                import_json: Vec::new(),
+                import_policy: 0,
+                credential_profile_id: Vec::new(),
+                credential_secret: Vec::new(),
+            })
+            .await;
+        assert_eq!(created.status, 0, "{}", created.detail);
+        let local = Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16).unwrap());
+        let service = SessionIpcService::new(local)
+            .with_known_hosts_path(known_hosts)
+            .with_profiles(profiles);
+        let (mut client, mut daemon) = tokio::io::duplex(64 * 1024);
+        let client_work = async {
+            write_envelope(
+                &mut client,
+                &Envelope {
+                    request_id: 3,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::SessionCreateRequest(
+                        SessionCreateRequest {
+                            rows: 24,
+                            cols: 80,
+                            profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
+                        },
+                    )),
+                },
+            )
+            .await
+            .unwrap();
+            read_envelope(&mut client).await.unwrap()
+        };
+        let (served, response) = tokio::join!(service.serve_one(&mut daemon), client_work);
+        served.unwrap();
+        let Some(envelope::Payload::SessionCreateResponse(created)) = response.payload else {
+            panic!("missing session response")
+        };
+        assert!(created.session.is_some(), "{}", created.detail);
         server.abort();
     }
 
@@ -565,6 +830,11 @@ mod tests {
                             host: "127.0.0.1".into(),
                             port: address.port(),
                             username: "cshell".into(),
+                            auth_method: Default::default(),
+                            private_key_path: None,
+                            certificate_path: None,
+                            agent_backend: Default::default(),
+                            agent_identity: None,
                         }),
                     )),
                 },
