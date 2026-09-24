@@ -701,6 +701,8 @@ mod tests {
                 import_policy: 0,
                 credential_profile_id: Vec::new(),
                 credential_secret: Vec::new(),
+                host_key_token: Vec::new(),
+                host_key_fingerprint: String::new(),
             })
             .await;
         assert_eq!(created.status, 0, "{}", created.detail);
@@ -843,6 +845,8 @@ mod tests {
             import_policy: 0,
             credential_profile_id: vec![],
             credential_secret: vec![],
+            host_key_token: Vec::new(),
+            host_key_fingerprint: String::new(),
         };
         let result = exchange(&service, envelope::Payload::ProfileRequest(create.clone())).await;
         let Some(envelope::Payload::ProfileResponse(created)) = result.payload else {

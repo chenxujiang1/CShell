@@ -21,6 +21,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 cshell-render = { path = "../crates/cshell-render" }

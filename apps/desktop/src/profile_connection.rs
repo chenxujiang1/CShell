@@ -3,9 +3,10 @@ use cshell_domain::{
     ProfileFolder, ProfileId, ProfileRecord, SshConnectionRecord, TerminalDefaults,
 };
 use cshell_ipc::{
-    Envelope, Handshake, ProfileCatalogData, ProfileChange, ProfileImportPolicy,
-    ProfileImportPreviewData, ProfileOperation, ProfileRequest, ProfileResponse, ProfileStatus,
-    client_handshake, envelope, features, read_envelope, transport, write_envelope,
+    Envelope, Handshake, HostKeyPreviewData, ProfileCatalogData, ProfileChange,
+    ProfileImportPolicy, ProfileImportPreviewData, ProfileOperation, ProfileRequest,
+    ProfileResponse, ProfileStatus, client_handshake, envelope, features, read_envelope, transport,
+    write_envelope,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,7 @@ pub struct DesktopProfileView {
     pub catalog: Option<DesktopProfileCatalog>,
     pub preview: Option<ProfileImportPreviewData>,
     pub preview_source: Option<(String, ProfileImportPolicy)>,
+    pub host_key_preview: Option<HostKeyPreviewData>,
     pub error: Option<String>,
     pub status: String,
 }
@@ -63,6 +65,16 @@ pub enum ProfileClientCommand {
     CommitImport {
         expected_revision: u64,
     },
+    PreviewHostKey {
+        profile_id: ProfileId,
+        expected_revision: u64,
+    },
+    ConfirmHostKey {
+        profile_id: ProfileId,
+        expected_revision: u64,
+        token: Vec<u8>,
+        fingerprint: String,
+    },
 }
 
 impl std::fmt::Debug for ProfileClientCommand {
@@ -77,6 +89,8 @@ impl std::fmt::Debug for ProfileClientCommand {
             Self::Apply { .. } => "Apply",
             Self::PreviewImport { .. } => "PreviewImport",
             Self::CommitImport { .. } => "CommitImport",
+            Self::PreviewHostKey { .. } => "PreviewHostKey",
+            Self::ConfirmHostKey { .. } => "ConfirmHostKey",
         };
         formatter.write_str(name)
     }
@@ -246,6 +260,45 @@ async fn profile_worker(
                         publish_catalog(&shared, result);
                         update(&shared, |view| { if view.error.is_none() { view.preview = None; } });
                     }
+                    ProfileClientCommand::PreviewHostKey { profile_id, expected_revision } => {
+                        let mut outgoing = request(ProfileOperation::PreviewHostKey);
+                        outgoing.expected_revision = expected_revision;
+                        outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+                        let result = send(&config, outgoing).await.and_then(|response| {
+                            check_response(&response)?;
+                            response.host_key_preview.map(|preview| *preview).ok_or_else(|| "daemon omitted host-key preview".into())
+                        });
+                        update(&shared, |view| match result {
+                            Ok(preview) => {
+                                view.host_key_preview = Some(preview);
+                                view.error = None;
+                                view.status = "Compare this SHA256 fingerprint with a trusted source, then type it exactly to confirm".into();
+                            }
+                            Err(error) => {
+                                view.host_key_preview = None;
+                                view.error = Some(error);
+                            }
+                        });
+                    }
+                    ProfileClientCommand::ConfirmHostKey { profile_id, expected_revision, token, fingerprint } => {
+                        let mut outgoing = request(ProfileOperation::ConfirmHostKey);
+                        outgoing.expected_revision = expected_revision;
+                        outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+                        outgoing.host_key_token = token;
+                        outgoing.host_key_fingerprint = fingerprint;
+                        let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
+                        update(&shared, |view| match result {
+                            Ok(()) => {
+                                view.host_key_preview = None;
+                                view.error = None;
+                                view.status = "Host key imported with an audit record; this Profile can now connect".into();
+                            }
+                            Err(error) => {
+                                view.host_key_preview = None;
+                                view.error = Some(error);
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -275,6 +328,8 @@ fn request(operation: ProfileOperation) -> ProfileRequest {
         import_policy: ProfileImportPolicy::Fail as i32,
         credential_profile_id: Vec::new(),
         credential_secret: Vec::new(),
+        host_key_token: Vec::new(),
+        host_key_fingerprint: String::new(),
     }
 }
 
@@ -300,6 +355,11 @@ async fn send(
     request: ProfileRequest,
 ) -> Result<ProfileResponse, String> {
     let timeout = if matches!(
+        ProfileOperation::try_from(request.operation),
+        Ok(ProfileOperation::PreviewHostKey | ProfileOperation::ConfirmHostKey)
+    ) {
+        std::time::Duration::from_secs(40)
+    } else if matches!(
         ProfileOperation::try_from(request.operation),
         Ok(ProfileOperation::SetPassword
             | ProfileOperation::DeletePassword
@@ -330,7 +390,8 @@ async fn send_inner(
     handshake.feature_bits = features::PROFILE_CONTROL
         | features::SSH_PROFILE_TARGET
         | features::SSH_PROFILE_SESSION
-        | features::SSH_PROFILE_AUTH;
+        | features::SSH_PROFILE_AUTH
+        | features::SSH_HOST_KEY_IMPORT;
     let negotiated = client_handshake(&mut stream, 1, handshake)
         .await
         .map_err(|error| error.to_string())?;
@@ -340,6 +401,7 @@ async fn send_inner(
     if negotiated.feature_bits & features::SSH_PROFILE_TARGET == 0
         || negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0
         || negotiated.feature_bits & features::SSH_PROFILE_AUTH == 0
+        || negotiated.feature_bits & features::SSH_HOST_KEY_IMPORT == 0
     {
         return Err("daemon does not support SSH Profile sessions; restart the daemon".into());
     }
@@ -427,6 +489,13 @@ fn publish_catalog(
 ) {
     update(shared, |view| match result {
         Ok(catalog) => {
+            if view
+                .catalog
+                .as_ref()
+                .is_some_and(|old| old.revision != catalog.revision)
+            {
+                view.host_key_preview = None;
+            }
             view.status = format!("Profiles revision {}", catalog.revision);
             view.catalog = Some(catalog);
             view.preview = None;

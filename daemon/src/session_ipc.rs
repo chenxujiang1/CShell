@@ -208,6 +208,7 @@ impl SessionIpcService {
                     revision: 0,
                     catalog: None,
                     preview: None,
+                    host_key_preview: None,
                     detail: "Profile control was not negotiated".to_owned(),
                 }
             } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_TARGET == 0
@@ -224,6 +225,7 @@ impl SessionIpcService {
                     revision: 0,
                     catalog: None,
                     preview: None,
+                    host_key_preview: None,
                     detail: "SSH Profile target control was not negotiated".to_owned(),
                 }
             } else if matches!(
@@ -237,7 +239,20 @@ impl SessionIpcService {
                     revision: 0,
                     catalog: None,
                     preview: None,
+                    host_key_preview: None,
                     detail: "SSH Profile credentials were not negotiated".into(),
+                }
+            } else if negotiated_features & cshell_ipc::features::SSH_HOST_KEY_IMPORT == 0
+                && matches!(
+                    cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                    Ok(cshell_ipc::ProfileOperation::PreviewHostKey
+                        | cshell_ipc::ProfileOperation::ConfirmHostKey)
+                )
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "SSH host-key import was not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
                 }
             } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_AUTH == 0
                 && (matches!(
@@ -261,6 +276,7 @@ impl SessionIpcService {
                     revision: 0,
                     catalog: None,
                     preview: None,
+                    host_key_preview: None,
                     detail: "SSH Profile authentication was not negotiated".into(),
                 }
             } else if let Some(profiles) = &self.profiles {
@@ -271,6 +287,7 @@ impl SessionIpcService {
                     revision: 0,
                     catalog: None,
                     preview: None,
+                    host_key_preview: None,
                     detail: "Profile storage is unavailable".to_owned(),
                 }
             };
@@ -759,7 +776,7 @@ async fn read_ssh_auth_file(path: &str, label: &str) -> Result<Zeroizing<String>
         .map_err(|_| format!("{label} file is not UTF-8"))
 }
 
-fn default_known_hosts_path() -> Result<std::path::PathBuf, String> {
+pub(crate) fn default_known_hosts_path() -> Result<std::path::PathBuf, String> {
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
     #[cfg(not(windows))]

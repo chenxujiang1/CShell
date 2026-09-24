@@ -44,6 +44,8 @@ fn request(operation: ProfileOperation) -> ProfileRequest {
         import_policy: ProfileImportPolicy::Fail as i32,
         credential_profile_id: Vec::new(),
         credential_secret: Vec::new(),
+        host_key_token: Vec::new(),
+        host_key_fingerprint: String::new(),
     }
 }
 
@@ -72,6 +74,174 @@ async fn exchange(
         return Err("daemon did not return a Profile response".into());
     };
     Ok(response)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocked()
+-> Result<(), Box<dyn Error>> {
+    use rand::rng;
+    use russh::keys::ssh_key::{Algorithm, PrivateKey};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct HostOnlyServer;
+    impl russh::server::Handler for HostOnlyServer {
+        type Error = russh::Error;
+    }
+    let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519)?;
+    let public = key.public_key().to_openssh()?;
+    let rotated_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519)?;
+    let mut config = russh::server::Config::default();
+    config.keys.push(key);
+    let config = Arc::new(config);
+    let mut rotated_config = russh::server::Config::default();
+    rotated_config.keys.push(rotated_key);
+    let rotated_config = Arc::new(rotated_config);
+    let rotate = Arc::new(AtomicBool::new(false));
+    let server_rotate = Arc::clone(&rotate);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let server = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let config = if server_rotate.load(Ordering::SeqCst) {
+                Arc::clone(&rotated_config)
+            } else {
+                Arc::clone(&config)
+            };
+            tokio::spawn(async move {
+                if let Ok(running) = russh::server::run_stream(config, stream, HostOnlyServer).await
+                {
+                    let _ = running.await;
+                }
+            });
+        }
+    });
+    let temp = tempfile::tempdir()?;
+    let known_hosts = temp.path().join(".ssh").join("known_hosts");
+    let repository = SqliteProfileRepository::open(temp.path().join("profiles.db")).await?;
+    let profiles =
+        Arc::new(ProfileIpcService::new(repository).with_known_hosts_path(known_hosts.clone()));
+    let sessions = Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16)?);
+    let service = SessionIpcService::new(sessions)
+        .with_known_hosts_path(known_hosts.clone())
+        .with_profiles(profiles);
+    let profile_id = ProfileId::new();
+    let mut create = request(ProfileOperation::ApplyChanges);
+    create.changes = vec![
+        ProfileChange {
+            change: Some(profile_change::Change::UpsertProfile(
+                ProfileRecordData::from(&ProfileRecord {
+                    id: profile_id,
+                    name: "first host".into(),
+                    kind: ProfileKind::Ssh,
+                    folder_id: None,
+                    tags: BTreeSet::new(),
+                    favorite: false,
+                    terminal: TerminalOverrides::default(),
+                }),
+            )),
+        },
+        ProfileChange {
+            change: Some(profile_change::Change::UpsertSshConnection(
+                SshConnectionData::from(&SshConnectionRecord {
+                    profile_id,
+                    host: "127.0.0.1".into(),
+                    port,
+                    username: "alice".into(),
+                    auth_method: SshAuthMethod::Password,
+                    private_key_path: None,
+                    certificate_path: None,
+                    agent_backend: Default::default(),
+                    agent_identity: None,
+                }),
+            )),
+        },
+    ];
+    let created = exchange(&service, create).await?;
+    assert_eq!(
+        created.status,
+        ProfileStatus::Ok as i32,
+        "{}",
+        created.detail
+    );
+    let (mut client, mut daemon) = tokio::io::duplex(64 * 1024);
+    let check_unknown = async {
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 7,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SessionCreateRequest(
+                    cshell_ipc::SessionCreateRequest {
+                        rows: 24,
+                        cols: 80,
+                        profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
+                    },
+                )),
+            },
+        )
+        .await?;
+        read_envelope(&mut client).await
+    };
+    let (served, response) = tokio::join!(service.serve_one(&mut daemon), check_unknown);
+    served?;
+    let response = response?;
+    let Some(envelope::Payload::SessionCreateResponse(blocked)) = response.payload else {
+        return Err("missing SSH session response".into());
+    };
+    assert!(blocked.session.is_none());
+    assert!(blocked.detail.contains("known_hosts"), "{}", blocked.detail);
+
+    let mut preview_request = request(ProfileOperation::PreviewHostKey);
+    preview_request.expected_revision = created.revision;
+    preview_request.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+    let preview_response = exchange(&service, preview_request.clone()).await?;
+    assert_eq!(
+        preview_response.status,
+        ProfileStatus::Ok as i32,
+        "{}",
+        preview_response.detail
+    );
+    let preview = preview_response
+        .host_key_preview
+        .ok_or("missing host-key preview")?;
+    assert_eq!(preview.public_key_line, public);
+    assert!(!known_hosts.exists());
+
+    let mut confirm = request(ProfileOperation::ConfirmHostKey);
+    confirm.expected_revision = created.revision;
+    confirm.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+    confirm.host_key_token = preview.token.clone();
+    confirm.host_key_fingerprint = "SHA256:incorrect".into();
+    let wrong = exchange(&service, confirm.clone()).await?;
+    assert_eq!(wrong.status, ProfileStatus::Invalid as i32);
+    assert!(!known_hosts.exists());
+    confirm.host_key_fingerprint = preview.fingerprint.clone();
+    rotate.store(true, Ordering::SeqCst);
+    let changed = exchange(&service, confirm.clone()).await?;
+    assert_eq!(changed.status, ProfileStatus::Conflict as i32);
+    assert!(!known_hosts.exists());
+    rotate.store(false, Ordering::SeqCst);
+    let new_preview = exchange(&service, preview_request.clone())
+        .await?
+        .host_key_preview
+        .ok_or("missing refreshed host-key preview")?;
+    confirm.host_key_token = new_preview.token;
+    let imported = exchange(&service, confirm.clone()).await?;
+    assert_eq!(
+        imported.status,
+        ProfileStatus::Ok as i32,
+        "{}",
+        imported.detail
+    );
+    let content = std::fs::read_to_string(&known_hosts)?;
+    assert!(content.contains("CShell host-key-import v1"));
+    assert!(content.contains(&format!("profile={profile_id}")));
+    assert!(content.contains(&format!("[127.0.0.1]:{port} {public}")));
+    let replay = exchange(&service, confirm).await?;
+    assert_eq!(replay.status, ProfileStatus::Invalid as i32);
+    let repeat = exchange(&service, preview_request).await?;
+    assert_eq!(repeat.status, ProfileStatus::Conflict as i32);
+    server.abort();
+    Ok(())
 }
 
 #[tokio::test]

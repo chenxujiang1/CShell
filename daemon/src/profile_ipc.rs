@@ -7,28 +7,87 @@ use cshell_domain::{
     FolderId, ProfileFolder, ProfileId, ProfileRecord, SshAuthMethod, SshConnectionRecord,
 };
 use cshell_ipc::{
-    MAX_PROFILE_CONTROL_CHANGES, ProfileCatalogData, ProfileChange, ProfileCodecError,
-    ProfileDefaultsData, ProfileFolderData, ProfileImportAction, ProfileImportItemData,
-    ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData, ProfileOperation,
-    ProfileRecordData, ProfileRequest, ProfileResponse, ProfileStatus, SshConnectionData,
-    decode_id, profile_change,
+    HostKeyPreviewData, MAX_PROFILE_CONTROL_CHANGES, ProfileCatalogData, ProfileChange,
+    ProfileCodecError, ProfileDefaultsData, ProfileFolderData, ProfileImportAction,
+    ProfileImportItemData, ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData,
+    ProfileOperation, ProfileRecordData, ProfileRequest, ProfileResponse, ProfileStatus,
+    SshConnectionData, decode_id, profile_change,
 };
+use cshell_ssh::{KnownHostsVerifier, import_confirmed_host_key, scan_host_key};
 use cshell_storage::SqliteProfileRepository;
 use cshell_vault::{
     ProfileKeyPassphraseRef, ProfilePasswordBinding, ProfilePasswordRef, Secret,
     SystemProfileKeyPassphraseVault, SystemProfilePasswordVault,
 };
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub struct ProfileIpcService {
     service: ProfileService<SqliteProfileRepository>,
+    known_hosts_path: Option<PathBuf>,
+    pending_host_keys: Mutex<HashMap<[u8; 16], PendingHostKey>>,
+}
+
+#[derive(Debug)]
+struct PendingHostKey {
+    target: SshConnectionRecord,
+    revision: u64,
+    public_key_line: String,
+    fingerprint: String,
+    token: [u8; 32],
+    expires: Instant,
 }
 
 impl ProfileIpcService {
     pub fn new(repository: SqliteProfileRepository) -> Self {
         Self {
             service: ProfileService::new(repository),
+            known_hosts_path: None,
+            pending_host_keys: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_known_hosts_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.known_hosts_path = Some(path.into());
+        self
+    }
+
+    fn known_hosts_path(&self) -> Result<PathBuf, (ProfileStatus, String)> {
+        self.known_hosts_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(crate::session_ipc::default_known_hosts_path)
+            .map_err(|error| (ProfileStatus::Unavailable, error))
+    }
+
+    async fn host_key_target(
+        &self,
+        id: ProfileId,
+        revision: u64,
+    ) -> Result<SshConnectionRecord, (ProfileStatus, String)> {
+        let snapshot = self.service.load().await.map_err(service_error)?.snapshot();
+        if snapshot.revision != revision {
+            return Err((
+                ProfileStatus::Conflict,
+                "Profile catalog changed; refresh and preview again".into(),
+            ));
+        }
+        if !snapshot
+            .profiles
+            .iter()
+            .any(|profile| profile.id == id && profile.kind == cshell_domain::ProfileKind::Ssh)
+        {
+            return Err(invalid("saved SSH Profile does not exist"));
+        }
+        snapshot
+            .ssh_connections
+            .into_iter()
+            .find(|target| target.profile_id == id)
+            .ok_or_else(|| invalid("saved SSH Profile has no target"))
     }
 
     pub async fn ssh_target(&self, id: ProfileId) -> Result<(String, SshConnectionRecord), String> {
@@ -60,6 +119,7 @@ impl ProfileIpcService {
                 catalog: None,
                 preview: None,
                 detail,
+                host_key_preview: None,
             },
         }
     }
@@ -105,6 +165,7 @@ impl ProfileIpcService {
                     catalog: None,
                     preview: Some(preview_data(preview)),
                     detail: String::new(),
+                    host_key_preview: None,
                 })
             }
             ProfileOperation::SetPassword | ProfileOperation::DeletePassword => {
@@ -174,6 +235,7 @@ impl ProfileIpcService {
                     catalog: None,
                     preview: None,
                     detail: String::new(),
+                    host_key_preview: None,
                 })
             }
             ProfileOperation::SetKeyPassphrase | ProfileOperation::DeleteKeyPassphrase => {
@@ -247,6 +309,7 @@ impl ProfileIpcService {
                     catalog: None,
                     preview: None,
                     detail: String::new(),
+                    host_key_preview: None,
                 })
             }
             ProfileOperation::CommitImport => {
@@ -257,6 +320,128 @@ impl ProfileIpcService {
                     .map_err(import_error)?;
                 let snapshot = self.service.load().await.map_err(service_error)?.snapshot();
                 Ok(catalog_response(snapshot))
+            }
+            ProfileOperation::PreviewHostKey => {
+                let id_bytes = decode_id(&request.credential_profile_id)
+                    .map_err(|error| invalid(error.to_string()))?;
+                let id = ProfileId::from_bytes(id_bytes);
+                let target = self.host_key_target(id, request.expected_revision).await?;
+                let path = self.known_hosts_path()?;
+                let verifier = KnownHostsVerifier::load_or_empty(&path, &target.host, target.port)
+                    .map_err(|error| (ProfileStatus::Corrupt, error.to_string()))?;
+                if verifier.has_matching_entries() {
+                    return Err((
+                        ProfileStatus::Conflict,
+                        "host already has a known_hosts entry; first-key import is blocked".into(),
+                    ));
+                }
+                let scanned = scan_host_key(&target.host, target.port)
+                    .await
+                    .map_err(|error| (ProfileStatus::Unavailable, error))?;
+                let token: [u8; 32] = rand::random();
+                let expires_unix_seconds = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| (ProfileStatus::Unavailable, error.to_string()))?
+                    .as_secs()
+                    + 300;
+                let preview = HostKeyPreviewData {
+                    profile_id: id_bytes.to_vec(),
+                    host: target.host.clone(),
+                    port: target.port.into(),
+                    algorithm: scanned.algorithm,
+                    fingerprint: scanned.fingerprint.clone(),
+                    public_key_line: scanned.public_key_line.clone(),
+                    token: token.to_vec(),
+                    expires_unix_seconds,
+                };
+                let pending = PendingHostKey {
+                    target,
+                    revision: request.expected_revision,
+                    public_key_line: scanned.public_key_line,
+                    fingerprint: scanned.fingerprint,
+                    token,
+                    expires: Instant::now() + Duration::from_secs(300),
+                };
+                self.pending_host_keys
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id_bytes, pending);
+                Ok(ProfileResponse {
+                    status: ProfileStatus::Ok as i32,
+                    revision: request.expected_revision,
+                    host_key_preview: Some(Box::new(preview)),
+                    ..ProfileResponse::default()
+                })
+            }
+            ProfileOperation::ConfirmHostKey => {
+                let id_bytes = decode_id(&request.credential_profile_id)
+                    .map_err(|error| invalid(error.to_string()))?;
+                let id = ProfileId::from_bytes(id_bytes);
+                let pending = {
+                    let mut previews = self
+                        .pending_host_keys
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let preview = previews
+                        .get(&id_bytes)
+                        .ok_or_else(|| invalid("preview the host key again"))?;
+                    if preview.expires <= Instant::now()
+                        || preview.revision != request.expected_revision
+                        || request.host_key_token.as_slice() != preview.token
+                        || request.host_key_fingerprint != preview.fingerprint
+                    {
+                        return Err(invalid(
+                            "host-key preview expired or fingerprint confirmation did not match",
+                        ));
+                    }
+                    previews
+                        .remove(&id_bytes)
+                        .ok_or_else(|| invalid("preview the host key again"))?
+                };
+                let target = self.host_key_target(id, request.expected_revision).await?;
+                if target.host != pending.target.host || target.port != pending.target.port {
+                    return Err((
+                        ProfileStatus::Conflict,
+                        "SSH target changed; preview again".into(),
+                    ));
+                }
+                let scanned = scan_host_key(&target.host, target.port)
+                    .await
+                    .map_err(|error| (ProfileStatus::Unavailable, error))?;
+                if scanned.public_key_line != pending.public_key_line
+                    || scanned.fingerprint != pending.fingerprint
+                {
+                    return Err((
+                        ProfileStatus::Conflict,
+                        "server host key changed after preview; import blocked".into(),
+                    ));
+                }
+                let path = self.known_hosts_path()?;
+                let profile_id = id.as_uuid().to_string();
+                tokio::task::spawn_blocking(move || {
+                    import_confirmed_host_key(
+                        &path,
+                        &target.host,
+                        target.port,
+                        &scanned.public_key_line,
+                        &pending.fingerprint,
+                        &profile_id,
+                    )
+                })
+                .await
+                .map_err(|_| {
+                    (
+                        ProfileStatus::Unavailable,
+                        "host-key import task failed".into(),
+                    )
+                })?
+                .map_err(|error| (ProfileStatus::Conflict, error))?;
+                Ok(ProfileResponse {
+                    status: ProfileStatus::Ok as i32,
+                    revision: request.expected_revision,
+                    detail: "Host key imported into known_hosts with an audit record".into(),
+                    ..ProfileResponse::default()
+                })
             }
         }
     }
@@ -320,6 +505,7 @@ fn catalog_response(snapshot: CatalogSnapshot) -> ProfileResponse {
         }),
         preview: None,
         detail: String::new(),
+        host_key_preview: None,
     }
 }
 

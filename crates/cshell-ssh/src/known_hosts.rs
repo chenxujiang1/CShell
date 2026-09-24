@@ -5,6 +5,7 @@ use russh::keys::{PublicKeyOrCertificate, ssh_key};
 use sha1::Sha1;
 use ssh_key::known_hosts::{HostPatterns, Marker};
 use ssh_key::{HashAlg, PublicKey};
+use std::io::Write;
 use std::path::Path;
 use thiserror::Error;
 
@@ -45,6 +46,20 @@ pub struct KnownHostsVerifier {
 }
 
 impl KnownHostsVerifier {
+    pub fn load_or_empty(
+        path: impl AsRef<Path>,
+        host: &str,
+        port: u16,
+    ) -> Result<Self, KnownHostsError> {
+        match Self::load(path, host, port) {
+            Ok(verifier) => Ok(verifier),
+            Err(KnownHostsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Self::parse("", host, port)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn load(path: impl AsRef<Path>, host: &str, port: u16) -> Result<Self, KnownHostsError> {
         if port == 0 {
             return Err(KnownHostsError::InvalidPort);
@@ -122,6 +137,11 @@ impl KnownHostsVerifier {
     }
 
     #[must_use]
+    pub fn has_matching_entries(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    #[must_use]
     pub fn check(&self, server_key: &PublicKeyOrCertificate) -> HostKeyCheck {
         let raw = server_key.public_key();
         let certificate = server_key.certificate();
@@ -178,6 +198,113 @@ impl KnownHostsVerifier {
             HostKeyCheck::Unknown
         }
     }
+}
+
+/// Persist a key only for a host that has no matching known_hosts entries.
+/// The comment and key form an append-only audit record. A torn final write
+/// fails closed when known_hosts is parsed on the next connection.
+pub fn import_confirmed_host_key(
+    path: &Path,
+    host: &str,
+    port: u16,
+    public_key_line: &str,
+    confirmed_fingerprint: &str,
+    profile_id: &str,
+) -> Result<(), String> {
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|ch| ch.is_whitespace() || "#,*!?|".contains(ch))
+        || profile_id.is_empty()
+        || !profile_id
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+    {
+        return Err("invalid host or Profile identifier for known_hosts".into());
+    }
+    let key = public_key_line
+        .parse::<PublicKey>()
+        .map_err(|error| error.to_string())?;
+    let canonical_key = key.to_openssh().map_err(|error| error.to_string())?;
+    let actual_fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+    if confirmed_fingerprint != actual_fingerprint {
+        return Err("confirmed fingerprint does not match the scanned host key".into());
+    }
+    let parent = path.parent().ok_or("known_hosts has no parent directory")?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let lock_path = path.with_file_name(format!(
+        "{}.cshell.lock",
+        path.file_name()
+            .ok_or("known_hosts has no file name")?
+            .to_string_lossy()
+    ));
+    let mut lock_options = std::fs::OpenOptions::new();
+    lock_options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_options.mode(0o600);
+    }
+    let lock = lock_options
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    lock.lock().map_err(|error| error.to_string())?;
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && !metadata.file_type().is_file()
+    {
+        return Err("known_hosts must be a regular file".into());
+    }
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("cannot read known_hosts: {error}")),
+    };
+    let contents = std::str::from_utf8(&existing).map_err(|_| "known_hosts is not UTF-8")?;
+    let verifier =
+        KnownHostsVerifier::parse(contents, host, port).map_err(|error| error.to_string())?;
+    if verifier.has_matching_entries() {
+        return Err("host already has a known_hosts entry; first-key import is blocked".into());
+    }
+    let lookup = if port == 22 {
+        host.to_ascii_lowercase()
+    } else {
+        format!("[{}]:{}", host.to_ascii_lowercase(), port)
+    };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    let suffix = format!(
+        "{}# CShell host-key-import v1 utc_unix={timestamp} profile={profile_id} fingerprint={actual_fingerprint}\n{lookup} {canonical_key}\n",
+        if existing.is_empty() || existing.ends_with(b"\n") {
+            ""
+        } else {
+            "\n"
+        }
+    );
+    if existing.len() + suffix.len() > MAX_KNOWN_HOSTS_BYTES as usize {
+        return Err("known_hosts exceeds the 8 MiB limit".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| error.to_string())?;
+    file.write_all(suffix.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn host_matches(patterns: &HostPatterns, host: &str) -> bool {
@@ -245,6 +372,92 @@ mod tests {
 
     fn server_key(encoded: &str) -> PublicKeyOrCertificate {
         PublicKeyOrCertificate::from(encoded.parse::<PublicKey>().unwrap())
+    }
+
+    #[test]
+    fn first_key_import_requires_exact_fingerprint_and_leaves_audit_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".ssh").join("known_hosts");
+        assert!(KnownHostsVerifier::load(&path, "example.com", 2200).is_err());
+        let empty = KnownHostsVerifier::load_or_empty(&path, "example.com", 2200).unwrap();
+        assert_eq!(empty.check(&server_key(KEY_ONE)), HostKeyCheck::Unknown);
+        let fingerprint = KEY_ONE
+            .parse::<PublicKey>()
+            .unwrap()
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
+        assert!(
+            import_confirmed_host_key(
+                &path,
+                "example.com",
+                2200,
+                KEY_ONE,
+                "SHA256:incorrect",
+                "11111111-1111-1111-1111-111111111111"
+            )
+            .is_err()
+        );
+        assert!(!path.exists());
+        import_confirmed_host_key(
+            &path,
+            "example.com",
+            2200,
+            KEY_ONE,
+            &fingerprint,
+            "11111111-1111-1111-1111-111111111111",
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("CShell host-key-import v1"));
+        assert!(content.contains(&format!("fingerprint={fingerprint}")));
+        assert!(content.contains(&format!("[example.com]:2200 {KEY_ONE}")));
+        assert_eq!(
+            KnownHostsVerifier::load(&path, "example.com", 2200)
+                .unwrap()
+                .check(&server_key(KEY_ONE)),
+            HostKeyCheck::Trusted
+        );
+        assert!(
+            import_confirmed_host_key(
+                &path,
+                "example.com",
+                2200,
+                KEY_TWO,
+                &KEY_TWO
+                    .parse::<PublicKey>()
+                    .unwrap()
+                    .fingerprint(HashAlg::Sha256)
+                    .to_string(),
+                "11111111-1111-1111-1111-111111111111"
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn existing_revocation_blocks_first_key_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("known_hosts");
+        let content = format!("@revoked example.com {KEY_ONE}\n");
+        std::fs::write(&path, &content).unwrap();
+        let fingerprint = KEY_TWO
+            .parse::<PublicKey>()
+            .unwrap()
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
+        assert!(
+            import_confirmed_host_key(
+                &path,
+                "example.com",
+                22,
+                KEY_TWO,
+                &fingerprint,
+                "11111111-1111-1111-1111-111111111111"
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
     }
 
     #[test]

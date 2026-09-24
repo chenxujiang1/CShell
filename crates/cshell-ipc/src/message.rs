@@ -33,6 +33,7 @@ pub mod features {
     pub const SSH_PROFILE_TARGET: u64 = 1 << 7;
     pub const SSH_PROFILE_SESSION: u64 = 1 << 8;
     pub const SSH_PROFILE_AUTH: u64 = 1 << 9;
+    pub const SSH_HOST_KEY_IMPORT: u64 = 1 << 10;
 }
 
 #[derive(Clone, PartialEq, Message)]

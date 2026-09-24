@@ -10,6 +10,7 @@ mod forwarding;
 mod known_hosts;
 
 pub use forwarding::{ForwardHandle, ForwardLimits, RemoteForwardTarget};
+pub use known_hosts::import_confirmed_host_key;
 pub use known_hosts::{HostKeyCheck, KnownHostsError, KnownHostsVerifier};
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -248,6 +249,78 @@ impl From<KnownHostsVerifier> for HostKeyPolicy {
 struct VerifiedClient {
     host_key: HostKeyPolicy,
     forward_routes: ForwardRoutes,
+}
+
+/// A host key observed during an unauthenticated SSH handshake. This is
+/// untrusted data until the user compares its fingerprint out of band.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScannedHostKey {
+    pub public_key_line: String,
+    pub fingerprint: String,
+    pub algorithm: String,
+}
+
+#[derive(Debug)]
+struct ScanClient {
+    observed: Option<tokio::sync::oneshot::Sender<Result<ScannedHostKey, String>>>,
+}
+
+impl russh::client::Handler for ScanClient {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        if let Some(sender) = self.observed.take() {
+            let result = if key.certificate().is_some() {
+                Err("host certificates require a trusted CA entry and cannot be imported as a raw key".into())
+            } else {
+                let raw = key.public_key();
+                raw.to_openssh()
+                    .map(|line| ScannedHostKey {
+                        public_key_line: line,
+                        fingerprint: raw
+                            .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                            .to_string(),
+                        algorithm: raw.algorithm().to_string(),
+                    })
+                    .map_err(|error| error.to_string())
+            };
+            let _ = sender.send(result);
+        }
+        // Deliberately abort key exchange before any user authentication.
+        Ok(false)
+    }
+}
+
+/// Observe a server's offered key without trusting it or sending credentials.
+pub async fn scan_host_key(host: &str, port: u16) -> Result<ScannedHostKey, String> {
+    if host.is_empty() || port == 0 {
+        return Err("SSH host and port are required".into());
+    }
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    let result = tokio::time::timeout(
+        SSH_CONNECT_TIMEOUT,
+        russh::client::connect(
+            Arc::new(verified_config()),
+            (host, port),
+            ScanClient {
+                observed: Some(sender),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "SSH host-key scan timed out".to_owned())?;
+    match receiver.try_recv() {
+        Ok(key) => key,
+        Err(_) => Err(format!(
+            "SSH host-key scan failed before receiving a key: {}",
+            result
+                .err()
+                .map_or_else(|| "connection closed".to_owned(), |error| error.to_string())
+        )),
+    }
 }
 
 impl russh::client::Handler for VerifiedClient {

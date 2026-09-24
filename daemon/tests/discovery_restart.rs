@@ -105,6 +105,8 @@ async fn wait_until_ready(child: &mut Child, paths: &RuntimePaths) -> DiscoveryR
                                 import_policy: 0,
                                 credential_profile_id: Vec::new(),
                                 credential_secret: Vec::new(),
+                                host_key_token: Vec::new(),
+                                host_key_fingerprint: String::new(),
                             })),
                         },
                     )

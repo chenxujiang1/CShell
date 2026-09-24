@@ -162,7 +162,8 @@ where
             | features::PROFILE_CONTROL
             | features::SSH_PROFILE_TARGET
             | features::SSH_PROFILE_SESSION
-            | features::SSH_PROFILE_AUTH)
+            | features::SSH_PROFILE_AUTH
+            | features::SSH_HOST_KEY_IMPORT)
         == 0
     {
         return Err(ConnectionError::SessionServiceRequired);

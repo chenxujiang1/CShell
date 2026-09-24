@@ -4,9 +4,9 @@ use cshell_domain::{
     SshConnectionRecord, TerminalOverrides,
 };
 use cshell_ipc::{
-    ProfileChange, ProfileFolderData, ProfileImportAction, ProfileImportItemKind,
-    ProfileImportPolicy, ProfileImportPreviewData, ProfileRecordData, SshConnectionData,
-    profile_change,
+    HostKeyPreviewData, ProfileChange, ProfileFolderData, ProfileImportAction,
+    ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData, ProfileRecordData,
+    SshConnectionData, profile_change,
 };
 use std::collections::BTreeSet;
 use zeroize::Zeroize;
@@ -30,6 +30,7 @@ struct ProfileDraft {
     agent_identity: String,
     password: String,
     key_passphrase: String,
+    host_key_confirmation: String,
     had_ssh_connection: bool,
 }
 
@@ -59,6 +60,7 @@ pub struct ProfilePanel {
     catalog: Option<DesktopProfileCatalog>,
     preview: Option<ProfileImportPreviewData>,
     preview_source: Option<(String, ProfileImportPolicy)>,
+    host_key_preview: Option<HostKeyPreviewData>,
     error: Option<String>,
     launch_error: Option<String>,
     status: String,
@@ -78,6 +80,7 @@ impl Default for ProfilePanel {
             catalog: None,
             preview: None,
             preview_source: None,
+            host_key_preview: None,
             error: None,
             launch_error: None,
             status: String::new(),
@@ -111,10 +114,12 @@ impl ProfilePanel {
             self.selected = None;
             self.folder_draft = None;
             self.profile_draft = None;
+            self.host_key_preview = None;
         }
         self.catalog = view.catalog.clone();
         self.preview = view.preview.clone();
         self.preview_source = view.preview_source.clone();
+        self.host_key_preview = view.host_key_preview.clone();
         self.error = view.error.clone();
         self.status = view.status.clone();
         true
@@ -128,6 +133,7 @@ impl ProfilePanel {
         let mut command = None;
         let mut clear_selection = false;
         let catalog = self.catalog.clone();
+        let host_key_preview = self.host_key_preview.clone();
         egui::Window::new("Profiles and folders")
             .open(&mut open)
             .default_size([760.0, 580.0])
@@ -276,7 +282,42 @@ impl ProfilePanel {
                                     });
                                     let saved_target = catalog.profiles.iter().any(|item| item.id == draft.record.id)
                                         && catalog.ssh_connections.iter().any(|item| item.profile_id == draft.record.id);
-                                    ui.label("SSH host key must match ~/.ssh/known_hosts; unknown or changed keys are blocked.");
+                                    ui.label("Unknown or changed SSH host keys are blocked by default.");
+                                    let saved_key_target = catalog.ssh_connections.iter().any(|item| {
+                                        item.profile_id == draft.record.id
+                                            && item.host == draft.ssh_host.trim()
+                                            && item.port == draft.ssh_port
+                                    });
+                                    if ui.add_enabled(saved_key_target, egui::Button::new("Preview first host key")).clicked() {
+                                        draft.host_key_confirmation.clear();
+                                        command = Some(ProfileClientCommand::PreviewHostKey {
+                                            profile_id: draft.record.id,
+                                            expected_revision: catalog.revision,
+                                        });
+                                    }
+                                    if let Some(preview) = host_key_preview.as_ref().filter(|preview| {
+                                        preview.profile_id == draft.record.id.as_uuid().as_bytes()
+                                            && preview.host == draft.ssh_host.trim()
+                                            && preview.port == u32::from(draft.ssh_port)
+                                            && saved_key_target
+                                    }) {
+                                        ui.label(format!("Host key algorithm: {}", preview.algorithm));
+                                        ui.label(format!("SHA256 fingerprint: {}", preview.fingerprint));
+                                        ui.label(format!("Public key: {}", preview.public_key_line));
+                                        ui.label("Compare this fingerprint through a trusted channel. Type the exact SHA256 fingerprint below to import it.");
+                                        ui.horizontal(|ui| {
+                                            ui.label("Confirmed fingerprint");
+                                            ui.text_edit_singleline(&mut draft.host_key_confirmation);
+                                        });
+                                        if ui.add_enabled(draft.host_key_confirmation == preview.fingerprint, egui::Button::new("Confirm and import host key")).clicked() {
+                                            command = Some(ProfileClientCommand::ConfirmHostKey {
+                                                profile_id: draft.record.id,
+                                                expected_revision: catalog.revision,
+                                                token: preview.token.clone(),
+                                                fingerprint: std::mem::take(&mut draft.host_key_confirmation),
+                                            });
+                                        }
+                                    }
                                     egui::ComboBox::from_label("Authentication")
                                         .selected_text(match draft.auth_method {
                                             SshAuthMethod::Password => "Password",
@@ -648,6 +689,7 @@ impl ProfilePanel {
                 .unwrap_or_default(),
             password: String::new(),
             key_passphrase: String::new(),
+            host_key_confirmation: String::new(),
             had_ssh_connection: connection.is_some(),
             record,
         });

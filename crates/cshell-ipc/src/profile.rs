@@ -26,6 +26,10 @@ pub struct ProfileRequest {
     pub credential_profile_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "7")]
     pub credential_secret: Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub host_key_token: Vec<u8>,
+    #[prost(string, tag = "9")]
+    pub host_key_fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -39,6 +43,8 @@ pub enum ProfileOperation {
     DeletePassword = 5,
     SetKeyPassphrase = 6,
     DeleteKeyPassphrase = 7,
+    PreviewHostKey = 8,
+    ConfirmHostKey = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -61,6 +67,28 @@ pub struct ProfileResponse {
     pub preview: Option<ProfileImportPreviewData>,
     #[prost(string, tag = "5")]
     pub detail: String,
+    #[prost(message, optional, boxed, tag = "6")]
+    pub host_key_preview: Option<Box<HostKeyPreviewData>>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct HostKeyPreviewData {
+    #[prost(bytes = "vec", tag = "1")]
+    pub profile_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub host: String,
+    #[prost(uint32, tag = "3")]
+    pub port: u32,
+    #[prost(string, tag = "4")]
+    pub algorithm: String,
+    #[prost(string, tag = "5")]
+    pub fingerprint: String,
+    #[prost(string, tag = "6")]
+    pub public_key_line: String,
+    #[prost(bytes = "vec", tag = "7")]
+    pub token: Vec<u8>,
+    #[prost(uint64, tag = "8")]
+    pub expires_unix_seconds: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]

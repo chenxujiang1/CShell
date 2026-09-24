@@ -113,7 +113,8 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
                 | features::PROFILE_CONTROL
                 | features::SSH_PROFILE_TARGET
                 | features::SSH_PROFILE_SESSION
-                | features::SSH_PROFILE_AUTH,
+                | features::SSH_PROFILE_AUTH
+                | features::SSH_HOST_KEY_IMPORT,
         ),
         SessionIpcService::new(Arc::clone(&registry)).with_profiles(profiles),
     );
