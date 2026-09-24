@@ -1,11 +1,12 @@
 use cshell_application::{PROFILE_IMPORT_FORMAT, PROFILE_IMPORT_VERSION, ProfileImportDocument};
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
+    TerminalOverrides,
 };
 use cshell_ipc::{
     Envelope, ProfileChange, ProfileFolderData, ProfileImportPolicy, ProfileOperation,
-    ProfileRecordData, ProfileRequest, ProfileResponse, ProfileStatus, envelope, profile_change,
-    read_envelope, write_envelope,
+    ProfileRecordData, ProfileRequest, ProfileResponse, ProfileStatus, SshConnectionData, envelope,
+    profile_change, read_envelope, write_envelope,
 };
 use cshell_storage::SqliteProfileRepository;
 use cshelld::{LocalSessionRegistry, ProfileIpcService, SessionIpcService};
@@ -41,6 +42,8 @@ fn request(operation: ProfileOperation) -> ProfileRequest {
         changes: vec![],
         import_json: vec![],
         import_policy: ProfileImportPolicy::Fail as i32,
+        credential_profile_id: Vec::new(),
+        credential_secret: Vec::new(),
     }
 }
 
@@ -94,6 +97,16 @@ async fn profile_control_previews_and_commits_import_once() -> Result<(), Box<dy
                 ProfileRecordData::from(&profile(first_profile, "srv", first_folder)),
             )),
         },
+        ProfileChange {
+            change: Some(profile_change::Change::UpsertSshConnection(
+                SshConnectionData::from(&SshConnectionRecord {
+                    profile_id: first_profile,
+                    host: "srv.example.com".into(),
+                    port: 22,
+                    username: "alice".into(),
+                }),
+            )),
+        },
     ];
     let response = exchange(&service, create).await?;
     assert_eq!(response.status, ProfileStatus::Ok as i32);
@@ -116,6 +129,9 @@ async fn profile_control_previews_and_commits_import_once() -> Result<(), Box<dy
     assert!(!failed_policy.preview.ok_or("missing preview")?.can_commit);
     let before = exchange(&service, request(ProfileOperation::List)).await?;
     assert_eq!(before.revision, 1);
+    let before_catalog = before.catalog.ok_or("missing catalog")?;
+    assert_eq!(before_catalog.ssh_connections.len(), 1);
+    assert_eq!(before_catalog.ssh_connections[0].host, "srv.example.com");
 
     preview.import_policy = ProfileImportPolicy::Skip as i32;
     let skipped = exchange(&service, preview.clone()).await?;
@@ -155,6 +171,7 @@ async fn profile_control_previews_and_commits_import_once() -> Result<(), Box<dy
     assert_eq!(committed.revision, 2);
     let catalog = committed.catalog.ok_or("missing committed catalog")?;
     assert_eq!(catalog.profiles.len(), 2);
+    assert_eq!(catalog.ssh_connections.len(), 1);
     assert!(catalog.profiles.iter().any(
         |record| record.id == first_profile.as_uuid().as_bytes() && record.tags == ["imported"]
     ));
@@ -165,6 +182,124 @@ async fn profile_control_previews_and_commits_import_once() -> Result<(), Box<dy
             .await?
             .revision,
         2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ssh_target_write_requires_negotiated_feature() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repository = SqliteProfileRepository::open(temp.path().join("cshell.db")).await?;
+    let sessions = Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16)?);
+    let service = SessionIpcService::new(sessions)
+        .with_profiles(Arc::new(ProfileIpcService::new(repository)));
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    let serving = tokio::spawn(async move {
+        service
+            .serve_connection_with_features(server, cshell_ipc::features::PROFILE_CONTROL)
+            .await
+    });
+    let mut request = request(ProfileOperation::ApplyChanges);
+    request.changes.push(ProfileChange {
+        change: Some(profile_change::Change::UpsertSshConnection(
+            SshConnectionData::from(&SshConnectionRecord {
+                profile_id: ProfileId::new(),
+                host: "example.com".into(),
+                port: 22,
+                username: "alice".into(),
+            }),
+        )),
+    });
+    write_envelope(
+        &mut client,
+        &Envelope {
+            request_id: 7,
+            deadline_unix_ms: 0,
+            payload: Some(envelope::Payload::ProfileRequest(request)),
+        },
+    )
+    .await?;
+    let response = read_envelope(&mut client).await?;
+    let Some(envelope::Payload::ProfileResponse(response)) = response.payload else {
+        return Err("missing Profile response".into());
+    };
+    assert_eq!(response.status, ProfileStatus::Unsupported as i32);
+    drop(client);
+    serving.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn saved_ssh_profile_requires_keychain_password_before_connecting()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repository = SqliteProfileRepository::open(temp.path().join("cshell.db")).await?;
+    let sessions = Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16)?);
+    let known_hosts = temp.path().join("known_hosts");
+    std::fs::write(&known_hosts, "")?;
+    let service = SessionIpcService::new(sessions)
+        .with_known_hosts_path(known_hosts)
+        .with_profiles(Arc::new(ProfileIpcService::new(repository)));
+    let folder_id = FolderId::new();
+    let profile_id = ProfileId::new();
+    let mut create = request(ProfileOperation::ApplyChanges);
+    create.changes = vec![
+        ProfileChange {
+            change: Some(profile_change::Change::UpsertFolder(
+                ProfileFolderData::from(&folder(folder_id, "SSH")),
+            )),
+        },
+        ProfileChange {
+            change: Some(profile_change::Change::UpsertProfile(
+                ProfileRecordData::from(&profile(profile_id, "remote", folder_id)),
+            )),
+        },
+        ProfileChange {
+            change: Some(profile_change::Change::UpsertSshConnection(
+                SshConnectionData::from(&SshConnectionRecord {
+                    profile_id,
+                    host: "127.0.0.1".into(),
+                    port: 22,
+                    username: "alice".into(),
+                }),
+            )),
+        },
+    ];
+    assert_eq!(
+        exchange(&service, create).await?.status,
+        ProfileStatus::Ok as i32
+    );
+    let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+    let client_work = async {
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 91,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::SessionCreateRequest(
+                    cshell_ipc::SessionCreateRequest {
+                        rows: 24,
+                        cols: 80,
+                        profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
+                    },
+                )),
+            },
+        )
+        .await?;
+        read_envelope(&mut client).await
+    };
+    let (served, response) = tokio::join!(service.serve_one(&mut server), client_work);
+    served?;
+    let response = response?;
+    assert_eq!(response.request_id, 91);
+    let Some(envelope::Payload::SessionCreateResponse(created)) = response.payload else {
+        return Err("missing SSH create response".into());
+    };
+    assert!(created.session.is_none());
+    assert!(
+        created.detail.contains("password unavailable"),
+        "{}",
+        created.detail
     );
     Ok(())
 }

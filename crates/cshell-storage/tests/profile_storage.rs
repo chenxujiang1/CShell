@@ -3,7 +3,7 @@ use cshell_application::{
 };
 use cshell_domain::{
     FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SettingSource,
-    TerminalOverrides,
+    SshConnectionRecord, TerminalOverrides,
 };
 use cshell_storage::{SqliteProfileRepository, StorageError, restore_backup};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -241,16 +241,104 @@ async fn future_schema_is_not_downgraded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("future.db");
     let pool = raw_pool(&path).await?;
-    query("PRAGMA user_version = 2").execute(&pool).await?;
+    query("PRAGMA user_version = 3").execute(&pool).await?;
     pool.close().await;
     assert!(matches!(
         SqliteProfileRepository::open(&path).await,
-        Err(StorageError::UnsupportedSchema(2))
+        Err(StorageError::UnsupportedSchema(3))
     ));
     assert!(backups(temp.path())?.is_empty());
     let pool = raw_pool(&path).await?;
     let version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ssh_target_round_trip_and_failed_update_are_atomic() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("targets.db");
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    let record = profile("server", None);
+    let target = SshConnectionRecord {
+        profile_id: record.id,
+        host: "server.example.com".into(),
+        port: 2222,
+        username: "alice".into(),
+    };
+    service
+        .apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(target.clone()),
+            ],
+        )
+        .await?;
+    service.into_repository().close().await;
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    assert_eq!(
+        service.load().await?.snapshot().ssh_connections,
+        vec![target.clone()]
+    );
+
+    let pool = raw_pool(&path).await?;
+    query(
+        "CREATE TRIGGER reject_target BEFORE INSERT ON profile_ssh_connections
+           WHEN NEW.host = 'blocked.example.com'
+           BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+    )
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    let mut changed = target.clone();
+    changed.host = "blocked.example.com".into();
+    assert!(
+        service
+            .apply_batch(1, &[CatalogChange::UpsertSshConnection(changed)])
+            .await
+            .is_err()
+    );
+    let intact = service.load().await?.snapshot();
+    assert_eq!(intact.revision, 1);
+    assert_eq!(intact.ssh_connections, vec![target]);
+    service.into_repository().close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v1_upgrade_preserves_profiles_and_backs_up_old_schema() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("v1.db");
+    let id = ProfileId::new();
+    let pool = raw_pool(&path).await?;
+    query("CREATE TABLE profile_catalog_meta (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, terminal_type TEXT NOT NULL, theme TEXT NOT NULL, logging INTEGER NOT NULL)").execute(&pool).await?;
+    query("CREATE TABLE profile_folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, terminal_type TEXT, theme TEXT, logging INTEGER)").execute(&pool).await?;
+    query("CREATE TABLE profile_records (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind INTEGER NOT NULL, folder_id TEXT, favorite INTEGER NOT NULL, terminal_type TEXT, theme TEXT, logging INTEGER)").execute(&pool).await?;
+    query("CREATE TABLE profile_tags (profile_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(profile_id, tag))").execute(&pool).await?;
+    query("INSERT INTO profile_catalog_meta VALUES (1, 7, 'xterm-256color', 'default', 0)")
+        .execute(&pool)
+        .await?;
+    query("INSERT INTO profile_records (id, name, kind, folder_id, favorite) VALUES (?1, 'legacy', 0, NULL, 0)")
+        .bind(id.to_string()).execute(&pool).await?;
+    query("PRAGMA user_version = 1").execute(&pool).await?;
+    pool.close().await;
+
+    let repository = SqliteProfileRepository::open(&path).await?;
+    let snapshot = repository.load().await?;
+    assert_eq!(snapshot.revision, 7);
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(snapshot.profiles[0].id, id);
+    assert!(snapshot.ssh_connections.is_empty());
+    repository.close().await;
+    let backup_paths = backups(temp.path())?;
+    assert_eq!(backup_paths.len(), 1);
+    let backup_pool = raw_pool(&backup_paths[0]).await?;
+    let version: i64 = query_scalar("PRAGMA user_version")
+        .fetch_one(&backup_pool)
+        .await?;
+    assert_eq!(version, 1);
+    backup_pool.close().await;
     Ok(())
 }

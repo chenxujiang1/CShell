@@ -11,7 +11,7 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 9;
+pub const PROTOCOL_MINOR: u32 = 11;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -30,6 +30,8 @@ pub mod features {
     pub const TERMINAL_CONTROL: u64 = 1 << 4;
     pub const HISTORY_SEARCH: u64 = 1 << 5;
     pub const PROFILE_CONTROL: u64 = 1 << 6;
+    pub const SSH_PROFILE_TARGET: u64 = 1 << 7;
+    pub const SSH_PROFILE_SESSION: u64 = 1 << 8;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -740,12 +742,16 @@ pub struct SessionCreateRequest {
     pub rows: u32,
     #[prost(uint32, tag = "2")]
     pub cols: u32,
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub profile_id: Option<Vec<u8>>,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SessionCreateResponse {
     #[prost(message, optional, tag = "1")]
     pub session: Option<SessionSummary>,
+    #[prost(string, tag = "2")]
+    pub detail: String,
 }
 
 #[derive(Clone, PartialEq, Message)]

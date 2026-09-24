@@ -1,4 +1,4 @@
-use cshell_domain::{InputAction, SessionId, TerminalSize};
+use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{
     ClientFrameUpdate, DiscoveryRecord, Envelope, Handshake, HistorySearchCodecError,
     HistorySearchDirection, HistorySearchRequest as IpcHistorySearchRequest,
@@ -50,6 +50,7 @@ pub struct DesktopDaemonView {
     pub session_title: Option<String>,
     pub log_page: Option<Arc<RenderLogPage>>,
     pub control_error: Option<String>,
+    pub launch_error: Option<String>,
     pub history_search: Option<Arc<DesktopHistorySearchResponse>>,
 }
 
@@ -61,7 +62,14 @@ pub struct DesktopDaemonConnection {
     history_search_requests: tokio::sync::watch::Sender<Option<DesktopHistorySearchRequest>>,
     input_requests: tokio::sync::mpsc::Sender<InputAction>,
     resize_requests: tokio::sync::watch::Sender<Option<TerminalSize>>,
+    open_requests: tokio::sync::watch::Sender<Option<DesktopSessionAction>>,
     worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DesktopSessionAction {
+    OpenProfile(ProfileId),
+    Attach(SessionId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,11 +97,20 @@ pub struct DesktopHistorySearchResponse {
     pub result: IpcHistorySearchResult,
 }
 
+struct DesktopWorkerReceivers {
+    log_pages: tokio::sync::watch::Receiver<Option<DesktopLogPageRequest>>,
+    history_search: tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
+    input: tokio::sync::mpsc::Receiver<InputAction>,
+    resize: tokio::sync::watch::Receiver<Option<TerminalSize>>,
+    open: tokio::sync::watch::Receiver<Option<DesktopSessionAction>>,
+}
+
 struct DesktopRequestReceivers<'a> {
     log_pages: &'a mut tokio::sync::watch::Receiver<Option<DesktopLogPageRequest>>,
     history_search: &'a mut tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
     input: &'a mut tokio::sync::mpsc::Receiver<InputAction>,
     resize: &'a mut tokio::sync::watch::Receiver<Option<TerminalSize>>,
+    open: &'a mut tokio::sync::watch::Receiver<Option<DesktopSessionAction>>,
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +131,12 @@ pub enum DesktopConnectionError {
     Subscription(#[from] SubscriptionClientError),
     #[error("daemon returned an unexpected session control response")]
     UnexpectedControlResponse,
+    #[error("switching to saved SSH Profile")]
+    SwitchSession(DesktopSessionAction),
+    #[error("saved SSH Profile could not start: {0}")]
+    ProfileLaunch(String),
+    #[error("daemon did not negotiate saved SSH Profile sessions")]
+    SshProfileNotNegotiated,
     #[error("daemon returned an invalid session identifier")]
     InvalidSessionId,
     #[error("daemon did not negotiate bounded log paging")]
@@ -253,6 +276,7 @@ impl DesktopDaemonConnection {
             tokio::sync::watch::channel(None);
         let (input_requests, worker_input_requests) = tokio::sync::mpsc::channel(256);
         let (resize_requests, worker_resize_requests) = tokio::sync::watch::channel(None);
+        let (open_requests, worker_open_requests) = tokio::sync::watch::channel(None);
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name("cshell-desktop-ipc".to_owned())
@@ -265,10 +289,13 @@ impl DesktopDaemonConnection {
                         config,
                         worker_shared,
                         worker_shutdown,
-                        worker_log_requests,
-                        worker_history_search_requests,
-                        worker_input_requests,
-                        worker_resize_requests,
+                        DesktopWorkerReceivers {
+                            log_pages: worker_log_requests,
+                            history_search: worker_history_search_requests,
+                            input: worker_input_requests,
+                            resize: worker_resize_requests,
+                            open: worker_open_requests,
+                        },
                     )),
                     Err(error) => update_view(&worker_shared, false, error.to_string(), None),
                 }
@@ -281,6 +308,7 @@ impl DesktopDaemonConnection {
             history_search_requests,
             input_requests,
             resize_requests,
+            open_requests,
             worker: Some(worker),
         })
     }
@@ -291,6 +319,42 @@ impl DesktopDaemonConnection {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub fn open_profile(&self, id: ProfileId) -> bool {
+        let sent = self
+            .open_requests
+            .send(Some(DesktopSessionAction::OpenProfile(id)))
+            .is_ok();
+        if sent {
+            let mut view = self
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            view.launch_error = None;
+            view.connected = false;
+            view.snapshot = None;
+            view.detail = "opening saved SSH Profile".into();
+        }
+        sent
+    }
+
+    pub fn attach_session(&self, id: SessionId) -> bool {
+        let sent = self
+            .open_requests
+            .send(Some(DesktopSessionAction::Attach(id)))
+            .is_ok();
+        if sent {
+            let mut view = self
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            view.launch_error = None;
+            view.connected = false;
+            view.snapshot = None;
+            view.detail = "switching terminal session".into();
+        }
+        sent
     }
 
     pub fn request_log_page(&self, request: RenderLogPageRequest) -> bool {
@@ -390,15 +454,20 @@ async fn reconnect_loop(
     config: DesktopConnectionConfig,
     shared: Arc<Mutex<DesktopDaemonView>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
-    mut log_requests: tokio::sync::watch::Receiver<Option<DesktopLogPageRequest>>,
-    mut history_search_requests: tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
-    mut input_requests: tokio::sync::mpsc::Receiver<InputAction>,
-    mut resize_requests: tokio::sync::watch::Receiver<Option<TerminalSize>>,
+    receivers: DesktopWorkerReceivers,
 ) {
+    let DesktopWorkerReceivers {
+        log_pages: mut log_requests,
+        history_search: mut history_search_requests,
+        input: mut input_requests,
+        resize: mut resize_requests,
+        open: mut open_requests,
+    } = receivers;
     let delays = [100_u64, 250, 500, 1_000, 2_000, 5_000];
     let mut attempt = 0_usize;
     let mut last_daemon_start = None;
     let mut log_delivery_revision = 0_u64;
+    let mut pending_action = None;
     while !*shutdown.borrow() {
         update_view(
             &shared,
@@ -411,16 +480,28 @@ async fn reconnect_loop(
             &shared,
             &mut shutdown,
             &mut log_delivery_revision,
+            pending_action.take(),
             DesktopRequestReceivers {
                 log_pages: &mut log_requests,
                 history_search: &mut history_search_requests,
                 input: &mut input_requests,
                 resize: &mut resize_requests,
+                open: &mut open_requests,
             },
         )
         .await;
         if *shutdown.borrow() {
             return;
+        }
+        if let Err(DesktopConnectionError::SwitchSession(action)) = &result {
+            pending_action = Some(*action);
+            continue;
+        }
+        if let Err(DesktopConnectionError::ProfileLaunch(message)) = &result {
+            shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .launch_error = Some(message.clone());
         }
         let was_connected = shared
             .lock()
@@ -452,6 +533,9 @@ async fn reconnect_loop(
         attempt = attempt.saturating_add(1);
         tokio::select! {
             () = tokio::time::sleep(Duration::from_millis(delay)) => {}
+            changed = open_requests.changed() => {
+                if changed.is_ok() { pending_action = *open_requests.borrow_and_update(); }
+            }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     return;
@@ -476,6 +560,7 @@ async fn connect_once(
     shared: &Arc<Mutex<DesktopDaemonView>>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     log_delivery_revision: &mut u64,
+    requested_action: Option<DesktopSessionAction>,
     requests: DesktopRequestReceivers<'_>,
 ) -> Result<(), DesktopConnectionError> {
     while requests.input.try_recv().is_ok() {}
@@ -496,7 +581,8 @@ async fn connect_once(
     handshake.feature_bits = features::FULL_FRAME_RECOVERY
         | features::PRIORITY_STREAMS
         | features::LOG_PAGING
-        | features::TERMINAL_CONTROL;
+        | features::TERMINAL_CONTROL
+        | features::SSH_PROFILE_SESSION;
     let negotiated = client_handshake(&mut stream, 1, handshake).await?;
     if config.request_log_pages && negotiated.feature_bits & features::LOG_PAGING == 0 {
         return Err(DesktopConnectionError::LogPagingNotNegotiated);
@@ -506,9 +592,36 @@ async fn connect_once(
     }
 
     let mut request_id = 2_u64;
-    let (session_id, session_title) = match config.session_id {
-        Some(session_id) => (session_id, "Terminal".to_owned()),
-        None => discover_or_create_session(&mut stream, &mut request_id).await?,
+    let existing_session = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .session_id;
+    let (session_id, session_title) = if let Some(DesktopSessionAction::OpenProfile(profile_id)) =
+        requested_action
+    {
+        if negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0 {
+            return Err(DesktopConnectionError::SshProfileNotNegotiated);
+        }
+        let size = *requests.resize.borrow();
+        let created = create_saved_profile_session(
+            &mut stream,
+            &mut request_id,
+            profile_id,
+            size.map_or(24, |value| u32::from(value.rows)),
+            size.map_or(80, |value| u32::from(value.cols)),
+        )
+        .await?;
+        shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .launch_error = None;
+        created
+    } else if let Some(DesktopSessionAction::Attach(session_id)) = requested_action {
+        discover_or_create_session(&mut stream, &mut request_id, Some(session_id), false).await?
+    } else if let Some(session_id) = config.session_id {
+        (session_id, "Terminal".to_owned())
+    } else {
+        discover_or_create_session(&mut stream, &mut request_id, existing_session, true).await?
     };
     update_session(shared, session_id, session_title);
     let mut replica = TerminalSubscriptionReplica::new(session_id);
@@ -565,6 +678,13 @@ async fn connect_once(
                 }
                 continue;
             }
+            changed = requests.open.changed() => {
+                if changed.is_ok()
+                    && let Some(id) = *requests.open.borrow_and_update() {
+                        return Err(DesktopConnectionError::SwitchSession(id));
+                    }
+                continue;
+            }
         };
         if let Some(envelope::Payload::TerminalControlResponse(response)) =
             envelope.payload.as_ref()
@@ -591,9 +711,60 @@ async fn connect_once(
     }
 }
 
+async fn create_saved_profile_session<S>(
+    stream: &mut S,
+    request_id: &mut u64,
+    profile_id: ProfileId,
+    rows: u32,
+    cols: u32,
+) -> Result<(SessionId, String), DesktopConnectionError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let id = *request_id;
+    write_envelope(
+        stream,
+        &Envelope {
+            request_id: id,
+            deadline_unix_ms: 0,
+            payload: Some(envelope::Payload::SessionCreateRequest(
+                cshell_ipc::SessionCreateRequest {
+                    rows,
+                    cols,
+                    profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
+                },
+            )),
+        },
+    )
+    .await?;
+    let response = read_envelope(stream).await?;
+    *request_id = id.saturating_add(1);
+    if response.request_id != id {
+        return Err(DesktopConnectionError::UnexpectedControlResponse);
+    }
+    let Some(envelope::Payload::SessionCreateResponse(created)) = response.payload else {
+        return Err(DesktopConnectionError::UnexpectedControlResponse);
+    };
+    let session = created.session.ok_or_else(|| {
+        DesktopConnectionError::ProfileLaunch(if created.detail.is_empty() {
+            "daemon did not return a session".into()
+        } else {
+            created.detail
+        })
+    })?;
+    let bytes: [u8; 16] = session
+        .session_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| DesktopConnectionError::InvalidSessionId)?;
+    Ok((SessionId::from_bytes(bytes), session.title))
+}
+
 async fn discover_or_create_session<S>(
     stream: &mut S,
     request_id: &mut u64,
+    preferred: Option<SessionId>,
+    allow_fallback: bool,
 ) -> Result<(SessionId, String), DesktopConnectionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -618,14 +789,35 @@ where
     let Some(envelope::Payload::SessionListResponse(list)) = response.payload else {
         return Err(DesktopConnectionError::UnexpectedControlResponse);
     };
-    let session = list
-        .sessions
-        .iter()
-        .find(|session| session.running)
-        .cloned()
-        .or_else(|| list.sessions.into_iter().next());
+    let session = preferred
+        .and_then(|id| {
+            list.sessions
+                .iter()
+                .find(|session| session.session_id == id.as_uuid().as_bytes())
+                .cloned()
+        })
+        .or_else(|| {
+            allow_fallback
+                .then(|| {
+                    list.sessions
+                        .iter()
+                        .find(|session| session.running)
+                        .cloned()
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            allow_fallback
+                .then(|| list.sessions.into_iter().next())
+                .flatten()
+        });
     let session = match session {
         Some(session) => session,
+        None if !allow_fallback => {
+            return Err(DesktopConnectionError::ProfileLaunch(
+                "session no longer exists".into(),
+            ));
+        }
         None => {
             let create_request_id = *request_id;
             write_envelope(
@@ -634,7 +826,11 @@ where
                     request_id: create_request_id,
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateRequest(
-                        cshell_ipc::SessionCreateRequest { rows: 24, cols: 80 },
+                        cshell_ipc::SessionCreateRequest {
+                            rows: 24,
+                            cols: 80,
+                            profile_id: None,
+                        },
                     )),
                 },
             )
@@ -1124,10 +1320,17 @@ fn update_view(
     if !connected {
         view.control_error = None;
     }
-    view.detail = view
+    let control_error = view
         .control_error
-        .as_ref()
-        .map_or(detail.clone(), |error| format!("{detail} · {error}"));
+        .as_deref()
+        .map(|error| format!(" · {error}"))
+        .unwrap_or_default();
+    let launch_error = view
+        .launch_error
+        .as_deref()
+        .map(|error| format!(" · SSH: {error}"))
+        .unwrap_or_default();
+    view.detail = format!("{detail}{control_error}{launch_error}");
     if let Some(snapshot) = snapshot {
         view.snapshot = Some(Arc::new(snapshot));
     }
@@ -1176,6 +1379,11 @@ fn update_session(shared: &Arc<Mutex<DesktopDaemonView>>, id: SessionId, title: 
     let mut view = shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if view.session_id != Some(id) {
+        view.snapshot = None;
+        view.log_page = None;
+        view.history_search = None;
+    }
     view.session_id = Some(id);
     view.session_title = Some(title);
 }
@@ -1203,10 +1411,10 @@ mod tests {
     use super::{
         DesktopConnectionConfig, DesktopDaemonConnection, DesktopEndpointSource,
         DesktopHistorySearchRequest, DesktopLogPageRequest, ResolvedDesktopEndpoint,
-        convert_log_page, decode_hex, discover_or_create_session, history_search_loop,
-        log_page_loop, update_terminal_control,
+        convert_log_page, create_saved_profile_session, decode_hex, discover_or_create_session,
+        history_search_loop, log_page_loop, update_terminal_control,
     };
-    use cshell_domain::{InputAction, SessionId, TerminalSize};
+    use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
     use cshell_ipc::{
         DiscoveryPublication, DiscoveryRecord, Envelope, HandshakePolicy, HistorySearchDirection,
         HistorySearchMatch, HistorySearchResult, LogPage, LogRow, LogStyleSpan, RuntimePaths,
@@ -1536,6 +1744,7 @@ mod tests {
                                 running: true,
                                 generation: 1,
                             }),
+                            detail: String::new(),
                         },
                     )),
                 },
@@ -1545,7 +1754,7 @@ mod tests {
         });
 
         let mut request_id = 2;
-        let discovered = discover_or_create_session(&mut client, &mut request_id)
+        let discovered = discover_or_create_session(&mut client, &mut request_id, None, true)
             .await
             .unwrap_or_else(|error| panic!("session discovery must succeed: {error}"));
         assert_eq!(discovered, (session_id, "Local shell".to_owned()));
@@ -1898,5 +2107,55 @@ mod tests {
         assert_eq!(page.rows[0].text.as_ref(), "错误 e\u{301}");
         assert_eq!(page.rows[0].style_spans[0].byte_range, 0..6);
         assert!(page.rows[0].truncated);
+    }
+
+    #[tokio::test]
+    async fn saved_profile_create_sends_only_the_profile_reference() {
+        let profile_id = ProfileId::new();
+        let session_id = SessionId::new();
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let server_work = async {
+            let request = read_envelope(&mut server)
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            let Some(envelope::Payload::SessionCreateRequest(create)) = request.payload else {
+                panic!("missing session create request");
+            };
+            assert_eq!(
+                create.profile_id.as_deref(),
+                Some(profile_id.as_uuid().as_bytes().as_slice())
+            );
+            assert_eq!((create.rows, create.cols), (30, 90));
+            write_envelope(
+                &mut server,
+                &Envelope {
+                    request_id: request.request_id,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::SessionCreateResponse(
+                        SessionCreateResponse {
+                            session: Some(SessionSummary {
+                                session_id: session_id.as_uuid().as_bytes().to_vec(),
+                                title: "saved SSH".into(),
+                                running: true,
+                                generation: 0,
+                            }),
+                            detail: String::new(),
+                        },
+                    )),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        };
+        let mut request_id = 2;
+        let (created, ()) = tokio::join!(
+            create_saved_profile_session(&mut client, &mut request_id, profile_id, 30, 90),
+            server_work,
+        );
+        assert_eq!(
+            created.unwrap_or_else(|error| panic!("{error}")),
+            (session_id, "saved SSH".into())
+        );
+        assert_eq!(request_id, 3);
     }
 }

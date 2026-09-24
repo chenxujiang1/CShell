@@ -2,7 +2,8 @@
 
 use cshell_domain::{
     FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, ResolvedField,
-    ResolvedTerminalSettings, SettingSource, TerminalDefaults, TerminalOverrides,
+    ResolvedTerminalSettings, SettingSource, SshConnectionRecord, TerminalDefaults,
+    TerminalOverrides,
 };
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -12,6 +13,8 @@ const MAX_TAG_BYTES: usize = 64;
 const MAX_TAGS: usize = 64;
 const MAX_BATCH_CHANGES: usize = 2048;
 const MAX_SEARCH_RESULTS: usize = 256;
+const MAX_SSH_HOST_BYTES: usize = 255;
+const MAX_SSH_USERNAME_BYTES: usize = 128;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CatalogSnapshot {
@@ -19,6 +22,7 @@ pub struct CatalogSnapshot {
     pub defaults: TerminalDefaults,
     pub folders: Vec<ProfileFolder>,
     pub profiles: Vec<ProfileRecord>,
+    pub ssh_connections: Vec<SshConnectionRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,6 +31,8 @@ pub enum CatalogChange {
     RemoveFolder(FolderId),
     UpsertProfile(ProfileRecord),
     RemoveProfile(ProfileId),
+    UpsertSshConnection(SshConnectionRecord),
+    RemoveSshConnection(ProfileId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +43,9 @@ pub enum ChangeOutcome {
     ProfileCreated(ProfileId),
     ProfileUpdated(ProfileId),
     ProfileRemoved(ProfileId),
+    SshConnectionCreated(ProfileId),
+    SshConnectionUpdated(ProfileId),
+    SshConnectionRemoved(ProfileId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,6 +97,14 @@ pub enum CatalogError {
     InvalidTag,
     #[error("too many tags")]
     TooManyTags,
+    #[error("SSH connection target is invalid")]
+    InvalidSshTarget,
+    #[error("SSH connection belongs to a non-SSH Profile {0}")]
+    InvalidSshProfile(ProfileId),
+    #[error("SSH connection target is duplicated for Profile {0}")]
+    DuplicateSshConnection(ProfileId),
+    #[error("unknown SSH connection for Profile {0}")]
+    UnknownSshConnection(ProfileId),
     #[error("batch exceeds the change limit")]
     TooManyChanges,
     #[error("search limit must be between 1 and 256")]
@@ -362,7 +379,30 @@ impl ProfileCatalog {
                     if next.profiles.len() == old_len {
                         return Err(CatalogError::UnknownProfile(*id));
                     }
+                    next.ssh_connections
+                        .retain(|connection| connection.profile_id != *id);
                     ChangeOutcome::ProfileRemoved(*id)
+                }
+                CatalogChange::UpsertSshConnection(connection) => {
+                    if let Some(existing) = next
+                        .ssh_connections
+                        .iter_mut()
+                        .find(|item| item.profile_id == connection.profile_id)
+                    {
+                        *existing = connection.clone();
+                        ChangeOutcome::SshConnectionUpdated(connection.profile_id)
+                    } else {
+                        next.ssh_connections.push(connection.clone());
+                        ChangeOutcome::SshConnectionCreated(connection.profile_id)
+                    }
+                }
+                CatalogChange::RemoveSshConnection(id) => {
+                    let old_len = next.ssh_connections.len();
+                    next.ssh_connections.retain(|item| item.profile_id != *id);
+                    if next.ssh_connections.len() == old_len {
+                        return Err(CatalogError::UnknownSshConnection(*id));
+                    }
+                    ChangeOutcome::SshConnectionRemoved(*id)
                 }
             };
             outcomes.push(outcome);
@@ -464,7 +504,34 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
             return Err(CatalogError::DuplicateName);
         }
     }
+    let mut connection_ids = BTreeSet::new();
+    for connection in &snapshot.ssh_connections {
+        if !connection_ids.insert(connection.profile_id) {
+            return Err(CatalogError::DuplicateSshConnection(connection.profile_id));
+        }
+        let profile = snapshot
+            .profiles
+            .iter()
+            .find(|profile| profile.id == connection.profile_id)
+            .ok_or(CatalogError::UnknownProfile(connection.profile_id))?;
+        if profile.kind != ProfileKind::Ssh {
+            return Err(CatalogError::InvalidSshProfile(connection.profile_id));
+        }
+        if connection.port == 0
+            || !valid_target_field(&connection.host, MAX_SSH_HOST_BYTES)
+            || !valid_target_field(&connection.username, MAX_SSH_USERNAME_BYTES)
+        {
+            return Err(CatalogError::InvalidSshTarget);
+        }
+    }
     Ok(())
+}
+
+fn valid_target_field(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
 }
 
 fn validate_overrides(overrides: &TerminalOverrides) -> Result<(), CatalogError> {
@@ -612,5 +679,46 @@ mod tests {
             }),
             Err(CatalogError::DuplicateName)
         ));
+    }
+    #[test]
+    fn ssh_target_validates_profile_kind_and_follows_profile_deletion() -> Result<(), CatalogError>
+    {
+        let mut catalog = ProfileCatalog::from_snapshot(CatalogSnapshot::default())?;
+        let record = profile("server", None);
+        let target = SshConnectionRecord {
+            profile_id: record.id,
+            host: "server.example.com".into(),
+            port: 22,
+            username: "alice".into(),
+        };
+        assert!(matches!(
+            catalog.preview_batch(&[CatalogChange::UpsertSshConnection(target.clone())]),
+            Err(CatalogError::UnknownProfile(_))
+        ));
+        let mut invalid = target.clone();
+        invalid.port = 0;
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        catalog.apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(target.clone()),
+            ],
+        )?;
+        let mut local = record.clone();
+        local.kind = ProfileKind::Local;
+        assert_eq!(
+            catalog.preview_batch(&[CatalogChange::UpsertProfile(local)]),
+            Err(CatalogError::InvalidSshProfile(record.id))
+        );
+        catalog.apply_batch(1, &[CatalogChange::RemoveProfile(record.id)])?;
+        assert!(catalog.snapshot().ssh_connections.is_empty());
+        Ok(())
     }
 }

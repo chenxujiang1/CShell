@@ -1,5 +1,7 @@
 use crate::daemon_connection::DesktopConnectionConfig;
-use cshell_domain::{ProfileFolder, ProfileRecord, TerminalDefaults};
+use cshell_domain::{
+    ProfileFolder, ProfileId, ProfileRecord, SshConnectionRecord, TerminalDefaults,
+};
 use cshell_ipc::{
     Envelope, Handshake, ProfileCatalogData, ProfileChange, ProfileImportPolicy,
     ProfileImportPreviewData, ProfileOperation, ProfileRequest, ProfileResponse, ProfileStatus,
@@ -26,11 +28,22 @@ pub struct DesktopProfileCatalog {
     pub defaults: TerminalDefaults,
     pub folders: Vec<ProfileFolder>,
     pub profiles: Vec<ProfileRecord>,
+    pub ssh_connections: Vec<SshConnectionRecord>,
 }
 
 #[derive(Debug)]
 pub enum ProfileClientCommand {
     Refresh,
+    OpenProfile(ProfileId),
+    SetPassword {
+        profile_id: ProfileId,
+        expected_revision: u64,
+        password: Vec<u8>,
+    },
+    DeletePassword {
+        profile_id: ProfileId,
+        expected_revision: u64,
+    },
     Apply {
         expected_revision: u64,
         changes: Vec<ProfileChange>,
@@ -122,6 +135,22 @@ async fn profile_worker(
             next = receiver.recv() => {
                 let Some(command) = next else { break };
                 match command {
+                    ProfileClientCommand::OpenProfile(_) => {}
+                    ProfileClientCommand::SetPassword { profile_id, expected_revision, password } => {
+                        let mut outgoing = request(ProfileOperation::SetPassword);
+                        outgoing.expected_revision = expected_revision;
+                        outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+                        outgoing.credential_secret = password;
+                        let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
+                        publish_credential_result(&shared, result, "Password saved in system keychain");
+                    }
+                    ProfileClientCommand::DeletePassword { profile_id, expected_revision } => {
+                        let mut outgoing = request(ProfileOperation::DeletePassword);
+                        outgoing.expected_revision = expected_revision;
+                        outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
+                        let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
+                        publish_credential_result(&shared, result, "Password removed from system keychain");
+                    }
                     ProfileClientCommand::Refresh => {
                         publish_catalog(&shared, send(&config, request(ProfileOperation::List)).await.and_then(catalog_from_response));
                     }
@@ -183,6 +212,20 @@ async fn profile_worker(
     }
 }
 
+fn publish_credential_result(
+    shared: &Arc<Mutex<DesktopProfileView>>,
+    result: Result<(), String>,
+    message: &str,
+) {
+    update(shared, |view| match result {
+        Ok(()) => {
+            view.error = None;
+            view.status = message.to_owned();
+        }
+        Err(error) => view.error = Some(error),
+    });
+}
+
 fn request(operation: ProfileOperation) -> ProfileRequest {
     ProfileRequest {
         operation: operation as i32,
@@ -190,6 +233,8 @@ fn request(operation: ProfileOperation) -> ProfileRequest {
         changes: Vec::new(),
         import_json: Vec::new(),
         import_policy: ProfileImportPolicy::Fail as i32,
+        credential_profile_id: Vec::new(),
+        credential_secret: Vec::new(),
     }
 }
 
@@ -214,12 +259,17 @@ async fn send(
     config: &DesktopConnectionConfig,
     request: ProfileRequest,
 ) -> Result<ProfileResponse, String> {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        send_inner(config, request),
-    )
-    .await
-    .map_err(|_| "Profile request timed out".to_owned())?
+    let timeout = if matches!(
+        ProfileOperation::try_from(request.operation),
+        Ok(ProfileOperation::SetPassword | ProfileOperation::DeletePassword)
+    ) {
+        std::time::Duration::from_secs(30)
+    } else {
+        std::time::Duration::from_secs(5)
+    };
+    tokio::time::timeout(timeout, send_inner(config, request))
+        .await
+        .map_err(|_| "Profile request timed out".to_owned())?
 }
 
 async fn send_inner(
@@ -234,12 +284,18 @@ async fn send_inner(
         resolved.daemon_instance_id.to_vec(),
         resolved.instance_token.to_vec(),
     );
-    handshake.feature_bits = features::PROFILE_CONTROL;
+    handshake.feature_bits =
+        features::PROFILE_CONTROL | features::SSH_PROFILE_TARGET | features::SSH_PROFILE_SESSION;
     let negotiated = client_handshake(&mut stream, 1, handshake)
         .await
         .map_err(|error| error.to_string())?;
     if negotiated.feature_bits & features::PROFILE_CONTROL == 0 {
         return Err("daemon does not support Profile control".into());
+    }
+    if negotiated.feature_bits & features::SSH_PROFILE_TARGET == 0
+        || negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0
+    {
+        return Err("daemon does not support SSH Profile sessions; restart the daemon".into());
     }
     write_envelope(
         &mut stream,
@@ -302,11 +358,20 @@ fn decode_catalog(data: ProfileCatalogData) -> Result<DesktopProfileCatalog, Str
                 .map_err(|error: cshell_ipc::ProfileCodecError| error.to_string())
         })
         .collect::<Result<_, _>>()?;
+    let ssh_connections = data
+        .ssh_connections
+        .into_iter()
+        .map(|item| {
+            item.try_into()
+                .map_err(|error: cshell_ipc::ProfileCodecError| error.to_string())
+        })
+        .collect::<Result<_, _>>()?;
     Ok(DesktopProfileCatalog {
         revision: data.revision,
         defaults,
         folders,
         profiles,
+        ssh_connections,
     })
 }
 

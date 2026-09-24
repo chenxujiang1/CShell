@@ -1,8 +1,8 @@
 //! Bounded Profile control messages shared by desktop and daemon.
 
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, TerminalDefaults,
-    TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
+    TerminalDefaults, TerminalOverrides,
 };
 use prost::{Enumeration, Message};
 use std::collections::BTreeSet;
@@ -22,6 +22,10 @@ pub struct ProfileRequest {
     pub import_json: Vec<u8>,
     #[prost(enumeration = "ProfileImportPolicy", tag = "5")]
     pub import_policy: i32,
+    #[prost(bytes = "vec", tag = "6")]
+    pub credential_profile_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub credential_secret: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -31,6 +35,8 @@ pub enum ProfileOperation {
     ApplyChanges = 1,
     PreviewImport = 2,
     CommitImport = 3,
+    SetPassword = 4,
+    DeletePassword = 5,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -76,6 +82,8 @@ pub struct ProfileCatalogData {
     pub folders: Vec<ProfileFolderData>,
     #[prost(message, repeated, tag = "4")]
     pub profiles: Vec<ProfileRecordData>,
+    #[prost(message, repeated, tag = "5")]
+    pub ssh_connections: Vec<SshConnectionData>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -128,6 +136,18 @@ pub struct ProfileRecordData {
     pub terminal: Option<ProfileTerminalOverridesData>,
 }
 
+#[derive(Clone, PartialEq, Message)]
+pub struct SshConnectionData {
+    #[prost(bytes = "vec", tag = "1")]
+    pub profile_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub host: String,
+    #[prost(uint32, tag = "3")]
+    pub port: u32,
+    #[prost(string, tag = "4")]
+    pub username: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
 #[repr(i32)]
 pub enum ProfileKindData {
@@ -137,12 +157,12 @@ pub enum ProfileKindData {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ProfileChange {
-    #[prost(oneof = "profile_change::Change", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "profile_change::Change", tags = "1, 2, 3, 4, 5, 6")]
     pub change: Option<profile_change::Change>,
 }
 
 pub mod profile_change {
-    use super::{ProfileFolderData, ProfileRecordData};
+    use super::{ProfileFolderData, ProfileRecordData, SshConnectionData};
     use prost::Oneof;
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -155,6 +175,10 @@ pub mod profile_change {
         UpsertProfile(ProfileRecordData),
         #[prost(bytes, tag = "4")]
         RemoveProfile(Vec<u8>),
+        #[prost(message, tag = "5")]
+        UpsertSshConnection(SshConnectionData),
+        #[prost(bytes, tag = "6")]
+        RemoveSshConnection(Vec<u8>),
     }
 }
 
@@ -202,6 +226,8 @@ pub enum ProfileCodecError {
     InvalidId,
     #[error("Profile kind is unknown")]
     InvalidKind,
+    #[error("SSH port is invalid")]
+    InvalidPort,
     #[error("Profile change is missing")]
     MissingChange,
     #[error("Profile request contains too many changes")]
@@ -315,6 +341,32 @@ impl TryFrom<ProfileRecordData> for ProfileRecord {
             tags: value.tags.into_iter().collect::<BTreeSet<_>>(),
             favorite: value.favorite,
             terminal: decode_overrides(value.terminal),
+        })
+    }
+}
+
+impl From<&SshConnectionRecord> for SshConnectionData {
+    fn from(value: &SshConnectionRecord) -> Self {
+        Self {
+            profile_id: value.profile_id.as_uuid().as_bytes().to_vec(),
+            host: value.host.clone(),
+            port: u32::from(value.port),
+            username: value.username.clone(),
+        }
+    }
+}
+
+impl TryFrom<SshConnectionData> for SshConnectionRecord {
+    type Error = ProfileCodecError;
+    fn try_from(value: SshConnectionData) -> Result<Self, Self::Error> {
+        Ok(Self {
+            profile_id: ProfileId::from_bytes(decode_id(&value.profile_id)?),
+            host: value.host,
+            port: u16::try_from(value.port)
+                .ok()
+                .filter(|port| *port > 0)
+                .ok_or(ProfileCodecError::InvalidPort)?,
+            username: value.username,
         })
     }
 }

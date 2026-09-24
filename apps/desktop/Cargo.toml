@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+zeroize.workspace = true
 cshell-domain = { path = "../../crates/cshell-domain" }
 cshell-ipc = { path = "../../crates/cshell-ipc" }
 cshell-render = { path = "../../crates/cshell-render" }

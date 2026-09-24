@@ -1140,6 +1140,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winit",
+ "zeroize",
 ]
 
 [[package]]
@@ -1223,10 +1224,13 @@ version = "0.1.0"
 dependencies = [
  "cshell-sftp",
  "futures",
+ "hmac",
  "rand",
  "russh",
  "russh-sftp",
  "serde",
+ "sha1",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]

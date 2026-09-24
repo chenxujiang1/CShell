@@ -40,6 +40,7 @@ egui-winit = "=0.36.1"
 epaint_default_fonts = "=0.36.1"
 futures = "0.3"
 guillotiere = "=0.7.0"
+hmac = "0.13"
 libc = "=0.2.189"
 keyring = "=4.2.0"
 memchr = "2"
@@ -51,6 +52,7 @@ russh = { version = "=0.63.1", default-features = false, features = ["ring"] }
 russh-sftp = "=3.0.0"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+sha1 = "0.11"
 sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tempfile = "3"
 thiserror = "2"
@@ -74,6 +76,23 @@ all = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 await_holding_lock = "deny"
+
+[profile.dev]
+incremental = true
+
+[profile.dev.package.'*']
+debug = 1
+
+[profile.test]
+incremental = true
+
+[profile.test.package.'*']
+debug = 1
+
+[profile.ci-local]
+inherits = 'test'
+incremental = false
+debug = 1
 
 [profile.release]
 lto = "thin"

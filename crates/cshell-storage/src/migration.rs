@@ -5,7 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
+
+const CREATE_SSH_TABLE_SQL: &str = "CREATE TABLE profile_ssh_connections (
+            profile_id TEXT PRIMARY KEY REFERENCES profile_records(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+            host TEXT NOT NULL CHECK (length(host) > 0),
+            port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+            username TEXT NOT NULL CHECK (length(username) > 0)
+        )";
 
 pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
     let parent = path.parent().ok_or(StorageError::InvalidPath)?;
@@ -28,7 +35,11 @@ pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
             if existed {
                 create_backup(&pool, path).await?;
             }
-            migrate_v1(&pool).await?;
+            migrate_new_database(&pool).await?;
+        }
+        1 => {
+            create_backup(&pool, path).await?;
+            migrate_v2(&pool).await?;
         }
         SCHEMA_VERSION => {}
         other => return Err(StorageError::UnsupportedSchema(other)),
@@ -40,7 +51,7 @@ pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
     Ok(pool)
 }
 
-async fn migrate_v1(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_new_database(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     query(
         "CREATE TABLE IF NOT EXISTS profile_catalog_meta (
@@ -95,7 +106,16 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<(), StorageError> {
     )
     .execute(&mut *tx)
     .await?;
-    query("PRAGMA user_version = 1").execute(&mut *tx).await?;
+    query(CREATE_SSH_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 2").execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn migrate_v2(pool: &SqlitePool) -> Result<(), StorageError> {
+    let mut tx = pool.begin().await?;
+    query(CREATE_SSH_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 2").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }

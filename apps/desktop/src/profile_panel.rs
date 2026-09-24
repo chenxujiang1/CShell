@@ -1,12 +1,15 @@
 use crate::profile_connection::{DesktopProfileCatalog, DesktopProfileView, ProfileClientCommand};
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
+    TerminalOverrides,
 };
 use cshell_ipc::{
     ProfileChange, ProfileFolderData, ProfileImportAction, ProfileImportItemKind,
-    ProfileImportPolicy, ProfileImportPreviewData, ProfileRecordData, profile_change,
+    ProfileImportPolicy, ProfileImportPreviewData, ProfileRecordData, SshConnectionData,
+    profile_change,
 };
 use std::collections::BTreeSet;
+use zeroize::Zeroize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Selected {
@@ -18,6 +21,17 @@ enum Selected {
 struct ProfileDraft {
     record: ProfileRecord,
     tags: String,
+    ssh_host: String,
+    ssh_port: u16,
+    ssh_username: String,
+    password: String,
+    had_ssh_connection: bool,
+}
+
+impl Drop for ProfileDraft {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
 }
 
 #[derive(Debug)]
@@ -28,6 +42,7 @@ pub struct ProfilePanel {
     preview: Option<ProfileImportPreviewData>,
     preview_source: Option<(String, ProfileImportPolicy)>,
     error: Option<String>,
+    launch_error: Option<String>,
     status: String,
     search: String,
     selected: Option<Selected>,
@@ -46,6 +61,7 @@ impl Default for ProfilePanel {
             preview: None,
             preview_source: None,
             error: None,
+            launch_error: None,
             status: String::new(),
             search: String::new(),
             selected: None,
@@ -58,6 +74,14 @@ impl Default for ProfilePanel {
 }
 
 impl ProfilePanel {
+    pub fn set_launch_error(&mut self, error: Option<String>) -> bool {
+        if self.launch_error == error {
+            return false;
+        }
+        self.launch_error = error;
+        true
+    }
+
     pub fn sync(&mut self, view: &DesktopProfileView) -> bool {
         if self.seen_generation == view.generation {
             return false;
@@ -94,6 +118,9 @@ impl ProfilePanel {
                 ui.label(&self.status);
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+                if let Some(error) = &self.launch_error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, format!("SSH launch: {error}"));
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Refresh").clicked() {
@@ -215,8 +242,65 @@ impl ProfilePanel {
                                     ui.text_edit_singleline(&mut draft.tags);
                                 });
                                 terminal_fields(ui, &mut draft.record.terminal);
+                                if draft.record.kind == ProfileKind::Ssh {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Host");
+                                        ui.text_edit_singleline(&mut draft.ssh_host);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Port");
+                                        ui.add(
+                                            egui::DragValue::new(&mut draft.ssh_port)
+                                                .range(1..=65535),
+                                        );
+                                        ui.label("User");
+                                        ui.text_edit_singleline(&mut draft.ssh_username);
+                                    });
+                                    let saved_target = catalog.profiles.iter().any(|item| item.id == draft.record.id)
+                                        && catalog.ssh_connections.iter().any(|item| item.profile_id == draft.record.id);
+                                    ui.label("Password is stored in the system keychain, never in the Profile database.");
+                                    ui.label("SSH host key must match ~/.ssh/known_hosts; unknown or changed keys are blocked.");
+                                    ui.horizontal(|ui| {
+                                        ui.label("Password");
+                                        ui.add(egui::TextEdit::singleline(&mut draft.password).password(true).char_limit(4096));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.add_enabled(saved_target && !draft.password.is_empty(), egui::Button::new("Save password")).clicked() {
+                                            command = Some(ProfileClientCommand::SetPassword {
+                                                profile_id: draft.record.id,
+                                                expected_revision: catalog.revision,
+                                                password: std::mem::take(&mut draft.password).into_bytes(),
+                                            });
+                                        }
+                                        if ui.add_enabled(saved_target, egui::Button::new("Remove password")).clicked() {
+                                            draft.password.clear();
+                                            command = Some(ProfileClientCommand::DeletePassword {
+                                                profile_id: draft.record.id,
+                                                expected_revision: catalog.revision,
+                                            });
+                                        }
+                                        if ui.add_enabled(saved_target, egui::Button::new("Open saved SSH Profile")).clicked() {
+                                            command = Some(ProfileClientCommand::OpenProfile(draft.record.id));
+                                        }
+                                    });
+                                }
+                                let target_incomplete = draft.record.kind == ProfileKind::Ssh
+                                    && (draft.ssh_host.trim().is_empty()
+                                        != draft.ssh_username.trim().is_empty());
+                                if target_incomplete {
+                                    ui.colored_label(
+                                        egui::Color32::YELLOW,
+                                        "Enter both host and user, or clear both.",
+                                    );
+                                }
                                 ui.horizontal(|ui| {
-                                    if ui.button("Save Profile").clicked() {
+                                    if ui
+                                        .add_enabled(
+                                            !target_incomplete,
+                                            egui::Button::new("Save Profile"),
+                                        )
+                                        .clicked()
+                                    {
                                         draft.record.tags = draft
                                             .tags
                                             .split(',')
@@ -224,15 +308,44 @@ impl ProfilePanel {
                                             .filter(|tag| !tag.is_empty())
                                             .map(str::to_owned)
                                             .collect();
-                                        command = Some(ProfileClientCommand::Apply {
-                                            expected_revision: catalog.revision,
-                                            changes: vec![ProfileChange {
+                                        let mut changes = vec![ProfileChange {
+                                            change: Some(profile_change::Change::UpsertProfile(
+                                                ProfileRecordData::from(&draft.record),
+                                            )),
+                                        }];
+                                        if draft.record.kind == ProfileKind::Ssh
+                                            && !draft.ssh_host.trim().is_empty()
+                                        {
+                                            let target = SshConnectionRecord {
+                                                profile_id: draft.record.id,
+                                                host: draft.ssh_host.trim().to_owned(),
+                                                port: draft.ssh_port,
+                                                username: draft.ssh_username.trim().to_owned(),
+                                            };
+                                            changes.push(ProfileChange {
                                                 change: Some(
-                                                    profile_change::Change::UpsertProfile(
-                                                        ProfileRecordData::from(&draft.record),
+                                                    profile_change::Change::UpsertSshConnection(
+                                                        SshConnectionData::from(&target),
                                                     ),
                                                 ),
-                                            }],
+                                            });
+                                        } else if draft.had_ssh_connection {
+                                            changes.push(ProfileChange {
+                                                change: Some(
+                                                    profile_change::Change::RemoveSshConnection(
+                                                        draft
+                                                            .record
+                                                            .id
+                                                            .as_uuid()
+                                                            .as_bytes()
+                                                            .to_vec(),
+                                                    ),
+                                                ),
+                                            });
+                                        }
+                                        command = Some(ProfileClientCommand::Apply {
+                                            expected_revision: catalog.revision,
+                                            changes,
                                         });
                                     }
                                     if catalog
@@ -413,9 +526,20 @@ impl ProfilePanel {
     }
 
     fn select_profile(&mut self, record: ProfileRecord) {
+        let connection = self.catalog.as_ref().and_then(|catalog| {
+            catalog
+                .ssh_connections
+                .iter()
+                .find(|connection| connection.profile_id == record.id)
+        });
         self.selected = Some(Selected::Profile(record.id));
         self.profile_draft = Some(ProfileDraft {
             tags: record.tags.iter().cloned().collect::<Vec<_>>().join(", "),
+            ssh_host: connection.map_or_else(String::new, |value| value.host.clone()),
+            ssh_port: connection.map_or(22, |value| value.port),
+            ssh_username: connection.map_or_else(String::new, |value| value.username.clone()),
+            password: String::new(),
+            had_ssh_connection: connection.is_some(),
             record,
         });
         self.folder_draft = None;

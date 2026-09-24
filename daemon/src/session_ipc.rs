@@ -1,7 +1,9 @@
 use crate::{
     LocalSessionError, LocalSessionInfo, LocalSessionRegistry, ProfileIpcService,
-    SessionRegistryError, SubscriptionFrame, TerminalFrameSubscription,
+    SessionRegistryError, SshSession, SshSessionError, SshSessionRegistry, SubscriptionFrame,
+    TerminalFrameSubscription,
 };
+use cshell_domain::{ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{
     Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
     LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse, SessionCreateResponse,
@@ -10,7 +12,11 @@ use cshell_ipc::{
     read_envelope, write_envelope,
 };
 use cshell_output_store::{JournalColor, JournalStyle};
+use cshell_ssh::KnownHostsVerifier;
 use cshell_terminal::{Color, Style};
+use cshell_vault::{
+    KeychainError, ProfilePasswordBinding, ProfilePasswordRef, SystemProfilePasswordVault,
+};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -40,6 +46,8 @@ pub enum SessionIpcError {
 pub struct SessionIpcService {
     registry: Arc<LocalSessionRegistry>,
     profiles: Option<Arc<ProfileIpcService>>,
+    ssh_sessions: Arc<SshSessionRegistry>,
+    known_hosts_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -50,14 +58,21 @@ struct DispatchResult {
 
 impl SessionIpcService {
     #[must_use]
-    pub const fn new(registry: Arc<LocalSessionRegistry>) -> Self {
+    pub fn new(registry: Arc<LocalSessionRegistry>) -> Self {
         Self {
             registry,
             profiles: None,
+            ssh_sessions: Arc::new(SshSessionRegistry::default()),
+            known_hosts_path: None,
         }
     }
 
     #[must_use]
+    pub fn with_known_hosts_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.known_hosts_path = Some(path.into());
+        self
+    }
+
     pub fn with_profiles(mut self, profiles: Arc<ProfileIpcService>) -> Self {
         self.profiles = Some(profiles);
         self
@@ -174,10 +189,17 @@ impl SessionIpcService {
 
     async fn dispatch_with_features(
         &self,
-        request: Envelope,
+        mut request: Envelope,
         negotiated_features: u64,
     ) -> Result<DispatchResult, SessionIpcError> {
-        if let Some(envelope::Payload::ProfileRequest(profile_request)) = &request.payload {
+        if matches!(
+            request.payload.as_ref(),
+            Some(envelope::Payload::ProfileRequest(_))
+        ) {
+            let Some(envelope::Payload::ProfileRequest(profile_request)) = request.payload.take()
+            else {
+                unreachable!("profile payload was matched above")
+            };
             let response = if negotiated_features & cshell_ipc::features::PROFILE_CONTROL == 0 {
                 cshell_ipc::ProfileResponse {
                     status: cshell_ipc::ProfileStatus::Unsupported as i32,
@@ -186,8 +208,37 @@ impl SessionIpcService {
                     preview: None,
                     detail: "Profile control was not negotiated".to_owned(),
                 }
+            } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_TARGET == 0
+                && profile_request.changes.iter().any(|change| {
+                    matches!(
+                        change.change.as_ref(),
+                        Some(cshell_ipc::profile_change::Change::UpsertSshConnection(_))
+                            | Some(cshell_ipc::profile_change::Change::RemoveSshConnection(_))
+                    )
+                })
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    detail: "SSH Profile target control was not negotiated".to_owned(),
+                }
+            } else if matches!(
+                cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                Ok(cshell_ipc::ProfileOperation::SetPassword
+                    | cshell_ipc::ProfileOperation::DeletePassword)
+            ) && negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    detail: "SSH Profile credentials were not negotiated".into(),
+                }
             } else if let Some(profiles) = &self.profiles {
-                profiles.handle(profile_request.clone()).await
+                profiles.handle(profile_request).await
             } else {
                 cshell_ipc::ProfileResponse {
                     status: cshell_ipc::ProfileStatus::Unavailable as i32,
@@ -206,7 +257,154 @@ impl SessionIpcService {
                 subscription: None,
             });
         }
+        if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
+            && let Some(profile_id) = &create.profile_id
+        {
+            let result = if negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
+                Err("SSH Profile sessions were not negotiated".to_owned())
+            } else {
+                self.spawn_ssh_profile(profile_id, create.rows, create.cols)
+                    .await
+            };
+            let (session, detail) = match result {
+                Ok(session) => (Some(session), String::new()),
+                Err(detail) => (None, detail),
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::SessionCreateResponse(
+                        SessionCreateResponse { session, detail },
+                    )),
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SnapshotRequest(snapshot)) = &request.payload {
+            let id = LocalSessionRegistry::parse_session_id(&snapshot.session_id)?;
+            if self.ssh_sessions.contains(id) {
+                let session = self
+                    .ssh_sessions
+                    .get(id)
+                    .map_err(|_| SessionIpcError::UnsupportedRequest)?;
+                let mut subscription = session.subscribe();
+                let Some(SubscriptionFrame::Full(frame)) = subscription.poll() else {
+                    return Err(SessionIpcError::InitialFrameUnavailable);
+                };
+                return Ok(DispatchResult {
+                    response: Envelope {
+                        request_id: request.request_id,
+                        deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::FullFrame(frame)),
+                    },
+                    subscription: Some(subscription),
+                });
+            }
+        }
+        if let Some(envelope::Payload::SessionCloseRequest(close)) = &request.payload {
+            let id = LocalSessionRegistry::parse_session_id(&close.session_id)?;
+            if self.ssh_sessions.contains(id) {
+                let session = self
+                    .ssh_sessions
+                    .remove(id)
+                    .map_err(|_| SessionIpcError::UnsupportedRequest)?;
+                session
+                    .close()
+                    .await
+                    .map_err(|_| SessionIpcError::UnsupportedRequest)?;
+                return Ok(DispatchResult {
+                    response: Envelope {
+                        request_id: request.request_id,
+                        deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::SessionCloseResponse(
+                            SessionCloseResponse {
+                                session_id: close.session_id.clone(),
+                            },
+                        )),
+                    },
+                    subscription: None,
+                });
+            }
+        }
         self.dispatch(request)
+    }
+
+    async fn spawn_ssh_profile(
+        &self,
+        bytes: &[u8],
+        rows: u32,
+        cols: u32,
+    ) -> Result<SessionSummary, String> {
+        let profile_id = ProfileId::from_bytes(bytes.try_into().map_err(|_| "invalid Profile ID")?);
+        let profiles = self
+            .profiles
+            .as_ref()
+            .ok_or("Profile storage unavailable")?;
+        let (title, target) = profiles.ssh_target(profile_id).await?;
+        let rows = u16::try_from(rows)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or("invalid terminal rows")?;
+        let cols = u16::try_from(cols)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or("invalid terminal columns")?;
+        if usize::from(rows) * usize::from(cols) > 1_000_000 {
+            return Err("terminal dimensions exceed the limit".into());
+        }
+        let known_hosts_path = self
+            .known_hosts_path
+            .clone()
+            .map_or_else(default_known_hosts_path, Ok)?;
+        let host = target.host.clone();
+        let port = target.port;
+        let verifier = tokio::task::spawn_blocking(move || {
+            KnownHostsVerifier::load(known_hosts_path, &host, port)
+        })
+        .await
+        .map_err(|_| "known_hosts loading failed")?
+        .map_err(|error| format!("strict known_hosts check cannot start: {error}"))?;
+        let reference = ProfilePasswordRef::from_profile_bytes(*profile_id.as_uuid().as_bytes());
+        let binding = ProfilePasswordBinding {
+            host: target.host.clone(),
+            port: target.port,
+            username: target.username.clone(),
+        };
+        let secret = tokio::task::spawn_blocking(move || {
+            SystemProfilePasswordVault::new().read(&reference, &binding)
+        })
+        .await
+        .map_err(|_| "system keychain task failed")?
+        .map_err(|error| match error {
+            KeychainError::BindingMismatch => "SSH target changed; save its password again",
+            _ => "password unavailable in system keychain; save it from the Profile editor",
+        })?;
+        let password = String::from_utf8(secret.expose().to_vec())
+            .map_err(|_| "stored password is not valid UTF-8")?;
+        let id = SessionId::new();
+        let size = TerminalSize::cells(rows, cols);
+        let session = SshSession::connect(
+            id,
+            title.clone(),
+            crate::ssh_session::SshConnect {
+                username: target.username,
+                verifier,
+                password,
+            },
+            size,
+            &self.registry.journal_path(id),
+            256,
+        )
+        .await
+        .map_err(|error| format!("SSH session failed: {error}"))?;
+        let session = self.ssh_sessions.insert(session);
+        Ok(SessionSummary {
+            session_id: id.as_uuid().as_bytes().to_vec(),
+            title,
+            running: session.running(),
+            generation: session.generation(),
+        })
     }
 
     fn dispatch(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
@@ -225,6 +423,17 @@ impl SessionIpcService {
                     .list()?
                     .into_iter()
                     .map(SessionSummary::from)
+                    .chain(
+                        self.ssh_sessions
+                            .list()
+                            .into_iter()
+                            .map(|session| SessionSummary {
+                                session_id: session.id().as_uuid().as_bytes().to_vec(),
+                                title: session.title().to_owned(),
+                                running: session.running(),
+                                generation: session.generation(),
+                            }),
+                    )
                     .collect();
                 (
                     envelope::Payload::SessionListResponse(SessionListResponse { sessions }),
@@ -238,6 +447,7 @@ impl SessionIpcService {
                 (
                     envelope::Payload::SessionCreateResponse(SessionCreateResponse {
                         session: Some(SessionSummary::from(session)),
+                        detail: String::new(),
                     }),
                     None,
                 )
@@ -349,6 +559,21 @@ impl SessionIpcService {
                 );
             }
         };
+        if self.ssh_sessions.contains(session_id) {
+            let result = self
+                .ssh_sessions
+                .get(session_id)
+                .map_err(|error| ssh_control_status(&error))
+                .and_then(|session| {
+                    session
+                        .send_input(&action)
+                        .map_err(|error| ssh_control_status(&error))
+                });
+            return TerminalControlResponse::new(
+                response_session_id,
+                result.err().unwrap_or(TerminalControlStatus::Accepted),
+            );
+        }
         let result = self
             .registry
             .attach(session_id)
@@ -384,6 +609,21 @@ impl SessionIpcService {
                 );
             }
         };
+        if self.ssh_sessions.contains(session_id) {
+            let result = self
+                .ssh_sessions
+                .get(session_id)
+                .map_err(|error| ssh_control_status(&error))
+                .and_then(|session| {
+                    session
+                        .resize(size)
+                        .map_err(|error| ssh_control_status(&error))
+                });
+            return TerminalControlResponse::new(
+                response_session_id,
+                result.err().unwrap_or(TerminalControlStatus::Accepted),
+            );
+        }
         let result = self
             .registry
             .attach(session_id)
@@ -400,6 +640,17 @@ impl SessionIpcService {
     }
 }
 
+fn default_known_hosts_path() -> Result<std::path::PathBuf, String> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    let home = home.ok_or("cannot locate the user home directory for known_hosts")?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".ssh")
+        .join("known_hosts"))
+}
+
 fn valid_control_session_id(session_id: &[u8]) -> Vec<u8> {
     if session_id.len() == 16 {
         session_id.to_vec()
@@ -413,6 +664,15 @@ fn registry_control_status(error: &SessionRegistryError) -> TerminalControlStatu
         SessionRegistryError::InvalidSessionIdLength(_) => TerminalControlStatus::InvalidRequest,
         SessionRegistryError::UnknownSession(_) => TerminalControlStatus::UnknownSession,
         SessionRegistryError::Session(error) => local_control_status(error),
+        _ => TerminalControlStatus::Failed,
+    }
+}
+
+fn ssh_control_status(error: &SshSessionError) -> TerminalControlStatus {
+    match error {
+        SshSessionError::Backpressure => TerminalControlStatus::Backpressure,
+        SshSessionError::Closed => TerminalControlStatus::SessionClosed,
+        SshSessionError::Unknown(_) => TerminalControlStatus::UnknownSession,
         _ => TerminalControlStatus::Failed,
     }
 }
@@ -579,7 +839,11 @@ mod tests {
                 request_id: 2,
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
-                    cshell_ipc::SessionCreateRequest { rows: 24, cols: 80 },
+                    cshell_ipc::SessionCreateRequest {
+                        rows: 24,
+                        cols: 80,
+                        profile_id: None,
+                    },
                 )),
             })
             .unwrap();

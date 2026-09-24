@@ -11,6 +11,6 @@ pub use id::{ConnectionId, FolderId, ProfileId, SessionId, TargetId, TaskId, Tas
 pub use input::{ControlAction, InputAction, KeyCode, KeyEvent, Modifiers, TerminalSize};
 pub use profile::{
     ProfileFolder, ProfileKind, ProfileRecord, ResolvedField, ResolvedTerminalSettings,
-    SettingSource, TerminalDefaults, TerminalOverrides,
+    SettingSource, SshConnectionRecord, TerminalDefaults, TerminalOverrides,
 };
 pub use state::{ConnectionState, TargetState, TaskState};

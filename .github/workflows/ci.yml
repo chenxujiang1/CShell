@@ -52,13 +52,16 @@ jobs:
         run: |
           dbus-run-session -- bash -euo pipefail -c '
             printf %s cshell-ci-ephemeral | gnome-keyring-daemon --components=secrets --unlock >/dev/null
-            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshell-vault native_roundtrip --locked --target ${{ matrix.target }}
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshell-vault native_ --locked --target ${{ matrix.target }} -- --test-threads=1
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshelld --lib saved_profile_ipc_uses_keychain_and_verified_host --locked --target ${{ matrix.target }}
           '
       - name: Native Windows/macOS keychain round trip
         if: runner.os != 'Linux'
         env:
           CSHELL_KEYCHAIN_NATIVE_TEST: '1'
-        run: cargo test -p cshell-vault native_roundtrip --locked --target ${{ matrix.target }}
+        run: |
+          cargo test -p cshell-vault native_ --locked --target ${{ matrix.target }} -- --test-threads=1
+          cargo test -p cshelld --lib saved_profile_ipc_uses_keychain_and_verified_host --locked --target ${{ matrix.target }}
 
   native-resource-gates:
     strategy:

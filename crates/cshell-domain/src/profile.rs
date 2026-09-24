@@ -59,6 +59,15 @@ pub struct ProfileRecord {
     pub terminal: TerminalOverrides,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshConnectionRecord {
+    pub profile_id: ProfileId,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingSource {
     Global,

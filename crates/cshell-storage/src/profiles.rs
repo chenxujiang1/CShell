@@ -4,8 +4,8 @@ use cshell_application::{
     CatalogSnapshot, ProfileCatalog, ProfileRepository, ProfileRepositoryError,
 };
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, TerminalDefaults,
-    TerminalOverrides,
+    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshConnectionRecord,
+    TerminalDefaults, TerminalOverrides,
 };
 use sqlx::{Row, SqlitePool, query};
 use std::collections::{BTreeSet, HashMap};
@@ -125,6 +125,23 @@ impl ProfileRepository for SqliteProfileRepository {
                 .ok_or(ProfileRepositoryError::Corrupt)?;
             profiles[*index].tags.insert(tag);
         }
+        let connection_rows = query(
+            "SELECT profile_id, host, port, username FROM profile_ssh_connections ORDER BY profile_id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| ProfileRepositoryError::Unavailable)?;
+        let mut ssh_connections = Vec::with_capacity(connection_rows.len());
+        for row in connection_rows {
+            let profile_id: String = row.try_get("profile_id").map_err(corrupt)?;
+            let port: i64 = row.try_get("port").map_err(corrupt)?;
+            ssh_connections.push(SshConnectionRecord {
+                profile_id: parse_profile_id(&profile_id)?,
+                host: row.try_get("host").map_err(corrupt)?,
+                port: u16::try_from(port).map_err(|_| ProfileRepositoryError::Corrupt)?,
+                username: row.try_get("username").map_err(corrupt)?,
+            });
+        }
         tx.commit()
             .await
             .map_err(|_| ProfileRepositoryError::Unavailable)?;
@@ -133,6 +150,7 @@ impl ProfileRepository for SqliteProfileRepository {
             defaults,
             folders,
             profiles,
+            ssh_connections,
         };
         ProfileCatalog::from_snapshot(snapshot.clone())
             .map_err(|_| ProfileRepositoryError::Corrupt)?;
@@ -178,6 +196,10 @@ impl ProfileRepository for SqliteProfileRepository {
             return Err(ProfileRepositoryError::Conflict);
         }
 
+        query("DELETE FROM profile_ssh_connections")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ProfileRepositoryError::Unavailable)?;
         query("DELETE FROM profile_tags")
             .execute(&mut *tx)
             .await
@@ -234,6 +256,19 @@ impl ProfileRepository for SqliteProfileRepository {
                     .await
                     .map_err(|_| ProfileRepositoryError::Unavailable)?;
             }
+        }
+        for connection in &next.ssh_connections {
+            query(
+                "INSERT INTO profile_ssh_connections (profile_id, host, port, username)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(connection.profile_id.to_string())
+            .bind(&connection.host)
+            .bind(i64::from(connection.port))
+            .bind(&connection.username)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ProfileRepositoryError::Unavailable)?;
         }
         tx.commit()
             .await

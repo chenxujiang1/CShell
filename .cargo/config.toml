@@ -3,8 +3,5 @@ xtask = "run --package xtask --"
 cshell-check = "run --package xtask -- check"
 phase0-bench = "run --package xtask -- phase0-bench"
 
-[build]
-incremental = true
-
 [net]
 retry = 10

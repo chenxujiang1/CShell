@@ -8,6 +8,7 @@ mod ipc_server;
 mod local_session;
 mod session_ipc;
 mod session_registry;
+mod ssh_session;
 
 pub use cshell_vault::{KeychainError, ProbeId, Secret, SystemKeychain};
 pub use exit_monitor::{SessionExitMonitor, SessionExitMonitorError};
@@ -21,6 +22,7 @@ pub use session_ipc::{SessionIpcError, SessionIpcService};
 pub use session_registry::{
     LocalSessionAttachment, LocalSessionInfo, LocalSessionRegistry, SessionRegistryError,
 };
+pub use ssh_session::{SshSession, SshSessionError, SshSessionRegistry};
 
 use cshell_domain::TerminalSize;
 use cshell_output_store::{

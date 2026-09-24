@@ -44,5 +44,5 @@ pub use profile::{
     ProfileDefaultsData, ProfileFolderData, ProfileImportAction, ProfileImportItemData,
     ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData, ProfileKindData,
     ProfileOperation, ProfileRecordData, ProfileRequest, ProfileResponse, ProfileStatus,
-    ProfileTerminalOverridesData, decode_id, profile_change,
+    ProfileTerminalOverridesData, SshConnectionData, decode_id, profile_change,
 };

@@ -67,6 +67,7 @@ struct DesktopApp {
     daemon: Option<DesktopDaemonConnection>,
     profiles: Option<DesktopProfileConnection>,
     profile_panel: ProfilePanel,
+    pending_tab: Option<SessionId>,
     terminal_surface: TerminalSurfaceModel,
     terminal_decorations: TerminalDecorations,
     terminal_search: Option<TerminalSearchWorker>,
@@ -297,6 +298,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         }
         if let Some(daemon) = &self.daemon {
             let view = daemon.view();
+            redraw_needed |= self
+                .profile_panel
+                .set_launch_error(view.launch_error.clone());
             if let Some(response) = view.history_search.as_ref()
                 && self
                     .submitted_history_search
@@ -374,6 +378,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
             }
             if let Some(session_id) = view.session_id {
+                if self.pending_tab == Some(session_id) || view.launch_error.is_some() {
+                    self.pending_tab = None;
+                }
+                if self.pending_tab.is_none() && self.view_model.selected != Some(session_id) {
+                    self.terminal_surface = TerminalSurfaceModel::default();
+                    self.terminal_decorations = TerminalDecorations::default();
+                    self.log_surface = None;
+                    self.submitted_log_page = None;
+                    self.view_model.selected = Some(session_id);
+                    redraw_needed = true;
+                }
+                for entry in &mut self.view_model.sessions {
+                    let connected = entry.id == session_id && view.connected;
+                    redraw_needed |= entry.connected != connected;
+                    entry.connected = connected;
+                }
                 if let Some(session) = self
                     .view_model
                     .sessions
@@ -748,6 +768,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let mut confirm_paste = false;
                 let mut cancel_paste = false;
                 let mut profile_command = None;
+                let selected_before_draw = self.view_model.selected;
                 let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
                     profile_command = self.profile_panel.draw(ui.ctx());
@@ -870,6 +891,17 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             });
                     }
                 });
+                if self.view_model.selected != selected_before_draw
+                    && let Some(id) = self.view_model.selected
+                    && let Some(daemon) = &self.daemon
+                    && daemon.view().session_id != Some(id)
+                    && daemon.attach_session(id)
+                {
+                    self.pending_tab = Some(id);
+                    self.terminal_surface = TerminalSurfaceModel::default();
+                    self.terminal_decorations = TerminalDecorations::default();
+                    self.log_surface = None;
+                }
                 if self.view_model.about_open {
                     self.terminal_selecting = false;
                 }
@@ -889,8 +921,24 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     Some(WorkbenchMenuCommand::Quit) => event_loop.exit(),
                     None => {}
                 }
-                if let (Some(profiles), Some(command)) = (&self.profiles, profile_command) {
-                    profiles.request(command);
+                if let Some(command) = profile_command {
+                    match command {
+                        profile_connection::ProfileClientCommand::OpenProfile(id) => {
+                            if let Some(daemon) = &self.daemon {
+                                self.pending_tab = None;
+                                if daemon.open_profile(id) {
+                                    self.terminal_surface = TerminalSurfaceModel::default();
+                                    self.terminal_decorations = TerminalDecorations::default();
+                                    self.log_surface = None;
+                                }
+                            }
+                        }
+                        other => {
+                            if let Some(profiles) = &self.profiles {
+                                profiles.request(other);
+                            }
+                        }
+                    }
                 }
                 if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
                     match action {

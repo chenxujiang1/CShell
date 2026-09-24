@@ -159,7 +159,9 @@ where
             | features::LOG_PAGING
             | features::TERMINAL_CONTROL
             | features::HISTORY_SEARCH
-            | features::PROFILE_CONTROL)
+            | features::PROFILE_CONTROL
+            | features::SSH_PROFILE_TARGET
+            | features::SSH_PROFILE_SESSION)
         == 0
     {
         return Err(ConnectionError::SessionServiceRequired);

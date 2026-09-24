@@ -43,6 +43,8 @@ fn check() -> Result<(), String> {
             "--workspace",
             "--all-targets",
             "--all-features",
+            "--profile",
+            "ci-local",
             "--",
             "-D",
             "warnings",
@@ -50,9 +52,26 @@ fn check() -> Result<(), String> {
     )?;
     run(
         "cargo",
-        &["test", "--workspace", "--all-targets", "--all-features"],
+        &[
+            "test",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--profile",
+            "ci-local",
+        ],
     )?;
-    run("cargo", &["test", "--workspace", "--doc", "--all-features"])?;
+    run(
+        "cargo",
+        &[
+            "test",
+            "--workspace",
+            "--doc",
+            "--all-features",
+            "--profile",
+            "ci-local",
+        ],
+    )?;
     Ok(())
 }
 

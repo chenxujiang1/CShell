@@ -181,3 +181,80 @@ fn native_roundtrip() {
     let _ = keychain.delete(&id);
     assert_eq!(result, Ok(()));
 }
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn password_record_is_bound_to_the_saved_ssh_target() {
+    let binding = ProfilePasswordBinding {
+        host: "host.example".into(),
+        port: 2222,
+        username: "alice".into(),
+    };
+    let secret = Secret::new(b"phase1-password".to_vec());
+    let encoded = encode_profile_password(&binding, &secret).unwrap();
+    assert_eq!(
+        decode_profile_password(&encoded, &binding)
+            .unwrap()
+            .expose(),
+        secret.expose()
+    );
+    let mut changed = binding.clone();
+    changed.host = "other.example".into();
+    assert_eq!(
+        decode_profile_password(&encoded, &changed).unwrap_err(),
+        KeychainError::BindingMismatch
+    );
+    changed = binding.clone();
+    changed.port = 22;
+    assert_eq!(
+        decode_profile_password(&encoded, &changed).unwrap_err(),
+        KeychainError::BindingMismatch
+    );
+    changed = binding.clone();
+    changed.username = "bob".into();
+    assert_eq!(
+        decode_profile_password(&encoded, &changed).unwrap_err(),
+        KeychainError::BindingMismatch
+    );
+    let mut damaged = encoded.to_vec();
+    damaged.pop();
+    assert_eq!(
+        decode_profile_password(&damaged, &binding).unwrap_err(),
+        KeychainError::InvalidCredential
+    );
+}
+
+#[test]
+fn native_profile_password_roundtrip() {
+    if std::env::var_os("CSHELL_KEYCHAIN_NATIVE_TEST").is_none() {
+        return;
+    }
+    let vault = SystemProfilePasswordVault::new();
+    let id = ProfilePasswordRef::from_profile_bytes(*Uuid::now_v7().as_bytes());
+    let binding = ProfilePasswordBinding {
+        host: "example.com".into(),
+        port: 22,
+        username: "alice".into(),
+    };
+    let secret = Secret::new(b"native-profile-secret".to_vec());
+    let result = (|| {
+        vault.write(&id, &binding, &secret)?;
+        if vault.read(&id, &binding)?.expose() != secret.expose() {
+            return Err(KeychainError::OperationFailed);
+        }
+        let changed = ProfilePasswordBinding {
+            host: "other.example".into(),
+            ..binding.clone()
+        };
+        if vault.read(&id, &changed).err() != Some(KeychainError::BindingMismatch) {
+            return Err(KeychainError::OperationFailed);
+        }
+        vault.delete(&id)?;
+        if vault.read(&id, &binding).err() != Some(KeychainError::Missing) {
+            return Err(KeychainError::OperationFailed);
+        }
+        Ok(())
+    })();
+    let _ = vault.delete(&id);
+    assert_eq!(result, Ok(()));
+}
