@@ -1,4 +1,14 @@
 $ErrorActionPreference = 'Stop'
+$phase = 'OpenSSH setup'
+$logPath = $null
+trap {
+    Write-Output "::error title=Windows OpenSSH interop ($phase)::$($_.Exception.Message)"
+    if ($null -ne $logPath -and (Test-Path -LiteralPath $logPath)) {
+        Write-Output 'Windows sshd log:'
+        Get-Content -LiteralPath $logPath
+    }
+    break
+}
 
 $openSshRoot = Join-Path $env:WINDIR 'System32\OpenSSH'
 $sshd = Join-Path $openSshRoot 'sshd.exe'
@@ -25,6 +35,7 @@ $sshdProcess = $null
 New-Item -ItemType Directory -Path $interopRoot | Out-Null
 
 try {
+    $phase = 'generate SSH keys'
     $hostKey = Join-Path $interopRoot 'host_key'
     $clientKey = Join-Path $interopRoot 'client_key'
     $authorizedKeys = Join-Path $interopRoot 'authorized_keys'
@@ -61,8 +72,10 @@ try {
     ) | Set-Content -LiteralPath $configPath -Encoding ascii
 
     $sshdArguments = @('-D', '-e', '-f', $configPath)
+    $phase = 'start sshd'
     $sshdProcess = Start-Process -FilePath $sshd -ArgumentList $sshdArguments -WindowStyle Hidden -PassThru -RedirectStandardError $logPath
 
+    $phase = 'wait for sshd'
     $ready = $false
     for ($attempt = 0; $attempt -lt 150; $attempt++) {
         $sshdProcess.Refresh()
@@ -82,10 +95,10 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not $ready) {
-        if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath }
         throw 'Windows OpenSSH Server did not become ready'
     }
 
+    $phase = 'calculate host fingerprint'
     $fingerprintOutput = & $sshKeygen -q -l -E sha256 -f "$hostKey.pub"
     if ($LASTEXITCODE -ne 0) { throw 'failed to calculate Windows OpenSSH host fingerprint' }
     $fingerprint = ($fingerprintOutput -split '\s+')[1]
@@ -98,11 +111,18 @@ try {
 
     $version = (Get-Item -LiteralPath $sshd).VersionInfo.FileVersion
     Write-Output "Windows OpenSSH Server $version"
+    $phase = 'run SSH interoperability test'
     cargo test -p cshell-ssh --test basic_ssh_interop --all-features --locked -- --test-threads=1
     if ($LASTEXITCODE -ne 0) {
-        if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath }
         throw "Windows OpenSSH interoperability test failed with exit code $LASTEXITCODE"
     }
+} catch {
+    Write-Output "::error title=Windows OpenSSH interop ($phase)::$($_.Exception.Message)"
+    if (Test-Path -LiteralPath $logPath) {
+        Write-Output 'Windows sshd log:'
+        Get-Content -LiteralPath $logPath
+    }
+    throw
 } finally {
     if ($null -ne $sshdProcess) {
         $sshdProcess.Refresh()
