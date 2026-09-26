@@ -13,7 +13,7 @@ use cshell_ipc::{
     ProfileOperation, ProfileRecordData, ProfileRequest, ProfileResponse, ProfileStatus,
     SshConnectionData, decode_id, profile_change,
 };
-use cshell_ssh::{KnownHostsVerifier, import_confirmed_host_key, scan_host_key};
+use cshell_ssh::{KnownHostsVerifier, import_confirmed_host_key};
 use cshell_storage::SqliteProfileRepository;
 use cshell_vault::{
     ProfileKeyPassphraseRef, ProfilePasswordBinding, ProfilePasswordRef, Secret,
@@ -68,7 +68,7 @@ impl ProfileIpcService {
         &self,
         id: ProfileId,
         revision: u64,
-    ) -> Result<SshConnectionRecord, (ProfileStatus, String)> {
+    ) -> Result<crate::ssh_route::SshConnectionPlan, (ProfileStatus, String)> {
         let snapshot = self.service.load().await.map_err(service_error)?.snapshot();
         if snapshot.revision != revision {
             return Err((
@@ -76,38 +76,20 @@ impl ProfileIpcService {
                 "Profile catalog changed; refresh and preview again".into(),
             ));
         }
-        if !snapshot
-            .profiles
-            .iter()
-            .any(|profile| profile.id == id && profile.kind == cshell_domain::ProfileKind::Ssh)
-        {
-            return Err(invalid("saved SSH Profile does not exist"));
-        }
-        snapshot
-            .ssh_connections
-            .into_iter()
-            .find(|target| target.profile_id == id)
-            .ok_or_else(|| invalid("saved SSH Profile has no target"))
+        plan_from_snapshot(&snapshot, id).map_err(invalid)
     }
 
-    pub async fn ssh_target(&self, id: ProfileId) -> Result<(String, SshConnectionRecord), String> {
+    pub(crate) async fn ssh_plan(
+        &self,
+        id: ProfileId,
+    ) -> Result<crate::ssh_route::SshConnectionPlan, String> {
         let snapshot = self
             .service
             .load()
             .await
             .map_err(|error| error.to_string())?
             .snapshot();
-        let profile = snapshot
-            .profiles
-            .iter()
-            .find(|profile| profile.id == id && profile.kind == cshell_domain::ProfileKind::Ssh)
-            .ok_or("saved SSH Profile does not exist")?;
-        let target = snapshot
-            .ssh_connections
-            .into_iter()
-            .find(|connection| connection.profile_id == id)
-            .ok_or("saved SSH Profile has no target")?;
-        Ok((profile.name.clone(), target))
+        plan_from_snapshot(&snapshot, id)
     }
 
     pub async fn handle(&self, request: ProfileRequest) -> ProfileResponse {
@@ -325,7 +307,8 @@ impl ProfileIpcService {
                 let id_bytes = decode_id(&request.credential_profile_id)
                     .map_err(|error| invalid(error.to_string()))?;
                 let id = ProfileId::from_bytes(id_bytes);
-                let target = self.host_key_target(id, request.expected_revision).await?;
+                let plan = self.host_key_target(id, request.expected_revision).await?;
+                let target = plan.target.clone();
                 let path = self.known_hosts_path()?;
                 let verifier = KnownHostsVerifier::load_or_empty(&path, &target.host, target.port)
                     .map_err(|error| (ProfileStatus::Corrupt, error.to_string()))?;
@@ -335,7 +318,7 @@ impl ProfileIpcService {
                         "host already has a known_hosts entry; first-key import is blocked".into(),
                     ));
                 }
-                let scanned = scan_host_key(&target.host, target.port)
+                let scanned = crate::ssh_route::scan_profile(&plan, &path)
                     .await
                     .map_err(|error| (ProfileStatus::Unavailable, error))?;
                 let token: [u8; 32] = rand::random();
@@ -398,14 +381,16 @@ impl ProfileIpcService {
                         .remove(&id_bytes)
                         .ok_or_else(|| invalid("preview the host key again"))?
                 };
-                let target = self.host_key_target(id, request.expected_revision).await?;
-                if target.host != pending.target.host || target.port != pending.target.port {
+                let plan = self.host_key_target(id, request.expected_revision).await?;
+                let target = plan.target.clone();
+                if target != pending.target {
                     return Err((
                         ProfileStatus::Conflict,
                         "SSH target changed; preview again".into(),
                     ));
                 }
-                let scanned = scan_host_key(&target.host, target.port)
+                let path = self.known_hosts_path()?;
+                let scanned = crate::ssh_route::scan_profile(&plan, &path)
                     .await
                     .map_err(|error| (ProfileStatus::Unavailable, error))?;
                 if scanned.public_key_line != pending.public_key_line
@@ -416,7 +401,6 @@ impl ProfileIpcService {
                         "server host key changed after preview; import blocked".into(),
                     ));
                 }
-                let path = self.known_hosts_path()?;
                 let profile_id = id.as_uuid().to_string();
                 tokio::task::spawn_blocking(move || {
                     import_confirmed_host_key(
@@ -445,6 +429,40 @@ impl ProfileIpcService {
             }
         }
     }
+}
+
+fn plan_from_snapshot(
+    snapshot: &CatalogSnapshot,
+    id: ProfileId,
+) -> Result<crate::ssh_route::SshConnectionPlan, String> {
+    let profile = snapshot
+        .profiles
+        .iter()
+        .find(|profile| profile.id == id && profile.kind == cshell_domain::ProfileKind::Ssh)
+        .ok_or("saved SSH Profile does not exist")?;
+    let target = snapshot
+        .ssh_connections
+        .iter()
+        .find(|item| item.profile_id == id)
+        .ok_or("saved SSH Profile has no target")?
+        .clone();
+    let jump = if let cshell_domain::SshRoute::Jump { profile_id } = &target.route {
+        Some(
+            snapshot
+                .ssh_connections
+                .iter()
+                .find(|item| item.profile_id == *profile_id)
+                .ok_or("jump Profile has no target")?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    Ok(crate::ssh_route::SshConnectionPlan {
+        title: profile.name.clone(),
+        target,
+        jump,
+    })
 }
 
 fn decode_policy(raw: i32) -> Result<ImportConflictPolicy, (ProfileStatus, String)> {

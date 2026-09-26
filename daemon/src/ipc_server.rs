@@ -164,6 +164,7 @@ where
             | features::SSH_PROFILE_SESSION
             | features::SSH_PROFILE_AUTH
             | features::SSH_HOST_KEY_IMPORT
+            | features::SSH_PROFILE_ROUTE
             | features::SSH_SESSION_STATUS)
         == 0
     {

@@ -35,6 +35,7 @@ pub mod features {
     pub const SSH_PROFILE_AUTH: u64 = 1 << 9;
     pub const SSH_HOST_KEY_IMPORT: u64 = 1 << 10;
     pub const SSH_SESSION_STATUS: u64 = 1 << 11;
+    pub const SSH_PROFILE_ROUTE: u64 = 1 << 12;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -778,6 +779,7 @@ pub enum SessionFailureCode {
     ProtocolRejected = 9,
     StorageUnavailable = 10,
     Unsupported = 11,
+    ProxyRejected = 12,
 }
 
 #[derive(Clone, PartialEq, Message)]

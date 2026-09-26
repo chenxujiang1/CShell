@@ -186,6 +186,77 @@ pub struct SshConnectionData {
     pub agent_backend: i32,
     #[prost(string, optional, tag = "9")]
     pub agent_identity: Option<String>,
+    #[prost(message, optional, tag = "10")]
+    pub route: Option<SshRouteData>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SshRouteData {
+    #[prost(uint32, tag = "1")]
+    pub kind: u32,
+    #[prost(string, tag = "2")]
+    pub host: String,
+    #[prost(uint32, tag = "3")]
+    pub port: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    pub jump_profile_id: Vec<u8>,
+}
+
+impl From<&cshell_domain::SshRoute> for SshRouteData {
+    fn from(route: &cshell_domain::SshRoute) -> Self {
+        match route {
+            cshell_domain::SshRoute::Direct => Self::default(),
+            cshell_domain::SshRoute::Socks5 { host, port } => Self {
+                kind: 1,
+                host: host.clone(),
+                port: (*port).into(),
+                jump_profile_id: Vec::new(),
+            },
+            cshell_domain::SshRoute::HttpConnect { host, port } => Self {
+                kind: 2,
+                host: host.clone(),
+                port: (*port).into(),
+                jump_profile_id: Vec::new(),
+            },
+            cshell_domain::SshRoute::Jump { profile_id } => Self {
+                kind: 3,
+                jump_profile_id: profile_id.as_uuid().as_bytes().to_vec(),
+                ..Self::default()
+            },
+        }
+    }
+}
+
+impl TryFrom<SshRouteData> for cshell_domain::SshRoute {
+    type Error = ProfileCodecError;
+    fn try_from(value: SshRouteData) -> Result<Self, Self::Error> {
+        match value.kind {
+            0 if value.host.is_empty() && value.port == 0 && value.jump_profile_id.is_empty() => {
+                Ok(Self::Direct)
+            }
+            1 | 2 if value.jump_profile_id.is_empty() => {
+                let port = u16::try_from(value.port)
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .ok_or(ProfileCodecError::InvalidPort)?;
+                Ok(if value.kind == 1 {
+                    Self::Socks5 {
+                        host: value.host,
+                        port,
+                    }
+                } else {
+                    Self::HttpConnect {
+                        host: value.host,
+                        port,
+                    }
+                })
+            }
+            3 if value.host.is_empty() && value.port == 0 => Ok(Self::Jump {
+                profile_id: ProfileId::from_bytes(decode_id(&value.jump_profile_id)?),
+            }),
+            _ => Err(ProfileCodecError::InvalidRoute),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -287,6 +358,8 @@ pub enum ProfileCodecError {
     InvalidPort,
     #[error("SSH authentication method is unknown")]
     InvalidAuthMethod,
+    #[error("invalid SSH route")]
+    InvalidRoute,
     #[error("SSH agent backend is unknown")]
     InvalidAgentBackend,
     #[error("Profile change is missing")]
@@ -427,6 +500,7 @@ impl From<&SshConnectionRecord> for SshConnectionData {
                 SshAgentBackend::Pageant => SshAgentBackendData::Pageant,
             } as i32,
             agent_identity: value.agent_identity.clone(),
+            route: Some(SshRouteData::from(&value.route)),
         }
     }
 }
@@ -460,6 +534,11 @@ impl TryFrom<SshConnectionData> for SshConnectionRecord {
                 SshAgentBackendData::Pageant => SshAgentBackend::Pageant,
             },
             agent_identity: value.agent_identity,
+            route: value
+                .route
+                .map(cshell_domain::SshRoute::try_from)
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 }

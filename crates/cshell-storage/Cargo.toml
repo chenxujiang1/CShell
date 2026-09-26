@@ -10,6 +10,7 @@ publish.workspace = true
 async-trait.workspace = true
 cshell-application = { path = "../cshell-application" }
 cshell-domain = { path = "../cshell-domain" }
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

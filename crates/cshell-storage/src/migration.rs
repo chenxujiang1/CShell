@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 
 const CREATE_SSH_TABLE_SQL: &str = "CREATE TABLE profile_ssh_connections (
             profile_id TEXT PRIMARY KEY REFERENCES profile_records(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
@@ -16,7 +16,8 @@ const CREATE_SSH_TABLE_SQL: &str = "CREATE TABLE profile_ssh_connections (
             private_key_path TEXT,
             certificate_path TEXT,
             agent_backend INTEGER NOT NULL DEFAULT 0 CHECK (agent_backend BETWEEN 0 AND 2),
-            agent_identity TEXT
+            agent_identity TEXT,
+            route_json TEXT NOT NULL DEFAULT '{\"kind\":\"direct\"}'
         )";
 
 pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
@@ -44,11 +45,15 @@ pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
         }
         1 => {
             create_backup(&pool, path).await?;
-            migrate_v1_to_v3(&pool).await?;
+            migrate_v1_to_v4(&pool).await?;
         }
         2 => {
             create_backup(&pool, path).await?;
-            migrate_v3(&pool).await?;
+            migrate_v2_to_v4(&pool).await?;
+        }
+        3 => {
+            create_backup(&pool, path).await?;
+            migrate_v3_to_v4(&pool).await?;
         }
         SCHEMA_VERSION => {}
         other => return Err(StorageError::UnsupportedSchema(other)),
@@ -116,20 +121,20 @@ async fn migrate_new_database(pool: &SqlitePool) -> Result<(), StorageError> {
     .execute(&mut *tx)
     .await?;
     query(CREATE_SSH_TABLE_SQL).execute(&mut *tx).await?;
-    query("PRAGMA user_version = 3").execute(&mut *tx).await?;
+    query("PRAGMA user_version = 4").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_v1_to_v3(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v1_to_v4(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     query(CREATE_SSH_TABLE_SQL).execute(&mut *tx).await?;
-    query("PRAGMA user_version = 3").execute(&mut *tx).await?;
+    query("PRAGMA user_version = 4").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_v3(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v2_to_v4(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     for statement in [
         "ALTER TABLE profile_ssh_connections ADD COLUMN auth_method INTEGER NOT NULL DEFAULT 0 CHECK (auth_method BETWEEN 0 AND 3)",
@@ -137,10 +142,20 @@ async fn migrate_v3(pool: &SqlitePool) -> Result<(), StorageError> {
         "ALTER TABLE profile_ssh_connections ADD COLUMN certificate_path TEXT",
         "ALTER TABLE profile_ssh_connections ADD COLUMN agent_backend INTEGER NOT NULL DEFAULT 0 CHECK (agent_backend BETWEEN 0 AND 2)",
         "ALTER TABLE profile_ssh_connections ADD COLUMN agent_identity TEXT",
+        "ALTER TABLE profile_ssh_connections ADD COLUMN route_json TEXT NOT NULL DEFAULT '{\"kind\":\"direct\"}'",
     ] {
         query(statement).execute(&mut *tx).await?;
     }
-    query("PRAGMA user_version = 3").execute(&mut *tx).await?;
+    query("PRAGMA user_version = 4").execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn migrate_v3_to_v4(pool: &SqlitePool) -> Result<(), StorageError> {
+    let mut tx = pool.begin().await?;
+    query("ALTER TABLE profile_ssh_connections ADD COLUMN route_json TEXT NOT NULL DEFAULT '{\"kind\":\"direct\"}'")
+        .execute(&mut *tx).await?;
+    query("PRAGMA user_version = 4").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }

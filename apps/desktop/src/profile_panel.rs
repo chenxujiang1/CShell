@@ -1,7 +1,7 @@
 use crate::profile_connection::{DesktopProfileCatalog, DesktopProfileView, ProfileClientCommand};
 use cshell_domain::{
     FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAgentBackend, SshAuthMethod,
-    SshConnectionRecord, TerminalOverrides,
+    SshConnectionRecord, SshRoute, TerminalOverrides,
 };
 use cshell_ipc::{
     HostKeyPreviewData, ProfileChange, ProfileFolderData, ProfileImportAction,
@@ -28,10 +28,33 @@ struct ProfileDraft {
     certificate_path: String,
     agent_backend: SshAgentBackend,
     agent_identity: String,
+    route_kind: u8,
+    proxy_host: String,
+    proxy_port: u16,
+    jump_profile_id: Option<ProfileId>,
     password: String,
     key_passphrase: String,
     host_key_confirmation: String,
     had_ssh_connection: bool,
+}
+
+impl ProfileDraft {
+    fn route(&self) -> SshRoute {
+        match self.route_kind {
+            1 => SshRoute::Socks5 {
+                host: self.proxy_host.trim().into(),
+                port: self.proxy_port,
+            },
+            2 => SshRoute::HttpConnect {
+                host: self.proxy_host.trim().into(),
+                port: self.proxy_port,
+            },
+            3 => SshRoute::Jump {
+                profile_id: self.jump_profile_id.unwrap_or(self.record.id),
+            },
+            _ => SshRoute::Direct,
+        }
+    }
 }
 
 impl std::fmt::Debug for ProfileDraft {
@@ -287,6 +310,7 @@ impl ProfilePanel {
                                         item.profile_id == draft.record.id
                                             && item.host == draft.ssh_host.trim()
                                             && item.port == draft.ssh_port
+                                            && item.route == draft.route()
                                     });
                                     if ui.add_enabled(saved_key_target, egui::Button::new("Preview first host key")).clicked() {
                                         draft.host_key_confirmation.clear();
@@ -317,6 +341,32 @@ impl ProfilePanel {
                                                 fingerprint: std::mem::take(&mut draft.host_key_confirmation),
                                             });
                                         }
+                                    }
+                                    egui::ComboBox::from_label("Connection route")
+                                        .selected_text(match draft.route_kind { 1 => "SOCKS5 proxy", 2 => "HTTP CONNECT proxy", 3 => "Single jump Profile", _ => "Direct" })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut draft.route_kind, 0, "Direct");
+                                            ui.selectable_value(&mut draft.route_kind, 1, "SOCKS5 proxy");
+                                            ui.selectable_value(&mut draft.route_kind, 2, "HTTP CONNECT proxy");
+                                            ui.selectable_value(&mut draft.route_kind, 3, "Single jump Profile");
+                                        });
+                                    if matches!(draft.route_kind, 1 | 2) {
+                                        ui.label("Unauthenticated proxy. SSH target host keys are still strictly verified.");
+                                        ui.horizontal(|ui| {
+                                            ui.label("Proxy host"); ui.text_edit_singleline(&mut draft.proxy_host);
+                                            ui.label("Port"); ui.add(egui::DragValue::new(&mut draft.proxy_port).range(1..=65535));
+                                        });
+                                    } else if draft.route_kind == 3 {
+                                        let selected = draft.jump_profile_id.and_then(|id| catalog.profiles.iter().find(|item| item.id == id)).map_or("Choose jump Profile", |item| item.name.as_str());
+                                        egui::ComboBox::from_label("Jump Profile").selected_text(selected).show_ui(ui, |ui| {
+                                            for candidate in &catalog.ssh_connections {
+                                                if candidate.profile_id == draft.record.id || matches!(candidate.route, SshRoute::Jump { .. }) { continue; }
+                                                if let Some(profile) = catalog.profiles.iter().find(|item| item.id == candidate.profile_id) {
+                                                    ui.selectable_value(&mut draft.jump_profile_id, Some(profile.id), &profile.name);
+                                                }
+                                            }
+                                        });
+                                        ui.label("The jump uses its own saved authentication. Confirm the jump host key before previewing the target. Agent forwarding is not enabled.");
                                     }
                                     egui::ComboBox::from_label("Authentication")
                                         .selected_text(match draft.auth_method {
@@ -459,6 +509,7 @@ impl ProfilePanel {
                                                 certificate_path: optional_text(&draft.certificate_path),
                                                 agent_backend: draft.agent_backend,
                                                 agent_identity: optional_text(&draft.agent_identity),
+                                                route: draft.route(),
                                             };
                                             changes.push(ProfileChange {
                                                 change: Some(
@@ -690,6 +741,32 @@ impl ProfilePanel {
             password: String::new(),
             key_passphrase: String::new(),
             host_key_confirmation: String::new(),
+            route_kind: connection.map_or(0, |target| match target.route {
+                SshRoute::Direct => 0,
+                SshRoute::Socks5 { .. } => 1,
+                SshRoute::HttpConnect { .. } => 2,
+                SshRoute::Jump { .. } => 3,
+            }),
+            proxy_host: connection
+                .and_then(|target| match &target.route {
+                    SshRoute::Socks5 { host, .. } | SshRoute::HttpConnect { host, .. } => {
+                        Some(host.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            proxy_port: connection
+                .and_then(|target| match target.route {
+                    SshRoute::Socks5 { port, .. } | SshRoute::HttpConnect { port, .. } => {
+                        Some(port)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(1080),
+            jump_profile_id: connection.and_then(|target| match target.route {
+                SshRoute::Jump { profile_id } => Some(profile_id),
+                _ => None,
+            }),
             had_ssh_connection: connection.is_some(),
             record,
         });

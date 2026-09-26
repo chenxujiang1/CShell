@@ -8,6 +8,7 @@ mod ipc_server;
 mod local_session;
 mod session_ipc;
 mod session_registry;
+mod ssh_route;
 mod ssh_session;
 
 pub use cshell_vault::{KeychainError, ProbeId, Secret, SystemKeychain};

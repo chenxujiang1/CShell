@@ -151,6 +151,7 @@ async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocke
                     certificate_path: None,
                     agent_backend: Default::default(),
                     agent_identity: None,
+                    route: Default::default(),
                 }),
             )),
         },
@@ -283,6 +284,7 @@ async fn profile_control_previews_and_commits_import_once() -> Result<(), Box<dy
                     certificate_path: None,
                     agent_backend: Default::default(),
                     agent_identity: None,
+                    route: Default::default(),
                 }),
             )),
         },
@@ -391,6 +393,7 @@ async fn ssh_target_write_requires_negotiated_feature() -> Result<(), Box<dyn Er
                 certificate_path: None,
                 agent_backend: Default::default(),
                 agent_identity: None,
+                route: Default::default(),
             }),
         )),
     });
@@ -450,6 +453,7 @@ async fn saved_ssh_profile_requires_keychain_password_before_connecting()
                     certificate_path: None,
                     agent_backend: Default::default(),
                     agent_identity: None,
+                    route: Default::default(),
                 }),
             )),
         },
@@ -537,6 +541,7 @@ async fn saved_key_passphrase_control_is_bound_to_profile_key_path() -> Result<(
                         certificate_path: None,
                         agent_backend: Default::default(),
                         agent_identity: None,
+                        route: Default::default(),
                     }),
                 )),
             },
@@ -581,4 +586,75 @@ async fn saved_key_passphrase_control_is_bound_to_profile_key_path() -> Result<(
     .await;
     let _ = vault.delete(&reference);
     result
+}
+
+#[tokio::test]
+async fn ssh_route_write_requires_negotiated_feature() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let profiles = Arc::new(ProfileIpcService::new(
+        SqliteProfileRepository::open(temp.path().join("routes.db")).await?,
+    ));
+    let service = SessionIpcService::new(Arc::new(LocalSessionRegistry::new(
+        temp.path().join("journals"),
+        16,
+    )?))
+    .with_profiles(Arc::clone(&profiles));
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    let serving = tokio::spawn(async move {
+        service
+            .serve_connection_with_features(
+                server,
+                cshell_ipc::features::PROFILE_CONTROL
+                    | cshell_ipc::features::SSH_PROFILE_TARGET
+                    | cshell_ipc::features::SSH_PROFILE_AUTH,
+            )
+            .await
+    });
+    let mut request = request(ProfileOperation::ApplyChanges);
+    request.changes.push(ProfileChange {
+        change: Some(profile_change::Change::UpsertSshConnection(
+            SshConnectionData::from(&SshConnectionRecord {
+                profile_id: ProfileId::new(),
+                host: "target.example.com".into(),
+                port: 22,
+                username: "alice".into(),
+                auth_method: Default::default(),
+                private_key_path: None,
+                certificate_path: None,
+                agent_backend: Default::default(),
+                agent_identity: None,
+                route: cshell_domain::SshRoute::HttpConnect {
+                    host: "proxy.example.com".into(),
+                    port: 8080,
+                },
+            }),
+        )),
+    });
+    write_envelope(
+        &mut client,
+        &Envelope {
+            request_id: 7,
+            payload: Some(envelope::Payload::ProfileRequest(request)),
+            ..Envelope::default()
+        },
+    )
+    .await?;
+    let response = read_envelope(&mut client).await?;
+    let Some(envelope::Payload::ProfileResponse(response)) = response.payload else {
+        return Err("missing Profile response".into());
+    };
+    assert_eq!(response.status, ProfileStatus::Unsupported as i32);
+    assert!(response.detail.contains("routes"));
+    drop(client);
+    serving.await??;
+    let catalog = profiles.handle(ProfileRequest::default()).await;
+    assert_eq!(catalog.revision, 0);
+    assert!(
+        catalog
+            .catalog
+            .ok_or("missing catalog")?
+            .ssh_connections
+            .is_empty()
+    );
+    Ok(())
 }

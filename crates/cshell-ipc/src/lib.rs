@@ -45,5 +45,6 @@ pub use profile::{
     ProfileCodecError, ProfileDefaultsData, ProfileFolderData, ProfileImportAction,
     ProfileImportItemData, ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData,
     ProfileKindData, ProfileOperation, ProfileRecordData, ProfileRequest, ProfileResponse,
-    ProfileStatus, ProfileTerminalOverridesData, SshConnectionData, decode_id, profile_change,
+    ProfileStatus, ProfileTerminalOverridesData, SshConnectionData, SshRouteData, decode_id,
+    profile_change,
 };

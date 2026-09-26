@@ -241,16 +241,16 @@ async fn future_schema_is_not_downgraded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("future.db");
     let pool = raw_pool(&path).await?;
-    query("PRAGMA user_version = 4").execute(&pool).await?;
+    query("PRAGMA user_version = 5").execute(&pool).await?;
     pool.close().await;
     assert!(matches!(
         SqliteProfileRepository::open(&path).await,
-        Err(StorageError::UnsupportedSchema(4))
+        Err(StorageError::UnsupportedSchema(5))
     ));
     assert!(backups(temp.path())?.is_empty());
     let pool = raw_pool(&path).await?;
     let version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     pool.close().await;
     Ok(())
 }
@@ -271,6 +271,10 @@ async fn ssh_target_round_trip_and_failed_update_are_atomic() -> Result<(), Box<
         certificate_path: Some("/keys/server-cert.pub".into()),
         agent_backend: Default::default(),
         agent_identity: None,
+        route: cshell_domain::SshRoute::HttpConnect {
+            host: "proxy.example.com".into(),
+            port: 8080,
+        },
     };
     service
         .apply_batch(
@@ -388,5 +392,60 @@ async fn v1_upgrade_preserves_profiles_and_backs_up_old_schema() -> Result<(), B
         .await?;
     assert_eq!(version, 1);
     backup_pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v3_route_migration_preserves_identity_and_backup_is_restorable()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("v3.db");
+    let record = profile("legacy", None);
+    let target = SshConnectionRecord {
+        profile_id: record.id,
+        host: "target.example.com".into(),
+        port: 2222,
+        username: "alice".into(),
+        auth_method: SshAuthMethod::PrivateKey,
+        private_key_path: Some("/keys/legacy".into()),
+        certificate_path: None,
+        agent_backend: Default::default(),
+        agent_identity: None,
+        route: Default::default(),
+    };
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    service
+        .apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record),
+                CatalogChange::UpsertSshConnection(target.clone()),
+            ],
+        )
+        .await?;
+    service.into_repository().close().await;
+    let pool = raw_pool(&path).await?;
+    query("ALTER TABLE profile_ssh_connections DROP COLUMN route_json")
+        .execute(&pool)
+        .await?;
+    query("PRAGMA user_version = 3").execute(&pool).await?;
+    pool.close().await;
+    let repository = SqliteProfileRepository::open(&path).await?;
+    let snapshot = repository.load().await?;
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.ssh_connections, vec![target.clone()]);
+    repository.close().await;
+    let backups = backups(temp.path())?;
+    assert_eq!(backups.len(), 1);
+    let backup_pool = raw_pool(&backups[0]).await?;
+    let version: i64 = query_scalar("PRAGMA user_version")
+        .fetch_one(&backup_pool)
+        .await?;
+    assert_eq!(version, 3);
+    backup_pool.close().await;
+    cshell_storage::restore_backup(&path, &backups[0]).await?;
+    let repository = SqliteProfileRepository::open(&path).await?;
+    assert_eq!(repository.load().await?.ssh_connections, vec![target]);
+    repository.close().await;
     Ok(())
 }

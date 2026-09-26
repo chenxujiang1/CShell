@@ -2,10 +2,7 @@ use crate::{LatestSnapshot, PipelineIngress, TerminalFrameSubscription, Terminal
 use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{FullFrame, SessionSummary};
 use cshell_output_store::JournalLineIndex;
-use cshell_ssh::{
-    AgentBackend, KnownHostsVerifier, RusshClient, SshCertificate, SshError, SshPrivateKey,
-    SshTerminalWriter, TerminalEvent,
-};
+use cshell_ssh::{KnownHostsVerifier, RusshClient, SshError, SshTerminalWriter, TerminalEvent};
 use cshell_terminal::{InputEncoder, TerminalModes};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,32 +32,7 @@ pub struct SshConnect {
     pub authentication: SshAuthentication,
 }
 
-pub enum SshAuthentication {
-    Password(String),
-    PrivateKey(SshPrivateKey),
-    Certificate {
-        private_key: SshPrivateKey,
-        certificate: Box<SshCertificate>,
-    },
-    Agent {
-        backend: AgentBackend,
-        identity_fingerprint: Option<String>,
-    },
-}
-
-impl std::fmt::Debug for SshAuthentication {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Password(_) => formatter.write_str("Password([REDACTED])"),
-            Self::PrivateKey(_) => formatter.write_str("PrivateKey([REDACTED])"),
-            Self::Certificate { .. } => formatter.write_str("Certificate([REDACTED])"),
-            Self::Agent { backend, .. } => formatter
-                .debug_struct("Agent")
-                .field("backend", backend)
-                .finish_non_exhaustive(),
-        }
-    }
-}
+pub use cshell_ssh::SshAuthentication;
 
 impl std::fmt::Debug for SshConnect {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -85,6 +57,7 @@ pub struct SshSession {
     profile_id: Option<ProfileId>,
     terminal_detail: Arc<Mutex<String>>,
     client: Arc<RusshClient>,
+    jump: Option<crate::ssh_route::JumpConnection>,
     writer: Arc<SshTerminalWriter>,
     pipeline: Mutex<Option<TerminalPipeline>>,
     ingress: Mutex<Option<PipelineIngress>>,
@@ -147,6 +120,26 @@ impl SshSession {
                 .await?
             }
         };
+        Self::from_connection(
+            id,
+            title,
+            crate::ssh_route::RoutedSshConnection { client, jump: None },
+            size,
+            journal_path,
+            ingress_capacity,
+        )
+        .await
+    }
+
+    pub(crate) async fn from_connection(
+        id: SessionId,
+        title: String,
+        connection: crate::ssh_route::RoutedSshConnection,
+        size: TerminalSize,
+        journal_path: &Path,
+        ingress_capacity: usize,
+    ) -> Result<Self, SshSessionError> {
+        let crate::ssh_route::RoutedSshConnection { client, jump } = connection;
         let client = Arc::new(client);
         let terminal = client
             .open_terminal(u32::from(size.rows), u32::from(size.cols))
@@ -165,6 +158,7 @@ impl SshSession {
         let reader_ingress = ingress.clone();
         let reader_closed = Arc::clone(&closed);
         let reader_client = Arc::clone(&client);
+        let reader_jump = jump.clone();
         let reader_task = tokio::spawn(async move {
             while let Some(event) = reader.next_event().await {
                 match event {
@@ -200,6 +194,9 @@ impl SshSession {
             );
             reader_closed.store(true, Ordering::Release);
             let _ = reader_client.disconnect().await;
+            if let Some(jump) = reader_jump {
+                jump.disconnect().await;
+            }
         });
         let command_writer = Arc::clone(&writer);
         let command_closed = Arc::clone(&closed);
@@ -255,6 +252,7 @@ impl SshSession {
             profile_id: None,
             terminal_detail,
             client,
+            jump,
             writer,
             pipeline: Mutex::new(Some(pipeline)),
             ingress: Mutex::new(Some(ingress)),
@@ -367,6 +365,9 @@ impl SshSession {
         }
         let _ = self.writer.close().await;
         let _ = self.client.disconnect().await;
+        if let Some(jump) = &self.jump {
+            jump.disconnect().await;
+        }
         self.ingress
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -877,6 +878,7 @@ mod tests {
                                 certificate_path: None,
                                 agent_backend: Default::default(),
                                 agent_identity: None,
+                                route: Default::default(),
                             }),
                         )),
                     },
@@ -1021,6 +1023,7 @@ mod tests {
                             certificate_path: None,
                             agent_backend: Default::default(),
                             agent_identity: None,
+                            route: Default::default(),
                         }),
                     )),
                 },

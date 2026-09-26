@@ -76,6 +76,26 @@ pub struct SshConnectionRecord {
     pub agent_backend: SshAgentBackend,
     #[serde(default)]
     pub agent_identity: Option<String>,
+    #[serde(default)]
+    pub route: SshRoute,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SshRoute {
+    #[default]
+    Direct,
+    Socks5 {
+        host: String,
+        port: u16,
+    },
+    HttpConnect {
+        host: String,
+        port: u16,
+    },
+    Jump {
+        profile_id: ProfileId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

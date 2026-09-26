@@ -391,7 +391,8 @@ async fn send_inner(
         | features::SSH_PROFILE_TARGET
         | features::SSH_PROFILE_SESSION
         | features::SSH_PROFILE_AUTH
-        | features::SSH_HOST_KEY_IMPORT;
+        | features::SSH_HOST_KEY_IMPORT
+        | features::SSH_PROFILE_ROUTE;
     let negotiated = client_handshake(&mut stream, 1, handshake)
         .await
         .map_err(|error| error.to_string())?;
@@ -402,6 +403,7 @@ async fn send_inner(
         || negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0
         || negotiated.feature_bits & features::SSH_PROFILE_AUTH == 0
         || negotiated.feature_bits & features::SSH_HOST_KEY_IMPORT == 0
+        || negotiated.feature_bits & features::SSH_PROFILE_ROUTE == 0
     {
         return Err("daemon does not support SSH Profile sessions; restart the daemon".into());
     }

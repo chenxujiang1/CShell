@@ -1242,6 +1242,7 @@ dependencies = [
  "async-trait",
  "cshell-application",
  "cshell-domain",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.20",

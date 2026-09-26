@@ -126,7 +126,7 @@ impl ProfileRepository for SqliteProfileRepository {
             profiles[*index].tags.insert(tag);
         }
         let connection_rows = query(
-            "SELECT profile_id, host, port, username, auth_method, private_key_path, certificate_path, agent_backend, agent_identity FROM profile_ssh_connections ORDER BY profile_id",
+            "SELECT profile_id, host, port, username, auth_method, private_key_path, certificate_path, agent_backend, agent_identity, route_json FROM profile_ssh_connections ORDER BY profile_id",
         )
         .fetch_all(&mut *tx)
         .await
@@ -156,6 +156,10 @@ impl ProfileRepository for SqliteProfileRepository {
                     _ => return Err(ProfileRepositoryError::Corrupt),
                 },
                 agent_identity: row.try_get("agent_identity").map_err(corrupt)?,
+                route: serde_json::from_str(
+                    &row.try_get::<String, _>("route_json").map_err(corrupt)?,
+                )
+                .map_err(|_| ProfileRepositoryError::Corrupt)?,
             });
         }
         tx.commit()
@@ -275,8 +279,8 @@ impl ProfileRepository for SqliteProfileRepository {
         }
         for connection in &next.ssh_connections {
             query(
-                "INSERT INTO profile_ssh_connections (profile_id, host, port, username, auth_method, private_key_path, certificate_path, agent_backend, agent_identity)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO profile_ssh_connections (profile_id, host, port, username, auth_method, private_key_path, certificate_path, agent_backend, agent_identity, route_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )
             .bind(connection.profile_id.to_string())
             .bind(&connection.host)
@@ -296,6 +300,7 @@ impl ProfileRepository for SqliteProfileRepository {
                 SshAgentBackend::Pageant => 2,
             })
             .bind(&connection.agent_identity)
+            .bind(serde_json::to_string(&connection.route).map_err(|_| ProfileRepositoryError::Corrupt)?)
             .execute(&mut *tx)
             .await
             .map_err(|_| ProfileRepositoryError::Unavailable)?;

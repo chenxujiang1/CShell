@@ -100,6 +100,10 @@ pub enum CatalogError {
     TooManyTags,
     #[error("SSH connection target is invalid")]
     InvalidSshTarget,
+    #[error(
+        "jump Profile must exist, have an SSH target, and use a direct or proxy route; only one jump is supported"
+    )]
+    InvalidJumpProfile,
     #[error("SSH connection belongs to a non-SSH Profile {0}")]
     InvalidSshProfile(ProfileId),
     #[error("SSH connection target is duplicated for Profile {0}")]
@@ -507,6 +511,27 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
     }
     let mut connection_ids = BTreeSet::new();
     for connection in &snapshot.ssh_connections {
+        match &connection.route {
+            cshell_domain::SshRoute::Socks5 { host, port }
+            | cshell_domain::SshRoute::HttpConnect { host, port }
+                if *port == 0 || !valid_target_field(host, MAX_SSH_HOST_BYTES) =>
+            {
+                return Err(CatalogError::InvalidSshTarget);
+            }
+            cshell_domain::SshRoute::Jump { profile_id } => {
+                let jump = snapshot
+                    .ssh_connections
+                    .iter()
+                    .find(|item| item.profile_id == *profile_id)
+                    .ok_or(CatalogError::InvalidJumpProfile)?;
+                if *profile_id == connection.profile_id
+                    || matches!(jump.route, cshell_domain::SshRoute::Jump { .. })
+                {
+                    return Err(CatalogError::InvalidJumpProfile);
+                }
+            }
+            _ => {}
+        }
         if !connection_ids.insert(connection.profile_id) {
             return Err(CatalogError::DuplicateSshConnection(connection.profile_id));
         }
@@ -721,6 +746,7 @@ mod tests {
             certificate_path: None,
             agent_backend: Default::default(),
             agent_identity: None,
+            route: Default::default(),
         };
         assert!(matches!(
             catalog.preview_batch(&[CatalogChange::UpsertSshConnection(target.clone())]),
@@ -777,6 +803,62 @@ mod tests {
         );
         catalog.apply_batch(1, &[CatalogChange::RemoveProfile(record.id)])?;
         assert!(catalog.snapshot().ssh_connections.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn jump_routes_reject_missing_self_nested_and_deleted_profiles_atomically()
+    -> Result<(), CatalogError> {
+        let jump = profile("jump", None);
+        let target = profile("target", None);
+        let connection = |id| SshConnectionRecord {
+            profile_id: id,
+            host: "host.example.com".into(),
+            port: 22,
+            username: "alice".into(),
+            auth_method: Default::default(),
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
+            route: Default::default(),
+        };
+        let jump_target = connection(jump.id);
+        let mut target_connection = connection(target.id);
+        target_connection.route = cshell_domain::SshRoute::Jump {
+            profile_id: jump.id,
+        };
+        let mut catalog = ProfileCatalog::from_snapshot(CatalogSnapshot::default())?;
+        catalog.apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(jump.clone()),
+                CatalogChange::UpsertProfile(target.clone()),
+                CatalogChange::UpsertSshConnection(jump_target.clone()),
+                CatalogChange::UpsertSshConnection(target_connection.clone()),
+            ],
+        )?;
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::RemoveProfile(jump.id)]),
+            Err(CatalogError::InvalidJumpProfile)
+        );
+        for id in [target.id, ProfileId::new()] {
+            let mut changed = target_connection.clone();
+            changed.route = cshell_domain::SshRoute::Jump { profile_id: id };
+            assert_eq!(
+                catalog.apply_batch(1, &[CatalogChange::UpsertSshConnection(changed)]),
+                Err(CatalogError::InvalidJumpProfile)
+            );
+        }
+        let mut changed = jump_target;
+        changed.route = cshell_domain::SshRoute::Jump {
+            profile_id: target.id,
+        };
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertSshConnection(changed)]),
+            Err(CatalogError::InvalidJumpProfile)
+        );
+        assert_eq!(catalog.snapshot().revision, 1);
+        assert_eq!(catalog.snapshot().ssh_connections[1], target_connection);
         Ok(())
     }
 }

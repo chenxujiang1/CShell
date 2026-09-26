@@ -3,7 +3,7 @@ use crate::{
     SessionRegistryError, SshSession, SshSessionError, SshSessionRegistry, SubscriptionFrame,
     TerminalFrameSubscription,
 };
-use cshell_domain::{ProfileId, SessionId, SshAgentBackend, SshAuthMethod, TerminalSize};
+use cshell_domain::{ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{
     Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
     LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse, SessionCreateResponse,
@@ -12,15 +12,8 @@ use cshell_ipc::{
     TerminalStyle, envelope, read_envelope, write_envelope,
 };
 use cshell_output_store::{JournalColor, JournalStyle};
-use cshell_ssh::{
-    AgentBackend, HostKeyCheck, KnownHostsError, KnownHostsVerifier, SshCertificate, SshError,
-    SshPrivateKey,
-};
+use cshell_ssh::{HostKeyCheck, SshError};
 use cshell_terminal::{Color, Style};
-use cshell_vault::{
-    KeychainError, ProfileKeyPassphraseRef, ProfilePasswordBinding, ProfilePasswordRef,
-    SystemProfileKeyPassphraseVault, SystemProfilePasswordVault,
-};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -61,12 +54,12 @@ struct DispatchResult {
     subscription: Option<TerminalFrameSubscription>,
 }
 
-struct SshLaunchFailure {
-    code: SessionFailureCode,
-    detail: String,
+pub(crate) struct SshLaunchFailure {
+    pub(crate) code: SessionFailureCode,
+    pub(crate) detail: String,
 }
 impl SshLaunchFailure {
-    fn new(code: SessionFailureCode, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(code: SessionFailureCode, detail: impl Into<String>) -> Self {
         Self {
             code,
             detail: detail.into(),
@@ -280,6 +273,22 @@ impl SessionIpcService {
                     detail: "SSH host-key import was not negotiated".into(),
                     ..cshell_ipc::ProfileResponse::default()
                 }
+            } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_ROUTE == 0
+                && profile_request.changes.iter().any(|change| {
+                    matches!(
+                        &change.change,
+                        Some(
+                            cshell_ipc::profile_change::Change::UpsertSshConnection(_)
+                                | cshell_ipc::profile_change::Change::RemoveSshConnection(_)
+                        )
+                    )
+                })
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "SSH Profile routes were not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
+                }
             } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_AUTH == 0
                 && (matches!(
                     cshell_ipc::ProfileOperation::try_from(profile_request.operation),
@@ -419,7 +428,7 @@ impl SessionIpcService {
                 "Profile storage unavailable",
             )
         })?;
-        let (title, target) = profiles.ssh_target(profile_id).await?;
+        let plan = profiles.ssh_plan(profile_id).await?;
         let rows = u16::try_from(rows)
             .ok()
             .filter(|value| *value > 0)
@@ -435,119 +444,13 @@ impl SessionIpcService {
             .known_hosts_path
             .clone()
             .map_or_else(default_known_hosts_path, Ok)?;
-        let host = target.host.clone();
-        let port = target.port;
-        let verifier = tokio::task::spawn_blocking(move || {
-            KnownHostsVerifier::load(known_hosts_path, &host, port)
-        })
-        .await
-        .map_err(|_| "known_hosts loading failed")?
-        .map_err(|error| {
-            let code = if matches!(&error, KnownHostsError::Io(error) if error.kind() == std::io::ErrorKind::NotFound) {
-                SessionFailureCode::HostKeyUnknown
-            } else { SessionFailureCode::HostKeyDataInvalid };
-            SshLaunchFailure::new(code, format!("strict known_hosts check cannot start: {error}"))
-        })?;
-        let authentication = async {
-            let authentication = match target.auth_method {
-            SshAuthMethod::Password => {
-                let reference =
-                    ProfilePasswordRef::from_profile_bytes(*profile_id.as_uuid().as_bytes());
-                let binding = ProfilePasswordBinding {
-                    host: target.host.clone(),
-                    port: target.port,
-                    username: target.username.clone(),
-                };
-                let secret = tokio::task::spawn_blocking(move || {
-                    SystemProfilePasswordVault::new().read(&reference, &binding)
-                })
-                .await
-                .map_err(|_| "system keychain task failed")?
-                .map_err(|error| match error {
-                    KeychainError::BindingMismatch => "SSH target changed; save its password again",
-                    _ => "password unavailable in system keychain; save it from the Profile editor",
-                })?;
-                let password = String::from_utf8(secret.expose().to_vec())
-                    .map_err(|_| "stored password is not valid UTF-8")?;
-                crate::ssh_session::SshAuthentication::Password(password)
-            }
-            SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
-                let path = target
-                    .private_key_path
-                    .as_deref()
-                    .ok_or("SSH Profile has no private key reference")?;
-                let encoded = read_ssh_auth_file(path, "private key").await?;
-                let private_key = match SshPrivateKey::decode_openssh(&encoded, None) {
-                    Ok(private_key) => private_key,
-                    Err(unprotected_error) => {
-                        let reference = ProfileKeyPassphraseRef::from_profile_bytes(
-                            *profile_id.as_uuid().as_bytes(),
-                        );
-                        let key_path = path.to_owned();
-                        let secret = tokio::task::spawn_blocking(move || {
-                            SystemProfileKeyPassphraseVault::new().read(&reference, &key_path)
-                        })
-                        .await
-                        .map_err(|_| "system keychain task failed")?
-                        .map_err(|error| match error {
-                            KeychainError::Missing => format!(
-                                "private key cannot be opened without a passphrase: {unprotected_error}"
-                            ),
-                            KeychainError::BindingMismatch => {
-                                "private key path changed; save its passphrase again".into()
-                            }
-                            _ => "key passphrase unavailable in system keychain".into(),
-                        })?;
-                        let passphrase = Zeroizing::new(
-                            String::from_utf8(secret.expose().to_vec())
-                                .map_err(|_| "stored key passphrase is not valid UTF-8")?,
-                        );
-                        SshPrivateKey::decode_openssh(&encoded, Some(&passphrase))
-                            .map_err(|error| format!("private key unavailable: {error}"))?
-                    }
-                };
-                if target.auth_method == SshAuthMethod::Certificate {
-                    let path = target
-                        .certificate_path
-                        .as_deref()
-                        .ok_or("SSH Profile has no certificate reference")?;
-                    let encoded = read_ssh_auth_file(path, "certificate").await?;
-                    let certificate = SshCertificate::decode_openssh(&encoded)
-                        .map_err(|error| format!("certificate unavailable: {error}"))?;
-                    crate::ssh_session::SshAuthentication::Certificate {
-                        private_key,
-                        certificate: Box::new(certificate),
-                    }
-                } else {
-                    crate::ssh_session::SshAuthentication::PrivateKey(private_key)
-                }
-            }
-            SshAuthMethod::Agent => {
-                let backend = match target.agent_backend {
-                    SshAgentBackend::Auto => AgentBackend::Auto,
-                    SshAgentBackend::OpenSsh => AgentBackend::OpenSsh,
-                    SshAgentBackend::Pageant => AgentBackend::Pageant,
-                };
-                crate::ssh_session::SshAuthentication::Agent {
-                    backend,
-                    identity_fingerprint: target.agent_identity.clone(),
-                }
-            }
-            };
-            Ok::<_, String>(authentication)
-        }
-        .await
-        .map_err(|detail| SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, detail))?;
+        let connection = crate::ssh_route::connect_profile(&plan, &known_hosts_path).await?;
         let id = SessionId::new();
         let size = TerminalSize::cells(rows, cols);
-        let session = SshSession::connect(
+        let session = SshSession::from_connection(
             id,
-            title.clone(),
-            crate::ssh_session::SshConnect {
-                username: target.username,
-                verifier,
-                authentication,
-            },
+            plan.title.clone(),
+            connection,
             size,
             &self.registry.journal_path(id),
             256,
@@ -789,7 +692,10 @@ impl SessionIpcService {
     }
 }
 
-async fn read_ssh_auth_file(path: &str, label: &str) -> Result<Zeroizing<String>, String> {
+pub(crate) async fn read_ssh_auth_file(
+    path: &str,
+    label: &str,
+) -> Result<Zeroizing<String>, String> {
     const MAX_AUTH_FILE_BYTES: u64 = 1024 * 1024;
     let path = std::path::Path::new(path);
     if !path.is_absolute() {
@@ -814,8 +720,11 @@ async fn read_ssh_auth_file(path: &str, label: &str) -> Result<Zeroizing<String>
         .map_err(|_| format!("{label} file is not UTF-8"))
 }
 
-fn ssh_launch_failure(error: SshSessionError) -> SshLaunchFailure {
+pub(crate) fn ssh_launch_failure(error: SshSessionError) -> SshLaunchFailure {
     let (code, detail) = match error {
+        SshSessionError::Ssh(SshError::ProxyRejected(detail)) => {
+            (SessionFailureCode::ProxyRejected, detail)
+        }
         SshSessionError::Ssh(SshError::HostKeyRejected(HostKeyCheck::Unknown)) => (
             SessionFailureCode::HostKeyUnknown,
             "Unknown SSH host key. Preview and confirm its fingerprint in the Profile editor.",
