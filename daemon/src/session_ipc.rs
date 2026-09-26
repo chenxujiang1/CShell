@@ -902,7 +902,7 @@ impl From<LocalSessionInfo> for SessionSummary {
             generation: info.generation,
             profile_id: info.profile_id.map(|id| id.as_uuid().as_bytes().to_vec()),
             terminal_detail: if info.running {
-                String::new()
+                info.launch_detail.unwrap_or_default()
             } else {
                 "Local terminal exited".into()
             },

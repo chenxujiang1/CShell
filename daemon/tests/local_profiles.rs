@@ -317,7 +317,46 @@ async fn saved_local_profiles_launch_literal_args_cwd_env_and_keep_identity()
         save(&service, 4, &record, &target).await?.status,
         ProfileStatus::Ok as i32
     );
-    assert!(create(&service, record.id).await?.session.is_none());
+    std::fs::remove_file(&output)?;
+    let fallback = create(&service, record.id).await?;
+    assert_eq!(fallback.failure_code, SessionFailureCode::None as i32);
+    let fallback = fallback.session.ok_or("missing fallback session")?;
+    assert!(
+        fallback
+            .terminal_detail
+            .contains("working directory is unavailable")
+    );
+    let observed = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(bytes) = tokio::fs::read(&output).await
+                && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            {
+                break value;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    assert_eq!(
+        std::fs::canonicalize(observed["cwd"].as_str().ok_or("missing fallback cwd")?)?,
+        std::fs::canonicalize(cshell_local::home_directory().ok_or("home unavailable")?)?
+    );
+    let envelope::Payload::SessionListResponse(list) = exchange(
+        &service,
+        envelope::Payload::SessionListRequest(cshell_ipc::SessionListRequest::default()),
+    )
+    .await?
+    else {
+        return Err("missing session list".into());
+    };
+    assert_eq!(list.sessions[0].terminal_detail, fallback.terminal_detail);
+    exchange(
+        &service,
+        envelope::Payload::SessionCloseRequest(SessionCloseRequest {
+            session_id: fallback.session_id,
+        }),
+    )
+    .await?;
     assert_eq!(registry.list()?.len(), 0);
     Ok(())
 }

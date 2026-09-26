@@ -1586,7 +1586,9 @@ fn update_session_lifecycle(
                 })
                 .transpose()?;
             view.session_running = session.running;
-            if !session.running {
+            if session.running && !session.terminal_detail.is_empty() {
+                view.terminal_detail = session.terminal_detail.clone();
+            } else if !session.running {
                 view.terminal_detail = if session.terminal_detail.is_empty() {
                     "Terminal disconnected; reconnecting opens a New Shell".into()
                 } else {
@@ -2624,5 +2626,31 @@ mod tests {
             result,
             Err(super::DesktopConnectionError::SessionUnavailable)
         ));
+    }
+    #[test]
+    fn running_local_session_displays_working_directory_fallback() {
+        let id = SessionId::new();
+        let shared =
+            std::sync::Arc::new(std::sync::Mutex::new(super::DesktopDaemonView::default()));
+        let warning =
+            "Configured working directory is unavailable; using home directory: /home/test";
+        super::update_session_lifecycle(
+            &shared,
+            id,
+            &cshell_ipc::SessionListResponse {
+                sessions: vec![cshell_ipc::SessionSummary {
+                    session_id: id.as_uuid().as_bytes().to_vec(),
+                    running: true,
+                    terminal_detail: warning.into(),
+                    ..cshell_ipc::SessionSummary::default()
+                }],
+            },
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(view.session_running);
+        assert!(view.detail.contains(warning));
     }
 }

@@ -46,6 +46,7 @@ pub enum SessionRegistryError {
 struct ManagedLocalSession {
     title: String,
     profile_id: Option<ProfileId>,
+    launch_detail: Option<String>,
     session: LocalTerminalSession,
     exit: Option<LocalSessionExit>,
 }
@@ -55,6 +56,7 @@ pub struct LocalSessionInfo {
     pub session_id: SessionId,
     pub title: String,
     pub profile_id: Option<ProfileId>,
+    pub launch_detail: Option<String>,
     pub running: bool,
     pub generation: u64,
 }
@@ -149,7 +151,7 @@ impl LocalSessionRegistry {
         profile: &LocalProfile,
         size: TerminalSize,
     ) -> Result<LocalSessionAttachment, SessionRegistryError> {
-        self.spawn_local_inner(profile, size, None)
+        self.spawn_local_inner(profile, size, None, None)
     }
 
     pub fn spawn_saved_local(
@@ -158,7 +160,24 @@ impl LocalSessionRegistry {
         profile: &LocalProfile,
         size: TerminalSize,
     ) -> Result<LocalSessionInfo, SessionRegistryError> {
-        let attachment = self.spawn_local_inner(profile, size, Some(profile_id))?;
+        let mut profile = profile.clone();
+        let launch_detail = if matches!(&profile.cwd_policy, cshell_local::WorkingDirectoryPolicy::Explicit(path) if !path.is_dir())
+        {
+            let home = cshell_local::home_directory().ok_or_else(|| {
+                LocalSessionError::from(cshell_local::LocalPtyError::InvalidProfile(
+                    "configured directory and home directory are unavailable",
+                ))
+            })?;
+            let detail = format!(
+                "Configured working directory is unavailable; using home directory: {}",
+                home.display()
+            );
+            profile.cwd_policy = cshell_local::WorkingDirectoryPolicy::Explicit(home);
+            Some(detail)
+        } else {
+            None
+        };
+        let attachment = self.spawn_local_inner(&profile, size, Some(profile_id), launch_detail)?;
         self.session_info(attachment.session_id())
     }
 
@@ -167,6 +186,7 @@ impl LocalSessionRegistry {
         profile: &LocalProfile,
         size: TerminalSize,
         profile_id: Option<ProfileId>,
+        launch_detail: Option<String>,
     ) -> Result<LocalSessionAttachment, SessionRegistryError> {
         let session_id = SessionId::new();
         let journal_path = self.journal_path(session_id);
@@ -193,6 +213,7 @@ impl LocalSessionRegistry {
         let managed = Arc::new(Mutex::new(ManagedLocalSession {
             title: profile.name.clone(),
             profile_id,
+            launch_detail,
             session,
             exit: None,
         }));
@@ -501,6 +522,7 @@ impl LocalSessionRegistry {
             session_id,
             title: managed.title.clone(),
             profile_id: managed.profile_id,
+            launch_detail: managed.launch_detail.clone(),
             running: managed.exit.is_none(),
             generation: managed
                 .session
