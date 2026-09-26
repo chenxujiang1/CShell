@@ -47,6 +47,7 @@ struct ManagedLocalSession {
     title: String,
     profile_id: Option<ProfileId>,
     launch_detail: Option<String>,
+    close_policy: cshell_domain::LocalClosePolicy,
     session: LocalTerminalSession,
     exit: Option<LocalSessionExit>,
 }
@@ -151,7 +152,13 @@ impl LocalSessionRegistry {
         profile: &LocalProfile,
         size: TerminalSize,
     ) -> Result<LocalSessionAttachment, SessionRegistryError> {
-        self.spawn_local_inner(profile, size, None, None)
+        self.spawn_local_inner(
+            profile,
+            size,
+            None,
+            None,
+            cshell_domain::LocalClosePolicy::KeepAlive,
+        )
     }
 
     pub fn spawn_saved_local(
@@ -159,6 +166,7 @@ impl LocalSessionRegistry {
         profile_id: ProfileId,
         profile: &LocalProfile,
         size: TerminalSize,
+        close_policy: cshell_domain::LocalClosePolicy,
     ) -> Result<LocalSessionInfo, SessionRegistryError> {
         let mut profile = profile.clone();
         let launch_detail = if matches!(&profile.cwd_policy, cshell_local::WorkingDirectoryPolicy::Explicit(path) if !path.is_dir())
@@ -177,7 +185,13 @@ impl LocalSessionRegistry {
         } else {
             None
         };
-        let attachment = self.spawn_local_inner(&profile, size, Some(profile_id), launch_detail)?;
+        let attachment = self.spawn_local_inner(
+            &profile,
+            size,
+            Some(profile_id),
+            launch_detail,
+            close_policy,
+        )?;
         self.session_info(attachment.session_id())
     }
 
@@ -187,6 +201,7 @@ impl LocalSessionRegistry {
         size: TerminalSize,
         profile_id: Option<ProfileId>,
         launch_detail: Option<String>,
+        close_policy: cshell_domain::LocalClosePolicy,
     ) -> Result<LocalSessionAttachment, SessionRegistryError> {
         let session_id = SessionId::new();
         let journal_path = self.journal_path(session_id);
@@ -214,6 +229,7 @@ impl LocalSessionRegistry {
             title: profile.name.clone(),
             profile_id,
             launch_detail,
+            close_policy,
             session,
             exit: None,
         }));
@@ -393,6 +409,20 @@ impl LocalSessionRegistry {
             }
         }
         Ok(exits)
+    }
+
+    /// Only an explicit view-close request applies this policy. Client disconnects
+    /// and crashes never terminate a terminal.
+    pub fn close_view(&self, session_id: SessionId) -> Result<(), SessionRegistryError> {
+        let policy = self
+            .lookup(session_id)?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .close_policy;
+        if policy == cshell_domain::LocalClosePolicy::TerminateOnViewClose {
+            self.close(session_id)?;
+        }
+        Ok(())
     }
 
     /// Removes a session. A running child is terminated before its registry entry is lost.

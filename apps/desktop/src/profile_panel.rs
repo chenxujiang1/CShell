@@ -25,6 +25,9 @@ struct LocalDraft {
     cwd_kind: u8,
     cwd_path: String,
     env: Vec<(String, String)>,
+    close_policy: cshell_domain::LocalClosePolicy,
+    launch_cwd: String,
+    launch_env: Vec<(String, String)>,
 }
 
 impl LocalDraft {
@@ -49,6 +52,8 @@ impl LocalDraft {
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
+            close_policy: connection.close_policy,
+            ..Self::default()
         }
     }
     fn record(&self, profile_id: ProfileId) -> Result<LocalConnectionRecord, String> {
@@ -58,6 +63,7 @@ impl LocalDraft {
         }
         let record = LocalConnectionRecord {
             profile_id,
+            close_policy: self.close_policy,
             program: self.program.clone(),
             args: self.args.clone(),
             cwd: match self.cwd_kind {
@@ -72,6 +78,28 @@ impl LocalDraft {
         cshell_application::validate_local_connection(&record)
             .map_err(|error| error.to_string())?;
         Ok(record)
+    }
+
+    fn launch_options(
+        &self,
+        saved: &LocalConnectionRecord,
+    ) -> Result<cshell_ipc::LocalLaunchOptions, String> {
+        let env_overrides: BTreeMap<_, _> = self.launch_env.iter().cloned().collect();
+        if env_overrides.len() != self.launch_env.len() {
+            return Err("Environment names must be unique".into());
+        }
+        let cwd_path = (!self.launch_cwd.is_empty()).then(|| self.launch_cwd.clone());
+        let mut checked = saved.clone();
+        checked.env_overrides.clone_from(&env_overrides);
+        if let Some(path) = &cwd_path {
+            checked.cwd = LocalWorkingDirectory::Explicit { path: path.clone() };
+        }
+        cshell_application::validate_local_connection(&checked)
+            .map_err(|error| error.to_string())?;
+        Ok(cshell_ipc::LocalLaunchOptions {
+            cwd_path,
+            env_overrides,
+        })
     }
 }
 
@@ -539,6 +567,27 @@ impl ProfilePanel {
                                     if ui.add_enabled(saved_local, egui::Button::new("Open saved Local Profile")).clicked() {
                                         command = Some(ProfileClientCommand::OpenProfile(draft.record.id));
                                     }
+                                    ui.collapsing("Open once with overrides", |ui| {
+                                        ui.label("Uses the saved Profile. These overrides are not saved; New Shell uses the saved configuration.");
+                                        ui.horizontal(|ui| {
+                                            ui.label("Directory (empty uses Profile)");
+                                            ui.text_edit_singleline(&mut draft.local.launch_cwd);
+                                        });
+                                        ui.label("Use non-secret values. Environment overrides are sent to the local process.");
+                                        draw_environment_rows(ui, &mut draft.local.launch_env);
+                                        if let Some(saved) = catalog.local_connections.iter().find(|item| item.profile_id == draft.record.id) {
+                                            match draft.local.launch_options(saved) {
+                                                Ok(options) => {
+                                                    if ui.button("Open with these overrides").clicked() {
+                                                        command = Some(ProfileClientCommand::OpenLocal(draft.record.id, options));
+                                                        draft.local.launch_cwd.clear();
+                                                        draft.local.launch_env.clear();
+                                                    }
+                                                }
+                                                Err(error) => { ui.colored_label(egui::Color32::YELLOW, error); }
+                                            }
+                                        }
+                                    });
                                 }
                                 let local_target = draft.local.record(draft.record.id);
                                 if draft.record.kind == ProfileKind::Local && let Err(error) = &local_target {
@@ -942,6 +991,24 @@ fn draw_local_fields(
     shells: &[cshell_ipc::LocalShellData],
 ) -> bool {
     ui.heading("Local program");
+    egui::ComboBox::from_label("When closing this view")
+        .selected_text(match draft.close_policy {
+            cshell_domain::LocalClosePolicy::KeepAlive => "Keep session running",
+            cshell_domain::LocalClosePolicy::TerminateOnViewClose => "Terminate the process",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(
+                &mut draft.close_policy,
+                cshell_domain::LocalClosePolicy::KeepAlive,
+                "Keep session running",
+            );
+            ui.selectable_value(
+                &mut draft.close_policy,
+                cshell_domain::LocalClosePolicy::TerminateOnViewClose,
+                "Terminate the process",
+            );
+        });
+    ui.label("Applies when explicitly closing a view. Disconnects and application exit keep the session running.");
     let mut refresh = false;
     ui.horizontal(|ui| {
         egui::ComboBox::from_label("Installed shells")
@@ -1004,29 +1071,34 @@ fn draw_local_fields(
         ui.label(
             "Values are saved as plain configuration. Use these fields for non-secret values.",
         );
-        let mut remove = None;
-        for (index, (key, value)) in draft.env.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(key);
-                ui.label("=");
-                ui.text_edit_singleline(value);
-                if ui.button("Remove").clicked() {
-                    remove = Some(index);
-                }
-            });
-        }
-        if let Some(index) = remove {
-            draft.env.remove(index);
-        }
-        if ui
-            .add_enabled(
-                draft.env.len() < 128,
-                egui::Button::new("Add environment override"),
-            )
-            .clicked()
-        {
-            draft.env.push((String::new(), String::new()));
-        }
+        draw_environment_rows(ui, &mut draft.env);
     });
     refresh
+}
+
+fn draw_environment_rows(ui: &mut egui::Ui, env: &mut Vec<(String, String)>) {
+    ui.label("CSHELL_ environment names are reserved.");
+    let mut remove = None;
+    for (index, (key, value)) in env.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(key);
+            ui.label("=");
+            ui.text_edit_singleline(value);
+            if ui.button("Remove").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        env.remove(index);
+    }
+    if ui
+        .add_enabled(
+            env.len() < 128,
+            egui::Button::new("Add environment override"),
+        )
+        .clicked()
+    {
+        env.push((String::new(), String::new()));
+    }
 }

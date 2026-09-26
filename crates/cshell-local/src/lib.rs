@@ -1,6 +1,6 @@
 //! Cross-platform local terminal profiles and portable-pty adapter.
 
-use cshell_domain::TerminalSize;
+use cshell_domain::{TerminalSize, reserved_local_environment_name as reserved_environment_name};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -138,7 +138,10 @@ impl PtySession {
             || profile.program.as_os_str().to_string_lossy().contains('\0')
             || profile.args.iter().any(|arg| arg.contains('\0'))
             || profile.env_overrides.iter().any(|(key, value)| {
-                key.is_empty() || key.contains(['=', '\0']) || value.contains('\0')
+                key.is_empty()
+                    || key.contains(['=', '\0'])
+                    || reserved_environment_name(key)
+                    || value.contains('\0')
             })
         {
             return Err(LocalPtyError::InvalidProfile(
@@ -194,6 +197,13 @@ impl PtySession {
             command.args(&profile.args);
             command
         };
+        // CommandBuilder captures the system environment. Strip CShell's private
+        // daemon/IPC controls before applying validated child-only overrides.
+        for (key, _) in std::env::vars_os() {
+            if reserved_environment_name(&key.to_string_lossy()) {
+                command.env_remove(key);
+            }
+        }
         for (key, value) in &profile.env_overrides {
             command.env(key, value);
         }
@@ -476,9 +486,9 @@ mod tests {
             ],
             cwd_policy: WorkingDirectoryPolicy::Inherit,
             env_overrides: BTreeMap::from([
-                ("CSHELL_PROCESS_TREE_HELPER".to_owned(), "parent".to_owned()),
+                ("TEST_PROCESS_TREE_HELPER".to_owned(), "parent".to_owned()),
                 (
-                    "CSHELL_PROCESS_TREE_HEARTBEAT".to_owned(),
+                    "TEST_PROCESS_TREE_HEARTBEAT".to_owned(),
                     heartbeat.to_string_lossy().into_owned(),
                 ),
             ]),
@@ -536,10 +546,10 @@ mod tests {
     #[test]
     #[ignore = "invoked as a subprocess by the process-tree test"]
     fn process_tree_helper() {
-        let Some(mode) = std::env::var_os("CSHELL_PROCESS_TREE_HELPER") else {
+        let Some(mode) = std::env::var_os("TEST_PROCESS_TREE_HELPER") else {
             return;
         };
-        let heartbeat = std::env::var_os("CSHELL_PROCESS_TREE_HEARTBEAT").unwrap();
+        let heartbeat = std::env::var_os("TEST_PROCESS_TREE_HEARTBEAT").unwrap();
         if mode == "parent" {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -548,8 +558,8 @@ mod tests {
                     "tests::process_tree_helper",
                     "--nocapture",
                 ])
-                .env("CSHELL_PROCESS_TREE_HELPER", "descendant")
-                .env("CSHELL_PROCESS_TREE_HEARTBEAT", &heartbeat)
+                .env("TEST_PROCESS_TREE_HELPER", "descendant")
+                .env("TEST_PROCESS_TREE_HEARTBEAT", &heartbeat)
                 .spawn()
                 .unwrap();
             println!("CSHELL_DESCENDANT_STARTED={}", child.id());

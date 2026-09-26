@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) enum SavedSessionPlan {
     Ssh(Box<crate::ssh_route::SshConnectionPlan>),
-    Local(cshell_local::LocalProfile),
+    Local(cshell_local::LocalProfile, cshell_domain::LocalClosePolicy),
 }
 
 #[derive(Debug)]
@@ -117,13 +117,16 @@ impl ProfileIpcService {
                         cshell_local::WorkingDirectoryPolicy::Explicit(path.into())
                     }
                 };
-                Ok(SavedSessionPlan::Local(cshell_local::LocalProfile {
-                    name: record.name.clone(),
-                    program: target.program.clone().into(),
-                    args: target.args.clone(),
-                    cwd_policy,
-                    env_overrides: target.env_overrides.clone(),
-                }))
+                Ok(SavedSessionPlan::Local(
+                    cshell_local::LocalProfile {
+                        name: record.name.clone(),
+                        program: target.program.clone().into(),
+                        args: target.args.clone(),
+                        cwd_policy,
+                        env_overrides: target.env_overrides.clone(),
+                    },
+                    target.close_policy,
+                ))
             }
         }
     }

@@ -57,6 +57,7 @@ pub struct DesktopDaemonView {
     pub session_opening: bool,
     pub terminal_detail: String,
     pub history_search: Option<Arc<DesktopHistorySearchResponse>>,
+    pub sessions: Option<Vec<cshell_ipc::SessionSummary>>,
 }
 
 #[derive(Debug)]
@@ -71,11 +72,25 @@ pub struct DesktopDaemonConnection {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum DesktopSessionAction {
     OpenProfile(ProfileId),
+    OpenLocal(ProfileId, Arc<cshell_ipc::LocalLaunchOptions>),
+    CloseView(SessionId, bool),
     NewShell(ProfileId),
     Attach(SessionId),
+}
+
+impl std::fmt::Debug for DesktopSessionAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::OpenProfile(_) => "OpenProfile",
+            Self::OpenLocal(..) => "OpenLocal([REDACTED])",
+            Self::NewShell(_) => "NewShell",
+            Self::Attach(_) => "Attach",
+            Self::CloseView(..) => "CloseView",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,6 +154,10 @@ pub enum DesktopConnectionError {
     UnexpectedControlResponse,
     #[error("switching to saved Profile")]
     SwitchSession(DesktopSessionAction),
+    #[error("View closed; reopen the session from the active list if it was kept running")]
+    ViewClosed,
+    #[error("Close request outcome is unknown; inspect the active session list before retrying")]
+    SessionCloseUncertain,
     #[error("saved Profile could not start: {0}")]
     ProfileLaunch(String),
     #[error("previous session is unavailable; reconnect explicitly to open a New Shell")]
@@ -334,10 +353,41 @@ impl DesktopDaemonConnection {
     }
 
     pub fn open_profile(&self, id: ProfileId) -> bool {
-        let sent = self
-            .open_requests
-            .send(Some(DesktopSessionAction::OpenProfile(id)))
-            .is_ok();
+        self.open_profile_action(id, DesktopSessionAction::OpenProfile(id))
+    }
+
+    pub fn open_local_profile(
+        &self,
+        id: ProfileId,
+        options: cshell_ipc::LocalLaunchOptions,
+    ) -> bool {
+        self.open_profile_action(id, DesktopSessionAction::OpenLocal(id, Arc::new(options)))
+    }
+
+    pub fn close_current_view(&self, terminate: bool) -> bool {
+        let view = self.view();
+        if !view.connected {
+            return false;
+        }
+        view.session_id.is_some_and(|id| {
+            self.open_requests
+                .send(Some(DesktopSessionAction::CloseView(id, terminate)))
+                .is_ok()
+        })
+    }
+
+    pub fn terminate_confirmed_session(&self, id: SessionId) -> bool {
+        let view = self.view();
+        if !view.connected || view.session_id != Some(id) {
+            return false;
+        }
+        self.open_requests
+            .send(Some(DesktopSessionAction::CloseView(id, true)))
+            .is_ok()
+    }
+
+    fn open_profile_action(&self, id: ProfileId, action: DesktopSessionAction) -> bool {
+        let sent = self.open_requests.send(Some(action)).is_ok();
         if sent {
             let mut view = self
                 .shared
@@ -521,7 +571,7 @@ async fn reconnect_loop(
             &shared,
             &mut shutdown,
             &mut log_delivery_revision,
-            requested_action,
+            requested_action.clone(),
             DesktopRequestReceivers {
                 log_pages: &mut log_requests,
                 history_search: &mut history_search_requests,
@@ -535,7 +585,7 @@ async fn reconnect_loop(
             return;
         }
         if let Err(DesktopConnectionError::SwitchSession(action)) = &result {
-            pending_action = Some(*action);
+            pending_action = Some(action.clone());
             continue;
         }
         if let Err(DesktopConnectionError::ProfileLaunch(message)) = &result {
@@ -555,6 +605,8 @@ async fn reconnect_loop(
         if matches!(
             &result,
             Err(DesktopConnectionError::ProfileLaunch(_)
+                | DesktopConnectionError::ViewClosed
+                | DesktopConnectionError::SessionCloseUncertain
                 | DesktopConnectionError::SessionUnavailable
                 | DesktopConnectionError::SessionCreationUncertain
                 | DesktopConnectionError::ProfileSessionNotNegotiated
@@ -582,7 +634,7 @@ async fn reconnect_loop(
             );
             tokio::select! {
                 changed = open_requests.changed() => {
-                    if changed.is_ok() { pending_action = *open_requests.borrow_and_update(); }
+                    if changed.is_ok() { pending_action = open_requests.borrow_and_update().clone(); }
                 }
                 _ = shutdown.changed() => { return; }
             }
@@ -619,7 +671,7 @@ async fn reconnect_loop(
         tokio::select! {
             () = tokio::time::sleep(Duration::from_millis(delay)) => {}
             changed = open_requests.changed() => {
-                if changed.is_ok() { pending_action = *open_requests.borrow_and_update(); }
+                if changed.is_ok() { pending_action = open_requests.borrow_and_update().clone(); }
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -669,7 +721,8 @@ async fn connect_once(
         | features::TERMINAL_CONTROL
         | features::SSH_PROFILE_SESSION
         | features::SSH_SESSION_STATUS
-        | features::LOCAL_PROFILE;
+        | features::LOCAL_PROFILE
+        | features::LOCAL_LAUNCH_OPTIONS;
     let negotiated = client_handshake(&mut stream, 1, handshake).await?;
     if config.request_log_pages && negotiated.feature_bits & features::LOG_PAGING == 0 {
         return Err(DesktopConnectionError::LogPagingNotNegotiated);
@@ -679,14 +732,91 @@ async fn connect_once(
     }
 
     let mut request_id = 2_u64;
+    if let Some(DesktopSessionAction::CloseView(session_id, terminate)) = requested_action.as_ref()
+    {
+        if !terminate && negotiated.feature_bits & features::LOCAL_LAUNCH_OPTIONS == 0 {
+            return Err(DesktopConnectionError::ProfileSessionNotNegotiated);
+        }
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            write_envelope(
+                &mut stream,
+                &Envelope {
+                    request_id,
+                    payload: Some(envelope::Payload::SessionCloseRequest(
+                        cshell_ipc::SessionCloseRequest {
+                            session_id: session_id.as_uuid().as_bytes().to_vec(),
+                            apply_view_policy: !terminate,
+                        },
+                    )),
+                    ..Envelope::default()
+                },
+            )
+            .await?;
+            let response = read_envelope(&mut stream).await?;
+            if response.request_id != request_id
+                || !matches!(
+                response.payload, Some(envelope::Payload::SessionCloseResponse(ref closed))
+                if closed.session_id == session_id.as_uuid().as_bytes())
+            {
+                return Err(DesktopConnectionError::UnexpectedControlResponse);
+            }
+            request_id += 1;
+            write_envelope(
+                &mut stream,
+                &Envelope {
+                    request_id,
+                    payload: Some(envelope::Payload::SessionListRequest(
+                        cshell_ipc::SessionListRequest {},
+                    )),
+                    ..Envelope::default()
+                },
+            )
+            .await?;
+            let response = read_envelope(&mut stream).await?;
+            if response.request_id != request_id {
+                return Err(DesktopConnectionError::UnexpectedControlResponse);
+            }
+            let Some(envelope::Payload::SessionListResponse(list)) = response.payload else {
+                return Err(DesktopConnectionError::UnexpectedControlResponse);
+            };
+            Ok::<_, DesktopConnectionError>(list.sessions)
+        })
+        .await
+        .map_err(|_| DesktopConnectionError::SessionCloseUncertain)?
+        .map_err(|_| DesktopConnectionError::SessionCloseUncertain);
+        let sessions = closed?;
+        let mut view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        view.session_id = None;
+        view.session_profile_id = None;
+        view.session_title = None;
+        view.session_running = false;
+        view.session_opening = false;
+        view.connected = false;
+        view.snapshot = None;
+        view.sessions = Some(sessions);
+        view.log_page = None;
+        view.history_search = None;
+        return Err(DesktopConnectionError::ViewClosed);
+    }
     let existing_session = shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .session_id;
-    let (session_id, session_title) = if let Some(
-        DesktopSessionAction::OpenProfile(profile_id) | DesktopSessionAction::NewShell(profile_id),
-    ) = requested_action
-    {
+    let launch = match requested_action.as_ref() {
+        Some(DesktopSessionAction::OpenProfile(id) | DesktopSessionAction::NewShell(id)) => {
+            Some((*id, None))
+        }
+        Some(DesktopSessionAction::OpenLocal(id, options)) => {
+            Some((*id, Some(options.as_ref().clone())))
+        }
+        _ => None,
+    };
+    let (session_id, session_title) = if let Some((profile_id, options)) = launch {
+        if options.is_some() && negotiated.feature_bits & features::LOCAL_LAUNCH_OPTIONS == 0 {
+            return Err(DesktopConnectionError::ProfileSessionNotNegotiated);
+        }
         if negotiated.feature_bits & (features::SSH_PROFILE_SESSION | features::LOCAL_PROFILE)
             != (features::SSH_PROFILE_SESSION | features::LOCAL_PROFILE)
         {
@@ -699,6 +829,7 @@ async fn connect_once(
             profile_id,
             size.map_or(24, |value| u32::from(value.rows)),
             size.map_or(80, |value| u32::from(value.cols)),
+            options,
         )
         .await
         .map_err(|error| match error {
@@ -710,8 +841,8 @@ async fn connect_once(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .launch_error = None;
         created
-    } else if let Some(DesktopSessionAction::Attach(session_id)) = requested_action {
-        discover_or_create_session(&mut stream, &mut request_id, Some(session_id), false).await?
+    } else if let Some(DesktopSessionAction::Attach(session_id)) = requested_action.as_ref() {
+        discover_or_create_session(&mut stream, &mut request_id, Some(*session_id), false).await?
     } else if let Some(session_id) = config.session_id {
         discover_or_create_session(&mut stream, &mut request_id, Some(session_id), false).await?
     } else {
@@ -733,13 +864,16 @@ async fn connect_once(
             view.session_running = false;
         }
     }
-    if let Some(DesktopSessionAction::OpenProfile(id) | DesktopSessionAction::NewShell(id)) =
-        requested_action
+    if let Some(
+        DesktopSessionAction::OpenProfile(id)
+        | DesktopSessionAction::NewShell(id)
+        | DesktopSessionAction::OpenLocal(id, _),
+    ) = requested_action.as_ref()
     {
         let mut view = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        view.session_profile_id = Some(id);
+        view.session_profile_id = Some(*id);
         if matches!(requested_action, Some(DesktopSessionAction::NewShell(_))) {
             view.session_title = view
                 .session_title
@@ -824,7 +958,7 @@ async fn connect_once(
                 }
                 changed = requests.open.changed() => {
                     if changed.is_ok()
-                        && let Some(id) = *requests.open.borrow_and_update() {
+                        && let Some(id) = requests.open.borrow_and_update().clone() {
                             return Err(DesktopConnectionError::SwitchSession(id));
                         }
                     continue;
@@ -837,6 +971,10 @@ async fn connect_once(
                 return Err(DesktopConnectionError::UnexpectedControlResponse);
             }
             lifecycle_request_id = None;
+            shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sessions = Some(list.sessions.clone());
             update_session_lifecycle(shared, session_id, list)?;
             continue;
         }
@@ -871,6 +1009,7 @@ async fn create_saved_profile_session<S>(
     profile_id: ProfileId,
     rows: u32,
     cols: u32,
+    local_launch: Option<cshell_ipc::LocalLaunchOptions>,
 ) -> Result<(SessionId, String), DesktopConnectionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -883,6 +1022,7 @@ where
             deadline_unix_ms: 0,
             payload: Some(envelope::Payload::SessionCreateRequest(
                 cshell_ipc::SessionCreateRequest {
+                    local_launch,
                     rows,
                     cols,
                     profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
@@ -984,6 +1124,7 @@ where
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateRequest(
                         cshell_ipc::SessionCreateRequest {
+                            local_launch: None,
                             rows: 24,
                             cols: 80,
                             profile_id: None,
@@ -1761,7 +1902,8 @@ mod tests {
             | features::LOG_PAGING
             | features::TERMINAL_CONTROL
             | features::HISTORY_SEARCH
-            | features::SSH_SESSION_STATUS;
+            | features::SSH_SESSION_STATUS
+            | features::LOCAL_LAUNCH_OPTIONS;
         let server = Arc::new(SessionIpcServer::new(
             listener,
             HandshakePolicy::with_instance_id(token, daemon_instance_id, supported_features),
@@ -1865,6 +2007,48 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(connection.cancel_history_search());
+
+        assert!(connection.close_current_view(false));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while connection.view().session_id.is_some() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}",
+                connection.view().detail
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!connection.view().connected);
+        assert!(connection.view().snapshot.is_none());
+        assert!(
+            registry
+                .session_info(session_id)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .running
+        );
+        assert!(connection.view().sessions.as_ref().is_some_and(|sessions| {
+            sessions
+                .iter()
+                .any(|item| item.session_id == session_id.as_uuid().as_bytes())
+        }));
+        assert!(!connection.send_input(InputAction::Text("must not send while detached".into())));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            connection.view().session_id.is_none(),
+            "closed view was automatically reopened"
+        );
+        assert!(connection.attach_session(session_id));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !connection.view().connected {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}",
+                connection.view().detail
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(connection.view().session_id, Some(session_id));
+        assert!(connection.view().snapshot.is_some());
 
         registry
             .close(session_id)
@@ -2578,7 +2762,7 @@ mod tests {
         };
         let mut request_id = 2;
         let (created, ()) = tokio::join!(
-            create_saved_profile_session(&mut client, &mut request_id, profile_id, 30, 90),
+            create_saved_profile_session(&mut client, &mut request_id, profile_id, 30, 90, None),
             server_work,
         );
         assert_eq!(

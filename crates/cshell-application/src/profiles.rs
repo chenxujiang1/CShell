@@ -640,10 +640,11 @@ pub fn validate_local_connection(connection: &LocalConnectionRecord) -> Result<(
         || matches!(&connection.cwd, LocalWorkingDirectory::Explicit { path } if !valid_reference(path))
         || connection.env_overrides.len() > 128
         || env_bytes > 64 * 1024
-        || connection
-            .env_overrides
-            .iter()
-            .any(|(key, value)| !valid_env_name(key) || !bounded(value, 16 * 1024))
+        || connection.env_overrides.iter().any(|(key, value)| {
+            !valid_env_name(key)
+                || cshell_domain::reserved_local_environment_name(key)
+                || !bounded(value, 16 * 1024)
+        })
         || connection
             .env_overrides
             .keys()
@@ -953,6 +954,7 @@ mod tests {
         record.kind = ProfileKind::Local;
         let target = LocalConnectionRecord {
             profile_id: record.id,
+            close_policy: cshell_domain::LocalClosePolicy::KeepAlive,
             program: "/shell path".into(),
             args: vec!["".into(), "literal $() quote\"".into()],
             cwd: LocalWorkingDirectory::Home,

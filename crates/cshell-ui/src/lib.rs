@@ -20,6 +20,8 @@ pub struct WorkbenchViewModel {
     pub terminal_generation: Option<u64>,
     pub about_open: bool,
     pub menu_command: Option<WorkbenchMenuCommand>,
+    pub confirm_terminate: bool,
+    pub terminate_target: Option<SessionId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +29,8 @@ pub enum WorkbenchMenuCommand {
     SearchTerminal,
     Profiles,
     ReconnectNewShell,
+    CloseView,
+    TerminateSession(SessionId),
     Quit,
 }
 
@@ -72,6 +76,22 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                 "terminal disconnected"
             };
             ui.label(status);
+            if ui
+                .add_enabled(model.daemon_connected, egui::Button::new("Close view"))
+                .clicked()
+            {
+                model.menu_command = Some(WorkbenchMenuCommand::CloseView);
+            }
+            if ui
+                .add_enabled(
+                    model.daemon_connected,
+                    egui::Button::new("Terminate process"),
+                )
+                .clicked()
+            {
+                model.terminate_target = model.selected;
+                model.confirm_terminate = model.terminate_target.is_some();
+            }
             if !model.daemon_status_detail.is_empty() {
                 ui.label(&model.daemon_status_detail);
             }
@@ -80,6 +100,28 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             }
         });
     });
+
+    if model.confirm_terminate {
+        egui::Window::new("Terminate this process?")
+            .collapsible(false).resizable(false)
+            .show(ui.ctx(), |ui| {
+                if let Some(id) = model.terminate_target {
+                    let title = model.sessions.iter().find(|item| item.id == id)
+                        .map_or("Session", |item| item.title.as_str());
+                    ui.label(format!("{title} ({id})"));
+                }
+                ui.label("The process and its children will be stopped. This cannot resume the running command.");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() { model.confirm_terminate = false; }
+                    if ui.button("Terminate").clicked() {
+                        model.confirm_terminate = false;
+                        if let Some(id) = model.terminate_target.take() {
+                            model.menu_command = Some(WorkbenchMenuCommand::TerminateSession(id));
+                        }
+                    }
+                });
+            });
+    }
 
     egui::Panel::left("session_list")
         .resizable(true)
@@ -231,5 +273,30 @@ mod tests {
             model.menu_command,
             Some(WorkbenchMenuCommand::SearchTerminal)
         );
+    }
+
+    #[test]
+    fn termination_confirmation_keeps_its_original_target_after_selection_changes() {
+        let original = cshell_domain::SessionId::new();
+        let another = cshell_domain::SessionId::new();
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut model = WorkbenchViewModel {
+            selected: Some(another),
+            daemon_connected: true,
+            confirm_terminate: true,
+            terminate_target: Some(original),
+            ..WorkbenchViewModel::default()
+        };
+        // Let the native dialog settle its initial size before pointer hit testing.
+        let _initial = frame(&context, &mut model, vec![]);
+        let update = frame(&context, &mut model, vec![]);
+        let position = button_center(&update, "Terminate");
+        click(&context, &mut model, position);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::TerminateSession(original))
+        );
+        assert!(!model.confirm_terminate);
     }
 }

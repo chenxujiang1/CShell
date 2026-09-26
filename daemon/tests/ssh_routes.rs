@@ -242,6 +242,7 @@ async fn create(service: &SessionIpcService, id: ProfileId) -> SessionCreateResp
     let result = exchange(
         service,
         envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            local_launch: None,
             rows: 24,
             cols: 80,
             profile_id: Some(id.as_uuid().as_bytes().to_vec()),
@@ -485,6 +486,7 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
         exchange(
             &service,
             envelope::Payload::SessionCloseRequest(SessionCloseRequest {
+                apply_view_policy: false,
                 session_id: session.session_id,
             }),
         )

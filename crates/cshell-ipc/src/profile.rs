@@ -196,6 +196,8 @@ pub struct LocalConnectionData {
     pub cwd_path: String,
     #[prost(btree_map = "string, string", tag = "6")]
     pub env_overrides: BTreeMap<String, String>,
+    #[prost(uint32, tag = "7")]
+    pub close_policy: u32,
 }
 
 impl From<&LocalConnectionRecord> for LocalConnectionData {
@@ -212,6 +214,10 @@ impl From<&LocalConnectionRecord> for LocalConnectionData {
             cwd_kind,
             cwd_path,
             env_overrides: value.env_overrides.clone(),
+            close_policy: match value.close_policy {
+                cshell_domain::LocalClosePolicy::KeepAlive => 0,
+                cshell_domain::LocalClosePolicy::TerminateOnViewClose => 1,
+            },
         }
     }
 }
@@ -231,6 +237,11 @@ impl TryFrom<LocalConnectionData> for LocalConnectionRecord {
             args: value.args,
             cwd,
             env_overrides: value.env_overrides,
+            close_policy: match value.close_policy {
+                0 => cshell_domain::LocalClosePolicy::KeepAlive,
+                1 => cshell_domain::LocalClosePolicy::TerminateOnViewClose,
+                _ => return Err(ProfileCodecError::InvalidLocalClosePolicy),
+            },
         })
     }
 }
@@ -425,6 +436,8 @@ pub enum ProfileImportAction {
 pub enum ProfileCodecError {
     #[error("invalid local working directory policy")]
     InvalidLocalDirectory,
+    #[error("unknown local close policy")]
+    InvalidLocalClosePolicy,
     #[error("Profile identifier must contain 16 bytes")]
     InvalidId,
     #[error("Profile kind is unknown")]

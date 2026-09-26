@@ -40,6 +40,7 @@ pub enum ProfileClientCommand {
     Refresh,
     DiscoverLocalShells,
     OpenProfile(ProfileId),
+    OpenLocal(ProfileId, cshell_ipc::LocalLaunchOptions),
     SetPassword {
         profile_id: ProfileId,
         expected_revision: u64,
@@ -87,6 +88,7 @@ impl std::fmt::Debug for ProfileClientCommand {
             Self::Refresh => "Refresh",
             Self::DiscoverLocalShells => "DiscoverLocalShells",
             Self::OpenProfile(_) => "OpenProfile",
+            Self::OpenLocal(..) => "OpenLocal([REDACTED])",
             Self::SetPassword { .. } => "SetPassword([REDACTED])",
             Self::DeletePassword { .. } => "DeletePassword",
             Self::SetKeyPassphrase { .. } => "SetKeyPassphrase([REDACTED])",
@@ -180,7 +182,7 @@ async fn profile_worker(
             next = receiver.recv() => {
                 let Some(command) = next else { break };
                 match command {
-                    ProfileClientCommand::OpenProfile(_) => {}
+                    ProfileClientCommand::OpenProfile(_) | ProfileClientCommand::OpenLocal(..) => {}
                     ProfileClientCommand::DiscoverLocalShells => { discover_local_shells(&config, &shared).await; }
                     ProfileClientCommand::SetPassword { profile_id, expected_revision, password } => {
                         let mut outgoing = request(ProfileOperation::SetPassword);
@@ -400,7 +402,8 @@ async fn send_inner(
         | features::SSH_PROFILE_AUTH
         | features::SSH_HOST_KEY_IMPORT
         | features::SSH_PROFILE_ROUTE
-        | features::LOCAL_PROFILE;
+        | features::LOCAL_PROFILE
+        | features::LOCAL_LAUNCH_OPTIONS;
     let negotiated = client_handshake(&mut stream, 1, handshake)
         .await
         .map_err(|error| error.to_string())?;
@@ -413,6 +416,7 @@ async fn send_inner(
         || negotiated.feature_bits & features::SSH_HOST_KEY_IMPORT == 0
         || negotiated.feature_bits & features::SSH_PROFILE_ROUTE == 0
         || negotiated.feature_bits & features::LOCAL_PROFILE == 0
+        || negotiated.feature_bits & features::LOCAL_LAUNCH_OPTIONS == 0
     {
         return Err(
             "daemon does not support current Profile configuration; restart the daemon".into(),

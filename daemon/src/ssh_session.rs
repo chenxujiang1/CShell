@@ -905,6 +905,7 @@ mod tests {
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateRequest(
                         SessionCreateRequest {
+                            local_launch: None,
                             rows: 24,
                             cols: 80,
                             profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
@@ -1053,6 +1054,7 @@ mod tests {
         let result = exchange(
             &service,
             envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                local_launch: None,
                 rows: 24,
                 cols: 80,
                 profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
@@ -1100,6 +1102,7 @@ mod tests {
         let result = exchange(
             &service,
             envelope::Payload::SessionCloseRequest(cshell_ipc::SessionCloseRequest {
+                apply_view_policy: false,
                 session_id: session_id.as_uuid().as_bytes().to_vec(),
             }),
         )

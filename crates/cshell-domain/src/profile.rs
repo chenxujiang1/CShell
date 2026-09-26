@@ -146,6 +146,16 @@ pub struct LocalConnectionRecord {
     pub args: Vec<String>,
     pub cwd: LocalWorkingDirectory,
     pub env_overrides: BTreeMap<String, String>,
+    #[serde(default)]
+    pub close_policy: LocalClosePolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalClosePolicy {
+    #[default]
+    KeepAlive,
+    TerminateOnViewClose,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -157,4 +167,11 @@ pub enum LocalWorkingDirectory {
     Explicit {
         path: String,
     },
+}
+
+/// Private daemon/IPC variables must not be exported to terminal processes.
+#[must_use]
+pub fn reserved_local_environment_name(key: &str) -> bool {
+    key.get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("CSHELL_"))
 }

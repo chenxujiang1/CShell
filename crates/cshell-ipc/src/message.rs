@@ -37,6 +37,7 @@ pub mod features {
     pub const SSH_SESSION_STATUS: u64 = 1 << 11;
     pub const SSH_PROFILE_ROUTE: u64 = 1 << 12;
     pub const LOCAL_PROFILE: u64 = 1 << 13;
+    pub const LOCAL_LAUNCH_OPTIONS: u64 = 1 << 14;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -753,6 +754,17 @@ pub struct SessionCreateRequest {
     pub cols: u32,
     #[prost(bytes = "vec", optional, tag = "3")]
     pub profile_id: Option<Vec<u8>>,
+    #[prost(message, optional, tag = "4")]
+    pub local_launch: Option<LocalLaunchOptions>,
+}
+
+/// Transient overrides for one saved Local Profile launch. Never persisted.
+#[derive(Clone, PartialEq, Message)]
+pub struct LocalLaunchOptions {
+    #[prost(string, optional, tag = "1")]
+    pub cwd_path: Option<String>,
+    #[prost(btree_map = "string, string", tag = "2")]
+    pub env_overrides: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -787,6 +799,10 @@ pub enum SessionFailureCode {
 pub struct SessionCloseRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub session_id: Vec<u8>,
+    /// Explicit view close applies the policy captured when the session was created.
+    /// False remains the existing explicit process termination operation.
+    #[prost(bool, tag = "2")]
+    pub apply_view_policy: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]

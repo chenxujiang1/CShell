@@ -241,16 +241,16 @@ async fn future_schema_is_not_downgraded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("future.db");
     let pool = raw_pool(&path).await?;
-    query("PRAGMA user_version = 6").execute(&pool).await?;
+    query("PRAGMA user_version = 7").execute(&pool).await?;
     pool.close().await;
     assert!(matches!(
         SqliteProfileRepository::open(&path).await,
-        Err(StorageError::UnsupportedSchema(6))
+        Err(StorageError::UnsupportedSchema(7))
     ));
     assert!(backups(temp.path())?.is_empty());
     let pool = raw_pool(&path).await?;
     let version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     pool.close().await;
     Ok(())
 }
@@ -464,6 +464,7 @@ async fn local_configuration_round_trip_failure_rollback_and_backup_restore()
     record.kind = ProfileKind::Local;
     let target = LocalConnectionRecord {
         profile_id: record.id,
+        close_policy: cshell_domain::LocalClosePolicy::TerminateOnViewClose,
         program: "/custom path/shell".into(),
         args: vec!["".into(), "literal spaces \"quote\" $()".into()],
         cwd: LocalWorkingDirectory::Explicit {
@@ -471,7 +472,7 @@ async fn local_configuration_round_trip_failure_rollback_and_backup_restore()
         },
         env_overrides: BTreeMap::from([
             ("LANG".into(), "zh_CN.UTF-8".into()),
-            ("CSHELL_EMPTY".into(), "".into()),
+            ("TEST_EMPTY".into(), "".into()),
         ]),
     };
     let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
@@ -584,6 +585,90 @@ async fn v4_local_migration_preserves_metadata_and_backup() -> Result<(), Box<dy
     restore_backup(&path, &backup_paths[0]).await?;
     let repository = SqliteProfileRepository::open(&path).await?;
     assert_eq!(repository.load().await?.profiles, vec![record]);
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn existing_v5_local_json_defaults_to_keep_alive_without_rewriting_catalog()
+-> Result<(), Box<dyn Error>> {
+    use cshell_domain::{LocalClosePolicy, LocalConnectionRecord, LocalWorkingDirectory};
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("legacy-v5.db");
+    let mut record = profile("legacy", None);
+    record.kind = ProfileKind::Local;
+    let target = LocalConnectionRecord {
+        profile_id: record.id,
+        program: "/legacy/shell".into(),
+        args: vec![],
+        cwd: LocalWorkingDirectory::Home,
+        env_overrides: Default::default(),
+        close_policy: LocalClosePolicy::KeepAlive,
+    };
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    service
+        .apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record),
+                CatalogChange::UpsertLocalConnection(target.clone()),
+            ],
+        )
+        .await?;
+    service.into_repository().close().await;
+    let mut legacy = serde_json::to_value(&target)?;
+    legacy
+        .as_object_mut()
+        .ok_or("not an object")?
+        .remove("close_policy");
+    let original_json = serde_json::to_string(&legacy)?;
+    let pool = raw_pool(&path).await?;
+    query("UPDATE profile_local_connections SET configuration_json = ?")
+        .bind(&original_json)
+        .execute(&pool)
+        .await?;
+    query("PRAGMA user_version = 5").execute(&pool).await?;
+    pool.close().await;
+    let repository = SqliteProfileRepository::open(&path).await?;
+    let snapshot = repository.load().await?;
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.local_connections, vec![target]);
+    repository.close().await;
+    let pool = raw_pool(&path).await?;
+    assert_eq!(
+        query_scalar::<_, String>("SELECT configuration_json FROM profile_local_connections")
+            .fetch_one(&pool)
+            .await?,
+        original_json
+    );
+    assert_eq!(
+        query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?,
+        6
+    );
+    pool.close().await;
+    let backup_paths = backups(temp.path())?;
+    assert_eq!(backup_paths.len(), 1);
+    let pool = raw_pool(&backup_paths[0]).await?;
+    assert_eq!(
+        query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?,
+        5
+    );
+    assert_eq!(
+        query_scalar::<_, String>("SELECT configuration_json FROM profile_local_connections")
+            .fetch_one(&pool)
+            .await?,
+        original_json
+    );
+    pool.close().await;
+    restore_backup(&path, &backup_paths[0]).await?;
+    let repository = SqliteProfileRepository::open(&path).await?;
+    let restored = repository.load().await?;
+    assert_eq!(restored.revision, snapshot.revision);
+    assert_eq!(restored.local_connections, snapshot.local_connections);
     repository.close().await;
     Ok(())
 }

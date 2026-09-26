@@ -336,6 +336,19 @@ impl SessionIpcService {
                     detail: "Local Profile control was not negotiated".into(),
                     ..cshell_ipc::ProfileResponse::default()
                 }
+            } else if negotiated_features & cshell_ipc::features::LOCAL_LAUNCH_OPTIONS == 0
+                && profile_request.changes.iter().any(|change| {
+                    matches!(
+                        &change.change,
+                        Some(cshell_ipc::profile_change::Change::UpsertLocalConnection(_))
+                    )
+                })
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Local launch options were not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
+                }
             } else if let Some(profiles) = &self.profiles {
                 profiles.handle(profile_request).await
             } else {
@@ -359,10 +372,35 @@ impl SessionIpcService {
             });
         }
         if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
+            && create.profile_id.is_none()
+            && create.local_launch.is_some()
+        {
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::SessionCreateResponse(
+                        SessionCreateResponse {
+                            session: None,
+                            detail: "Local launch overrides require a saved Profile".into(),
+                            failure_code: SessionFailureCode::InvalidConfiguration as i32,
+                        },
+                    )),
+                    ..Envelope::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
             && let Some(profile_id) = &create.profile_id
         {
             let result = self
-                .spawn_profile(profile_id, create.rows, create.cols, negotiated_features)
+                .spawn_profile(
+                    profile_id,
+                    create.rows,
+                    create.cols,
+                    create.local_launch.as_ref(),
+                    negotiated_features,
+                )
                 .await;
             let (session, detail, failure_code) = match result {
                 Ok(session) => (Some(session), String::new(), SessionFailureCode::None),
@@ -405,7 +443,34 @@ impl SessionIpcService {
             }
         }
         if let Some(envelope::Payload::SessionCloseRequest(close)) = &request.payload {
+            if close.apply_view_policy
+                && negotiated_features & cshell_ipc::features::LOCAL_LAUNCH_OPTIONS == 0
+            {
+                return Err(SessionIpcError::UnsupportedRequest);
+            }
             let id = LocalSessionRegistry::parse_session_id(&close.session_id)?;
+            if close.apply_view_policy {
+                if self.ssh_sessions.contains(id) {
+                    // SSH view close also preserves the connection. Explicit close terminates it.
+                } else {
+                    let registry = Arc::clone(&self.registry);
+                    tokio::task::spawn_blocking(move || registry.close_view(id))
+                        .await
+                        .map_err(|_| SessionIpcError::UnsupportedRequest)??;
+                }
+                return Ok(DispatchResult {
+                    response: Envelope {
+                        request_id: request.request_id,
+                        deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::SessionCloseResponse(
+                            SessionCloseResponse {
+                                session_id: close.session_id.clone(),
+                            },
+                        )),
+                    },
+                    subscription: None,
+                });
+            }
             if self.ssh_sessions.contains(id) {
                 let session = self
                     .ssh_sessions
@@ -437,6 +502,7 @@ impl SessionIpcService {
         bytes: &[u8],
         rows: u32,
         cols: u32,
+        local_launch: Option<&cshell_ipc::LocalLaunchOptions>,
         negotiated_features: u64,
     ) -> Result<SessionSummary, SshLaunchFailure> {
         let profile_id = ProfileId::from_bytes(bytes.try_into().map_err(|_| "invalid Profile ID")?);
@@ -459,12 +525,51 @@ impl SessionIpcService {
             return Err("terminal dimensions exceed the limit".into());
         }
         let plan = match plan {
-            crate::profile_ipc::SavedSessionPlan::Local(profile) => {
+            crate::profile_ipc::SavedSessionPlan::Local(mut profile, close_policy) => {
                 if negotiated_features & cshell_ipc::features::LOCAL_PROFILE == 0 {
                     return Err(SshLaunchFailure::new(
                         SessionFailureCode::Unsupported,
                         "Local Profile sessions were not negotiated",
                     ));
+                }
+                if let Some(overrides) = local_launch {
+                    if negotiated_features & cshell_ipc::features::LOCAL_LAUNCH_OPTIONS == 0 {
+                        return Err(SshLaunchFailure::new(
+                            SessionFailureCode::Unsupported,
+                            "Local launch options were not negotiated",
+                        ));
+                    }
+                    // Validate the launch layer independently, then the combined layer.
+                    // Windows environment names are case insensitive.
+                    let mut merged = cshell_domain::LocalConnectionRecord {
+                        profile_id,
+                        program: profile.program.to_string_lossy().into_owned(),
+                        args: profile.args.clone(),
+                        cwd: overrides.cwd_path.as_ref().map_or(
+                            cshell_domain::LocalWorkingDirectory::Inherit,
+                            |path| cshell_domain::LocalWorkingDirectory::Explicit {
+                                path: path.clone(),
+                            },
+                        ),
+                        env_overrides: overrides.env_overrides.clone(),
+                        close_policy,
+                    };
+                    cshell_application::validate_local_connection(&merged)
+                        .map_err(|_| "invalid Local launch overrides")?;
+                    for (key, value) in &overrides.env_overrides {
+                        #[cfg(windows)]
+                        profile
+                            .env_overrides
+                            .retain(|existing, _| !existing.eq_ignore_ascii_case(key));
+                        profile.env_overrides.insert(key.clone(), value.clone());
+                    }
+                    merged.env_overrides.clone_from(&profile.env_overrides);
+                    cshell_application::validate_local_connection(&merged)
+                        .map_err(|_| "invalid Local launch overrides")?;
+                    if let Some(path) = &overrides.cwd_path {
+                        profile.cwd_policy =
+                            cshell_local::WorkingDirectoryPolicy::Explicit(path.into());
+                    }
                 }
                 let registry = Arc::clone(&self.registry);
                 return tokio::task::spawn_blocking(move || {
@@ -472,6 +577,7 @@ impl SessionIpcService {
                         profile_id,
                         &profile,
                         TerminalSize::cells(rows, cols),
+                        close_policy,
                     )
                 })
                 .await
@@ -490,6 +596,9 @@ impl SessionIpcService {
                 });
             }
             crate::profile_ipc::SavedSessionPlan::Ssh(plan) => {
+                if local_launch.is_some() {
+                    return Err("Local launch overrides require a Local Profile".into());
+                }
                 if negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
                     return Err(SshLaunchFailure::new(
                         SessionFailureCode::Unsupported,
@@ -1035,6 +1144,7 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        local_launch: None,
                         rows: 24,
                         cols: 80,
                         profile_id: None,
@@ -1055,6 +1165,7 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCloseRequest(
                     cshell_ipc::SessionCloseRequest {
+                        apply_view_policy: false,
                         session_id: session.session_id.clone(),
                     },
                 )),

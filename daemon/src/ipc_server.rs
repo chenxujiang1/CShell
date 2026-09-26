@@ -166,6 +166,7 @@ where
             | features::SSH_HOST_KEY_IMPORT
             | features::SSH_PROFILE_ROUTE
             | features::LOCAL_PROFILE
+            | features::LOCAL_LAUNCH_OPTIONS
             | features::SSH_SESSION_STATUS)
         == 0
     {

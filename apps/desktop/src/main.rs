@@ -219,6 +219,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     && self.log_surface.is_none()
                     && self.pending_paste.is_none()
                     && !self.view_model.about_open
+                    && !self.view_model.confirm_terminate
                 {
                     self.egui_context.memory_mut(|memory| {
                         if let Some(focused) = memory.focused() {
@@ -381,6 +382,48 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     self.submitted_log_page = Some(key);
                 }
             }
+            if let Some(sessions) = &view.sessions {
+                for summary in sessions {
+                    if let Ok(bytes) = <[u8; 16]>::try_from(summary.session_id.as_slice()) {
+                        let id = cshell_domain::SessionId::from_bytes(bytes);
+                        if let Some(entry) = self
+                            .view_model
+                            .sessions
+                            .iter_mut()
+                            .find(|item| item.id == id)
+                        {
+                            entry.title.clone_from(&summary.title);
+                        } else {
+                            self.view_model
+                                .sessions
+                                .push(cshell_ui::SessionTabViewModel {
+                                    id,
+                                    title: summary.title.clone(),
+                                    connected: false,
+                                });
+                            redraw_needed = true;
+                        }
+                    }
+                }
+                self.view_model.sessions.retain(|entry| {
+                    sessions
+                        .iter()
+                        .any(|item| item.session_id == entry.id.as_uuid().as_bytes())
+                });
+            }
+            if view.session_id.is_none() && !view.connected && !view.session_opening {
+                redraw_needed |= self.view_model.selected.is_some();
+                if self.view_model.selected.is_some() {
+                    self.terminal_surface = TerminalSurfaceModel::default();
+                    self.terminal_decorations = TerminalDecorations::default();
+                    self.log_surface = None;
+                    self.submitted_log_page = None;
+                }
+                self.view_model.selected = None;
+                for entry in &mut self.view_model.sessions {
+                    entry.connected = false;
+                }
+            }
             if let Some(session_id) = view.session_id {
                 if self.pending_tab == Some(session_id) || view.launch_error.is_some() {
                     self.pending_tab = None;
@@ -527,6 +570,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 self.cursor_position = Some(position);
                 if self.terminal_selecting
                     && !self.view_model.about_open
+                    && !self.view_model.confirm_terminate
                     && let Some(point) = self.terminal_point_at(position)
                     && let Some(selection) = &mut self.terminal_decorations.selection
                     && selection.focus != point
@@ -543,7 +587,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 ..
             } if self.log_surface.is_none()
                 && self.pending_paste.is_none()
-                && !self.view_model.about_open =>
+                && !self.view_model.about_open
+                && !self.view_model.confirm_terminate =>
             {
                 match state {
                     ElementState::Pressed if !egui_consumed => {
@@ -598,6 +643,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 is_synthetic: false,
                 ..
             } if !self.view_model.about_open
+                && !self.view_model.confirm_terminate
                 && self.pending_paste.is_none()
                 && is_terminal_search_shortcut(&event, self.modifiers) =>
             {
@@ -611,6 +657,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 ..
             } if self.terminal_search_open
                 && !self.view_model.about_open
+                && !self.view_model.confirm_terminate
                 && event.state == ElementState::Pressed
                 && event.logical_key == Key::Named(NamedKey::Escape) =>
             {
@@ -624,7 +671,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             } if !egui_consumed
                 && self.log_surface.is_none()
                 && self.pending_paste.is_none()
-                && !self.view_model.about_open =>
+                && !self.view_model.about_open
+                && !self.view_model.confirm_terminate =>
             {
                 if is_terminal_copy_shortcut(&event, self.modifiers) {
                     if let (Some(selection), Some(snapshot)) = (
@@ -704,6 +752,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     && self.log_surface.is_none()
                     && self.pending_paste.is_none()
                     && !self.view_model.about_open
+                    && !self.view_model.confirm_terminate
                     && !text.is_empty() =>
             {
                 if let Some(daemon) = &self.daemon {
@@ -729,6 +778,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 if over_terminal
                     && self.viewport_rows > 0
                     && !self.view_model.about_open
+                    && !self.view_model.confirm_terminate
                     && self.pending_paste.is_none()
                 {
                     let rows = match delta {
@@ -779,7 +829,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     if let Some(state) = scrollbar_state {
                         scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
                     }
-                    if self.log_surface.is_none() && !self.view_model.about_open {
+                    if self.log_surface.is_none()
+                        && !self.view_model.about_open
+                        && !self.view_model.confirm_terminate
+                    {
                         terminal_accessibility::add_terminal_node(
                             ui.ctx(),
                             terminal_rect,
@@ -787,7 +840,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             self.terminal_decorations.selection,
                         );
                     }
-                    if self.terminal_search_open && !self.view_model.about_open {
+                    if self.terminal_search_open
+                        && !self.view_model.about_open
+                        && !self.view_model.confirm_terminate
+                    {
                         egui::Window::new("查找终端")
                             .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
                             .collapsible(false)
@@ -866,6 +922,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                     if let Some(pending) = &self.pending_paste
                         && !self.view_model.about_open
+                        && !self.view_model.confirm_terminate
                     {
                         egui::Window::new("确认粘贴到终端")
                             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -929,6 +986,25 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                         window.request_redraw();
                     }
+                    Some(
+                        action @ (WorkbenchMenuCommand::CloseView
+                        | WorkbenchMenuCommand::TerminateSession(_)),
+                    ) => {
+                        let accepted = self.daemon.as_ref().is_some_and(|daemon| match action {
+                            WorkbenchMenuCommand::TerminateSession(id) => {
+                                daemon.terminate_confirmed_session(id)
+                            }
+                            _ => daemon.close_current_view(false),
+                        });
+                        if accepted {
+                            self.pending_paste = None;
+                            self.pending_tab = None;
+                            self.terminal_surface = TerminalSurfaceModel::default();
+                            self.terminal_decorations = TerminalDecorations::default();
+                            self.log_surface = None;
+                            window.request_redraw();
+                        }
+                    }
                     None => {}
                 }
                 if let Some(command) = profile_command {
@@ -937,6 +1013,16 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             if let Some(daemon) = &self.daemon {
                                 self.pending_tab = None;
                                 if daemon.open_profile(id) {
+                                    self.terminal_surface = TerminalSurfaceModel::default();
+                                    self.terminal_decorations = TerminalDecorations::default();
+                                    self.log_surface = None;
+                                }
+                            }
+                        }
+                        profile_connection::ProfileClientCommand::OpenLocal(id, options) => {
+                            if let Some(daemon) = &self.daemon {
+                                self.pending_tab = None;
+                                if daemon.open_local_profile(id, options) {
                                     self.terminal_surface = TerminalSurfaceModel::default();
                                     self.terminal_decorations = TerminalDecorations::default();
                                     self.log_surface = None;
@@ -976,6 +1062,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     && self.log_surface.is_none()
                     && self.pending_paste.is_none()
                     && !self.view_model.about_open
+                    && !self.view_model.confirm_terminate
                     && self
                         .egui_context
                         .memory(|memory| memory.focused().is_none())

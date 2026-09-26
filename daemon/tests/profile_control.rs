@@ -172,6 +172,7 @@ async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocke
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        local_launch: None,
                         rows: 24,
                         cols: 80,
                         profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
@@ -471,6 +472,7 @@ async fn saved_ssh_profile_requires_keychain_password_before_connecting()
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        local_launch: None,
                         rows: 24,
                         cols: 80,
                         profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
