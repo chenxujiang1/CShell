@@ -3,10 +3,6 @@ $phase = 'OpenSSH setup'
 $logPath = $null
 trap {
     Write-Output "::error title=Windows OpenSSH interop ($phase)::$($_.Exception.Message)"
-    if ($null -ne $logPath -and (Test-Path -LiteralPath $logPath)) {
-        Write-Output 'Windows sshd log:'
-        Get-Content -LiteralPath $logPath
-    }
     break
 }
 
@@ -118,10 +114,6 @@ try {
     }
 } catch {
     Write-Output "::error title=Windows OpenSSH interop ($phase)::$($_.Exception.Message)"
-    if (Test-Path -LiteralPath $logPath) {
-        Write-Output 'Windows sshd log:'
-        Get-Content -LiteralPath $logPath
-    }
     throw
 } finally {
     if ($null -ne $sshdProcess) {
