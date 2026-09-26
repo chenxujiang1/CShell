@@ -3,7 +3,7 @@
 
 use crate::{FolderId, ProfileId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,4 +135,26 @@ pub struct ResolvedTerminalSettings {
     pub terminal_type: ResolvedField<String>,
     pub theme: ResolvedField<String>,
     pub logging: ResolvedField<bool>,
+}
+
+/// Saved, non-secret local process configuration. Arguments are passed verbatim.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalConnectionRecord {
+    pub profile_id: ProfileId,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: LocalWorkingDirectory,
+    pub env_overrides: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LocalWorkingDirectory {
+    #[default]
+    Inherit,
+    Home,
+    Explicit {
+        path: String,
+    },
 }

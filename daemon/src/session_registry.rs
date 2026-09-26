@@ -2,7 +2,7 @@ use crate::{
     LocalSessionError, LocalSessionExit, LocalTerminalHandle, LocalTerminalSession,
     TerminalFrameSubscription,
 };
-use cshell_domain::{InputAction, SessionId, TerminalSize};
+use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{
     FullFrame, HistorySearchCodecError, HistorySearchDirection as IpcHistorySearchDirection,
     HistorySearchRequest as IpcHistorySearchRequest, LogPageCodecError, LogPageRequest,
@@ -45,6 +45,7 @@ pub enum SessionRegistryError {
 #[derive(Debug)]
 struct ManagedLocalSession {
     title: String,
+    profile_id: Option<ProfileId>,
     session: LocalTerminalSession,
     exit: Option<LocalSessionExit>,
 }
@@ -53,6 +54,7 @@ struct ManagedLocalSession {
 pub struct LocalSessionInfo {
     pub session_id: SessionId,
     pub title: String,
+    pub profile_id: Option<ProfileId>,
     pub running: bool,
     pub generation: u64,
 }
@@ -147,6 +149,25 @@ impl LocalSessionRegistry {
         profile: &LocalProfile,
         size: TerminalSize,
     ) -> Result<LocalSessionAttachment, SessionRegistryError> {
+        self.spawn_local_inner(profile, size, None)
+    }
+
+    pub fn spawn_saved_local(
+        &self,
+        profile_id: ProfileId,
+        profile: &LocalProfile,
+        size: TerminalSize,
+    ) -> Result<LocalSessionInfo, SessionRegistryError> {
+        let attachment = self.spawn_local_inner(profile, size, Some(profile_id))?;
+        self.session_info(attachment.session_id())
+    }
+
+    fn spawn_local_inner(
+        &self,
+        profile: &LocalProfile,
+        size: TerminalSize,
+        profile_id: Option<ProfileId>,
+    ) -> Result<LocalSessionAttachment, SessionRegistryError> {
         let session_id = SessionId::new();
         let journal_path = self.journal_path(session_id);
         #[cfg(unix)]
@@ -171,6 +192,7 @@ impl LocalSessionRegistry {
         };
         let managed = Arc::new(Mutex::new(ManagedLocalSession {
             title: profile.name.clone(),
+            profile_id,
             session,
             exit: None,
         }));
@@ -478,6 +500,7 @@ impl LocalSessionRegistry {
         LocalSessionInfo {
             session_id,
             title: managed.title.clone(),
+            profile_id: managed.profile_id,
             running: managed.exit.is_none(),
             generation: managed
                 .session

@@ -228,6 +228,7 @@ impl SessionIpcService {
                     catalog: None,
                     preview: None,
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                     detail: "Profile control was not negotiated".to_owned(),
                 }
             } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_TARGET == 0
@@ -245,6 +246,7 @@ impl SessionIpcService {
                     catalog: None,
                     preview: None,
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                     detail: "SSH Profile target control was not negotiated".to_owned(),
                 }
             } else if matches!(
@@ -259,6 +261,7 @@ impl SessionIpcService {
                     catalog: None,
                     preview: None,
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                     detail: "SSH Profile credentials were not negotiated".into(),
                 }
             } else if negotiated_features & cshell_ipc::features::SSH_HOST_KEY_IMPORT == 0
@@ -312,7 +315,26 @@ impl SessionIpcService {
                     catalog: None,
                     preview: None,
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                     detail: "SSH Profile authentication was not negotiated".into(),
+                }
+            } else if negotiated_features & cshell_ipc::features::LOCAL_PROFILE == 0
+                && (profile_request.operation
+                    == cshell_ipc::ProfileOperation::DiscoverLocalShells as i32
+                    || profile_request.changes.iter().any(|change| {
+                        matches!(
+                            &change.change,
+                            Some(
+                                cshell_ipc::profile_change::Change::UpsertLocalConnection(_)
+                                    | cshell_ipc::profile_change::Change::RemoveLocalConnection(_)
+                            )
+                        )
+                    }))
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Local Profile control was not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
                 }
             } else if let Some(profiles) = &self.profiles {
                 profiles.handle(profile_request).await
@@ -323,6 +345,7 @@ impl SessionIpcService {
                     catalog: None,
                     preview: None,
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                     detail: "Profile storage is unavailable".to_owned(),
                 }
             };
@@ -338,15 +361,9 @@ impl SessionIpcService {
         if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
             && let Some(profile_id) = &create.profile_id
         {
-            let result = if negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
-                Err(SshLaunchFailure::new(
-                    SessionFailureCode::Unsupported,
-                    "SSH Profile sessions were not negotiated",
-                ))
-            } else {
-                self.spawn_ssh_profile(profile_id, create.rows, create.cols)
-                    .await
-            };
+            let result = self
+                .spawn_profile(profile_id, create.rows, create.cols, negotiated_features)
+                .await;
             let (session, detail, failure_code) = match result {
                 Ok(session) => (Some(session), String::new(), SessionFailureCode::None),
                 Err(error) => (None, error.detail, error.code),
@@ -415,11 +432,12 @@ impl SessionIpcService {
         self.dispatch(request)
     }
 
-    async fn spawn_ssh_profile(
+    async fn spawn_profile(
         &self,
         bytes: &[u8],
         rows: u32,
         cols: u32,
+        negotiated_features: u64,
     ) -> Result<SessionSummary, SshLaunchFailure> {
         let profile_id = ProfileId::from_bytes(bytes.try_into().map_err(|_| "invalid Profile ID")?);
         let profiles = self.profiles.as_ref().ok_or_else(|| {
@@ -428,7 +446,7 @@ impl SessionIpcService {
                 "Profile storage unavailable",
             )
         })?;
-        let plan = profiles.ssh_plan(profile_id).await?;
+        let plan = profiles.session_plan(profile_id).await?;
         let rows = u16::try_from(rows)
             .ok()
             .filter(|value| *value > 0)
@@ -440,6 +458,47 @@ impl SessionIpcService {
         if usize::from(rows) * usize::from(cols) > 1_000_000 {
             return Err("terminal dimensions exceed the limit".into());
         }
+        let plan = match plan {
+            crate::profile_ipc::SavedSessionPlan::Local(profile) => {
+                if negotiated_features & cshell_ipc::features::LOCAL_PROFILE == 0 {
+                    return Err(SshLaunchFailure::new(
+                        SessionFailureCode::Unsupported,
+                        "Local Profile sessions were not negotiated",
+                    ));
+                }
+                let registry = Arc::clone(&self.registry);
+                return tokio::task::spawn_blocking(move || {
+                    registry.spawn_saved_local(
+                        profile_id,
+                        &profile,
+                        TerminalSize::cells(rows, cols),
+                    )
+                })
+                .await
+                .map_err(|_| {
+                    SshLaunchFailure::new(
+                        SessionFailureCode::InvalidConfiguration,
+                        "Local Profile worker failed",
+                    )
+                })?
+                .map(SessionSummary::from)
+                .map_err(|error| {
+                    SshLaunchFailure::new(
+                        SessionFailureCode::InvalidConfiguration,
+                        error.to_string(),
+                    )
+                });
+            }
+            crate::profile_ipc::SavedSessionPlan::Ssh(plan) => {
+                if negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
+                    return Err(SshLaunchFailure::new(
+                        SessionFailureCode::Unsupported,
+                        "SSH Profile sessions were not negotiated",
+                    ));
+                }
+                plan
+            }
+        };
         let known_hosts_path = self
             .known_hosts_path
             .clone()
@@ -841,7 +900,7 @@ impl From<LocalSessionInfo> for SessionSummary {
             title: info.title,
             running: info.running,
             generation: info.generation,
-            profile_id: None,
+            profile_id: info.profile_id.map(|id| id.as_uuid().as_bytes().to_vec()),
             terminal_detail: if info.running {
                 String::new()
             } else {

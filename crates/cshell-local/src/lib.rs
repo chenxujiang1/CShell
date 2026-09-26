@@ -9,6 +9,9 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use thiserror::Error;
 
+mod discovery;
+pub use discovery::discover_shells;
+
 #[cfg(unix)]
 mod unix_guardian;
 #[cfg(unix)]
@@ -44,16 +47,9 @@ impl LocalProfile {
     #[must_use]
     pub fn platform_default() -> Self {
         #[cfg(windows)]
-        let (name, program) = find_on_path("pwsh.exe").map_or_else(
-            || {
-                (
-                    "Command Prompt".to_owned(),
-                    std::env::var_os("COMSPEC")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| PathBuf::from("cmd.exe")),
-                )
-            },
-            |path| ("PowerShell 7".to_owned(), path),
+        let (name, program) = discover_shells().into_iter().next().map_or_else(
+            || ("Command Prompt".to_owned(), PathBuf::from("cmd.exe")),
+            |profile| (profile.name, profile.program),
         );
 
         #[cfg(not(windows))]
@@ -81,6 +77,8 @@ impl LocalProfile {
 
 #[derive(Debug, Error)]
 pub enum LocalPtyError {
+    #[error("invalid local profile: {0}")]
+    InvalidProfile(&'static str),
     #[error("cannot open local PTY: {0}")]
     Open(String),
     #[error("cannot spawn local command: {0}")]
@@ -136,6 +134,35 @@ impl PtySession {
         #[cfg(unix)] guardian_executable: Option<&std::path::Path>,
         #[cfg(windows)] _guardian_executable: Option<&std::path::Path>,
     ) -> Result<Self, LocalPtyError> {
+        if profile.program.as_os_str().is_empty()
+            || profile.program.as_os_str().to_string_lossy().contains('\0')
+            || profile.args.iter().any(|arg| arg.contains('\0'))
+            || profile.env_overrides.iter().any(|(key, value)| {
+                key.is_empty() || key.contains(['=', '\0']) || value.contains('\0')
+            })
+        {
+            return Err(LocalPtyError::InvalidProfile(
+                "program, arguments or environment are invalid",
+            ));
+        }
+        let cwd = match &profile.cwd_policy {
+            WorkingDirectoryPolicy::Inherit => std::env::current_dir()?,
+            WorkingDirectoryPolicy::Home => home_directory().ok_or(
+                LocalPtyError::InvalidProfile("home directory is unavailable"),
+            )?,
+            WorkingDirectoryPolicy::Explicit(path) => path.clone(),
+        };
+        let cwd = if cwd.is_absolute() {
+            cwd
+        } else {
+            std::env::current_dir()?.join(cwd)
+        };
+        if !cwd.is_dir() {
+            return Err(LocalPtyError::InvalidProfile(
+                "working directory does not exist",
+            ));
+        }
+        let program = resolve_program(profile, &cwd)?;
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: size.rows,
@@ -148,7 +175,7 @@ impl PtySession {
         #[cfg(unix)]
         let mut command = guardian_executable.map_or_else(
             || {
-                let mut command = CommandBuilder::new(&profile.program);
+                let mut command = CommandBuilder::new(&program);
                 command.args(&profile.args);
                 command
             },
@@ -156,23 +183,21 @@ impl PtySession {
                 let mut command = CommandBuilder::new(guardian);
                 command.arg(PTY_GUARDIAN_MODE_ARG);
                 command.arg(std::process::id().to_string());
-                command.arg(&profile.program);
+                command.arg(&program);
                 command.args(&profile.args);
                 command
             },
         );
         #[cfg(windows)]
         let mut command = {
-            let mut command = CommandBuilder::new(&profile.program);
+            let mut command = CommandBuilder::new(&program);
             command.args(&profile.args);
             command
         };
         for (key, value) in &profile.env_overrides {
             command.env(key, value);
         }
-        if let WorkingDirectoryPolicy::Explicit(path) = &profile.cwd_policy {
-            command.cwd(path);
-        }
+        command.cwd(cwd);
 
         let mut child = pair
             .slave
@@ -263,6 +288,63 @@ impl Drop for PtySession {
         #[cfg(windows)]
         let _ = self.process_tree.terminate();
     }
+}
+
+fn resolve_program(
+    profile: &LocalProfile,
+    cwd: &std::path::Path,
+) -> Result<PathBuf, LocalPtyError> {
+    let executable = |candidate: PathBuf| -> Option<PathBuf> {
+        if discovery::executable_file(&candidate) {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        if candidate.extension().is_none() {
+            let candidate = candidate.with_extension("exe");
+            if discovery::executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    };
+    if profile.program.is_absolute() || profile.program.components().count() > 1 {
+        return executable(cwd.join(&profile.program)).ok_or(LocalPtyError::InvalidProfile(
+            "configured program is missing or not executable",
+        ));
+    }
+    let path = profile
+        .env_overrides
+        .iter()
+        .find(|(key, _)| {
+            #[cfg(windows)]
+            {
+                key.eq_ignore_ascii_case("PATH")
+            }
+            #[cfg(unix)]
+            {
+                key.as_str() == "PATH"
+            }
+        })
+        .map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"));
+    if let Some(path) = path {
+        for directory in std::env::split_paths(&path) {
+            if let Some(program) = executable(cwd.join(directory).join(&profile.program)) {
+                return Ok(program);
+            }
+        }
+    }
+    Err(LocalPtyError::InvalidProfile(
+        "configured program was not found on PATH",
+    ))
+}
+
+pub fn home_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let path = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    #[cfg(unix)]
+    let path = std::env::var_os("HOME").map(PathBuf::from);
+    path.filter(|path| path.is_absolute() && path.is_dir())
 }
 
 #[cfg(windows)]

@@ -1,6 +1,7 @@
 use crate::daemon_connection::DesktopConnectionConfig;
 use cshell_domain::{
-    ProfileFolder, ProfileId, ProfileRecord, SshConnectionRecord, TerminalDefaults,
+    LocalConnectionRecord, ProfileFolder, ProfileId, ProfileRecord, SshConnectionRecord,
+    TerminalDefaults,
 };
 use cshell_ipc::{
     Envelope, Handshake, HostKeyPreviewData, ProfileCatalogData, ProfileChange,
@@ -20,6 +21,7 @@ pub struct DesktopProfileView {
     pub preview: Option<ProfileImportPreviewData>,
     pub preview_source: Option<(String, ProfileImportPolicy)>,
     pub host_key_preview: Option<HostKeyPreviewData>,
+    pub local_shells: Vec<cshell_ipc::LocalShellData>,
     pub error: Option<String>,
     pub status: String,
 }
@@ -31,10 +33,12 @@ pub struct DesktopProfileCatalog {
     pub folders: Vec<ProfileFolder>,
     pub profiles: Vec<ProfileRecord>,
     pub ssh_connections: Vec<SshConnectionRecord>,
+    pub local_connections: Vec<LocalConnectionRecord>,
 }
 
 pub enum ProfileClientCommand {
     Refresh,
+    DiscoverLocalShells,
     OpenProfile(ProfileId),
     SetPassword {
         profile_id: ProfileId,
@@ -81,6 +85,7 @@ impl std::fmt::Debug for ProfileClientCommand {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::Refresh => "Refresh",
+            Self::DiscoverLocalShells => "DiscoverLocalShells",
             Self::OpenProfile(_) => "OpenProfile",
             Self::SetPassword { .. } => "SetPassword([REDACTED])",
             Self::DeletePassword { .. } => "DeletePassword",
@@ -169,12 +174,14 @@ async fn profile_worker(
                 if shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).catalog.is_none() {
                     let result = send(&config, request(ProfileOperation::List)).await.and_then(catalog_from_response);
                     publish_catalog(&shared, result);
+                    discover_local_shells(&config, &shared).await;
                 }
             }
             next = receiver.recv() => {
                 let Some(command) = next else { break };
                 match command {
                     ProfileClientCommand::OpenProfile(_) => {}
+                    ProfileClientCommand::DiscoverLocalShells => { discover_local_shells(&config, &shared).await; }
                     ProfileClientCommand::SetPassword { profile_id, expected_revision, password } => {
                         let mut outgoing = request(ProfileOperation::SetPassword);
                         outgoing.expected_revision = expected_revision;
@@ -392,7 +399,8 @@ async fn send_inner(
         | features::SSH_PROFILE_SESSION
         | features::SSH_PROFILE_AUTH
         | features::SSH_HOST_KEY_IMPORT
-        | features::SSH_PROFILE_ROUTE;
+        | features::SSH_PROFILE_ROUTE
+        | features::LOCAL_PROFILE;
     let negotiated = client_handshake(&mut stream, 1, handshake)
         .await
         .map_err(|error| error.to_string())?;
@@ -404,8 +412,11 @@ async fn send_inner(
         || negotiated.feature_bits & features::SSH_PROFILE_AUTH == 0
         || negotiated.feature_bits & features::SSH_HOST_KEY_IMPORT == 0
         || negotiated.feature_bits & features::SSH_PROFILE_ROUTE == 0
+        || negotiated.feature_bits & features::LOCAL_PROFILE == 0
     {
-        return Err("daemon does not support SSH Profile sessions; restart the daemon".into());
+        return Err(
+            "daemon does not support current Profile configuration; restart the daemon".into(),
+        );
     }
     write_envelope(
         &mut stream,
@@ -427,6 +438,25 @@ async fn send_inner(
         return Err("daemon returned unexpected Profile response".into());
     };
     Ok(response)
+}
+
+async fn discover_local_shells(
+    config: &DesktopConnectionConfig,
+    shared: &Arc<Mutex<DesktopProfileView>>,
+) {
+    let result = send(config, request(ProfileOperation::DiscoverLocalShells))
+        .await
+        .and_then(|response| {
+            check_response(&response)?;
+            Ok(response.local_shells)
+        });
+    update(shared, |view| match result {
+        Ok(shells) => {
+            view.local_shells = shells;
+            view.error = None;
+        }
+        Err(error) => view.error = Some(error),
+    });
 }
 
 fn check_response(response: &ProfileResponse) -> Result<(), String> {
@@ -476,12 +506,21 @@ fn decode_catalog(data: ProfileCatalogData) -> Result<DesktopProfileCatalog, Str
                 .map_err(|error: cshell_ipc::ProfileCodecError| error.to_string())
         })
         .collect::<Result<_, _>>()?;
+    let local_connections = data
+        .local_connections
+        .into_iter()
+        .map(|item| {
+            item.try_into()
+                .map_err(|error: cshell_ipc::ProfileCodecError| error.to_string())
+        })
+        .collect::<Result<_, _>>()?;
     Ok(DesktopProfileCatalog {
         revision: data.revision,
         defaults,
         folders,
         profiles,
         ssh_connections,
+        local_connections,
     })
 }
 

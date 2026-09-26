@@ -1,9 +1,9 @@
 //! Transactional, storage independent profile catalog use cases.
 
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, ResolvedField,
-    ResolvedTerminalSettings, SettingSource, SshAuthMethod, SshConnectionRecord, TerminalDefaults,
-    TerminalOverrides,
+    FolderId, LocalConnectionRecord, LocalWorkingDirectory, ProfileFolder, ProfileId, ProfileKind,
+    ProfileRecord, ResolvedField, ResolvedTerminalSettings, SettingSource, SshAuthMethod,
+    SshConnectionRecord, TerminalDefaults, TerminalOverrides,
 };
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -24,6 +24,7 @@ pub struct CatalogSnapshot {
     pub folders: Vec<ProfileFolder>,
     pub profiles: Vec<ProfileRecord>,
     pub ssh_connections: Vec<SshConnectionRecord>,
+    pub local_connections: Vec<LocalConnectionRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +35,8 @@ pub enum CatalogChange {
     RemoveProfile(ProfileId),
     UpsertSshConnection(SshConnectionRecord),
     RemoveSshConnection(ProfileId),
+    UpsertLocalConnection(LocalConnectionRecord),
+    RemoveLocalConnection(ProfileId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +50,9 @@ pub enum ChangeOutcome {
     SshConnectionCreated(ProfileId),
     SshConnectionUpdated(ProfileId),
     SshConnectionRemoved(ProfileId),
+    LocalConnectionCreated(ProfileId),
+    LocalConnectionUpdated(ProfileId),
+    LocalConnectionRemoved(ProfileId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,6 +116,12 @@ pub enum CatalogError {
     DuplicateSshConnection(ProfileId),
     #[error("unknown SSH connection for Profile {0}")]
     UnknownSshConnection(ProfileId),
+    #[error("local program, arguments, working directory or environment overrides are invalid")]
+    InvalidLocalConfiguration,
+    #[error("local connection belongs to a non-local or duplicate Profile {0}")]
+    InvalidLocalProfile(ProfileId),
+    #[error("unknown local configuration for Profile {0}")]
+    UnknownLocalConnection(ProfileId),
     #[error("batch exceeds the change limit")]
     TooManyChanges,
     #[error("search limit must be between 1 and 256")]
@@ -386,7 +398,30 @@ impl ProfileCatalog {
                     }
                     next.ssh_connections
                         .retain(|connection| connection.profile_id != *id);
+                    next.local_connections
+                        .retain(|connection| connection.profile_id != *id);
                     ChangeOutcome::ProfileRemoved(*id)
+                }
+                CatalogChange::UpsertLocalConnection(connection) => {
+                    if let Some(existing) = next
+                        .local_connections
+                        .iter_mut()
+                        .find(|item| item.profile_id == connection.profile_id)
+                    {
+                        *existing = connection.clone();
+                        ChangeOutcome::LocalConnectionUpdated(connection.profile_id)
+                    } else {
+                        next.local_connections.push(connection.clone());
+                        ChangeOutcome::LocalConnectionCreated(connection.profile_id)
+                    }
+                }
+                CatalogChange::RemoveLocalConnection(id) => {
+                    let old_len = next.local_connections.len();
+                    next.local_connections.retain(|item| item.profile_id != *id);
+                    if next.local_connections.len() == old_len {
+                        return Err(CatalogError::UnknownLocalConnection(*id));
+                    }
+                    ChangeOutcome::LocalConnectionRemoved(*id)
                 }
                 CatalogChange::UpsertSshConnection(connection) => {
                     if let Some(existing) = next
@@ -509,6 +544,17 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
             return Err(CatalogError::DuplicateName);
         }
     }
+    let mut local_ids = BTreeSet::new();
+    for connection in &snapshot.local_connections {
+        if !local_ids.insert(connection.profile_id)
+            || !snapshot.profiles.iter().any(|profile| {
+                profile.id == connection.profile_id && profile.kind == ProfileKind::Local
+            })
+        {
+            return Err(CatalogError::InvalidLocalProfile(connection.profile_id));
+        }
+        validate_local_connection(connection)?;
+    }
     let mut connection_ids = BTreeSet::new();
     for connection in &snapshot.ssh_connections {
         match &connection.route {
@@ -568,6 +614,45 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
         {
             return Err(CatalogError::InvalidSshTarget);
         }
+    }
+    Ok(())
+}
+
+pub fn validate_local_connection(connection: &LocalConnectionRecord) -> Result<(), CatalogError> {
+    let bounded = |value: &str, limit: usize| value.len() <= limit && !value.contains('\0');
+    let valid_env_name = |key: &str| {
+        let mut chars = key.chars();
+        chars
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+            && key.len() <= 128
+    };
+    let env_bytes: usize = connection
+        .env_overrides
+        .iter()
+        .map(|(key, value)| key.len() + value.len())
+        .sum();
+    if !valid_reference(&connection.program)
+        || connection.args.len() > 256
+        || connection.args.iter().any(|value| !bounded(value, 4096))
+        || connection.args.iter().map(String::len).sum::<usize>() > 64 * 1024
+        || matches!(&connection.cwd, LocalWorkingDirectory::Explicit { path } if !valid_reference(path))
+        || connection.env_overrides.len() > 128
+        || env_bytes > 64 * 1024
+        || connection
+            .env_overrides
+            .iter()
+            .any(|(key, value)| !valid_env_name(key) || !bounded(value, 16 * 1024))
+        || connection
+            .env_overrides
+            .keys()
+            .map(|key| key.to_ascii_uppercase())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != connection.env_overrides.len()
+    {
+        return Err(CatalogError::InvalidLocalConfiguration);
     }
     Ok(())
 }
@@ -859,6 +944,68 @@ mod tests {
         );
         assert_eq!(catalog.snapshot().revision, 1);
         assert_eq!(catalog.snapshot().ssh_connections[1], target_connection);
+        Ok(())
+    }
+
+    #[test]
+    fn local_validation_and_kind_changes_are_atomic() -> Result<(), CatalogError> {
+        let mut record = profile("local", None);
+        record.kind = ProfileKind::Local;
+        let target = LocalConnectionRecord {
+            profile_id: record.id,
+            program: "/shell path".into(),
+            args: vec!["".into(), "literal $() quote\"".into()],
+            cwd: LocalWorkingDirectory::Home,
+            env_overrides: std::collections::BTreeMap::from([(
+                "VALUE".into(),
+                "line one\nline two".into(),
+            )]),
+        };
+        let mut catalog = ProfileCatalog::from_snapshot(CatalogSnapshot::default())?;
+        catalog.apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertLocalConnection(target.clone()),
+            ],
+        )?;
+        for (key, value) in [("BAD=NAME", "x"), ("1BAD", "x"), ("BAD", "x\0")] {
+            let mut broken = target.clone();
+            broken.env_overrides.insert(key.into(), value.into());
+            assert_eq!(
+                catalog.apply_batch(1, &[CatalogChange::UpsertLocalConnection(broken)]),
+                Err(CatalogError::InvalidLocalConfiguration)
+            );
+        }
+        let mut broken = target.clone();
+        broken
+            .env_overrides
+            .insert("value".into(), "duplicate case".into());
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertLocalConnection(broken)]),
+            Err(CatalogError::InvalidLocalConfiguration)
+        );
+        let mut broken = target.clone();
+        broken.args.push("nul\0".into());
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertLocalConnection(broken)]),
+            Err(CatalogError::InvalidLocalConfiguration)
+        );
+        record.kind = ProfileKind::Ssh;
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertProfile(record.clone())]),
+            Err(CatalogError::InvalidLocalProfile(record.id))
+        );
+        assert_eq!(catalog.snapshot().revision, 1);
+        assert_eq!(catalog.snapshot().local_connections, vec![target]);
+        catalog.apply_batch(
+            1,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::RemoveLocalConnection(record.id),
+            ],
+        )?;
+        assert!(catalog.snapshot().local_connections.is_empty());
         Ok(())
     }
 }

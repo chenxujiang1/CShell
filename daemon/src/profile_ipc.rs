@@ -24,6 +24,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub(crate) enum SavedSessionPlan {
+    Ssh(Box<crate::ssh_route::SshConnectionPlan>),
+    Local(cshell_local::LocalProfile),
+}
+
 #[derive(Debug)]
 pub struct ProfileIpcService {
     service: ProfileService<SqliteProfileRepository>,
@@ -79,17 +84,48 @@ impl ProfileIpcService {
         plan_from_snapshot(&snapshot, id).map_err(invalid)
     }
 
-    pub(crate) async fn ssh_plan(
-        &self,
-        id: ProfileId,
-    ) -> Result<crate::ssh_route::SshConnectionPlan, String> {
+    pub(crate) async fn session_plan(&self, id: ProfileId) -> Result<SavedSessionPlan, String> {
         let snapshot = self
             .service
             .load()
             .await
             .map_err(|error| error.to_string())?
             .snapshot();
-        plan_from_snapshot(&snapshot, id)
+        let record = snapshot
+            .profiles
+            .iter()
+            .find(|record| record.id == id)
+            .ok_or("Profile does not exist")?;
+        match record.kind {
+            cshell_domain::ProfileKind::Ssh => Ok(SavedSessionPlan::Ssh(Box::new(
+                plan_from_snapshot(&snapshot, id)?,
+            ))),
+            cshell_domain::ProfileKind::Local => {
+                let target = snapshot
+                    .local_connections
+                    .iter()
+                    .find(|connection| connection.profile_id == id)
+                    .ok_or("Local Profile program is not configured; edit and save it first")?;
+                let cwd_policy = match &target.cwd {
+                    cshell_domain::LocalWorkingDirectory::Inherit => {
+                        cshell_local::WorkingDirectoryPolicy::Inherit
+                    }
+                    cshell_domain::LocalWorkingDirectory::Home => {
+                        cshell_local::WorkingDirectoryPolicy::Home
+                    }
+                    cshell_domain::LocalWorkingDirectory::Explicit { path } => {
+                        cshell_local::WorkingDirectoryPolicy::Explicit(path.into())
+                    }
+                };
+                Ok(SavedSessionPlan::Local(cshell_local::LocalProfile {
+                    name: record.name.clone(),
+                    program: target.program.clone().into(),
+                    args: target.args.clone(),
+                    cwd_policy,
+                    env_overrides: target.env_overrides.clone(),
+                }))
+            }
+        }
     }
 
     pub async fn handle(&self, request: ProfileRequest) -> ProfileResponse {
@@ -102,6 +138,7 @@ impl ProfileIpcService {
                 preview: None,
                 detail,
                 host_key_preview: None,
+                local_shells: Vec::new(),
             },
         }
     }
@@ -113,6 +150,28 @@ impl ProfileIpcService {
         let operation = ProfileOperation::try_from(request.operation)
             .map_err(|_| invalid("unknown Profile operation"))?;
         match operation {
+            ProfileOperation::DiscoverLocalShells => {
+                let shells = tokio::task::spawn_blocking(cshell_local::discover_shells)
+                    .await
+                    .map_err(|_| {
+                        (
+                            ProfileStatus::Unavailable,
+                            "local shell discovery failed".into(),
+                        )
+                    })?;
+                Ok(ProfileResponse {
+                    status: ProfileStatus::Ok as i32,
+                    local_shells: shells
+                        .into_iter()
+                        .map(|shell| cshell_ipc::LocalShellData {
+                            name: shell.name,
+                            program: shell.program.to_string_lossy().into_owned(),
+                            args: shell.args,
+                        })
+                        .collect(),
+                    ..ProfileResponse::default()
+                })
+            }
             ProfileOperation::List => {
                 let snapshot = self.service.load().await.map_err(service_error)?.snapshot();
                 Ok(catalog_response(snapshot))
@@ -148,6 +207,7 @@ impl ProfileIpcService {
                     preview: Some(preview_data(preview)),
                     detail: String::new(),
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                 })
             }
             ProfileOperation::SetPassword | ProfileOperation::DeletePassword => {
@@ -218,6 +278,7 @@ impl ProfileIpcService {
                     preview: None,
                     detail: String::new(),
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                 })
             }
             ProfileOperation::SetKeyPassphrase | ProfileOperation::DeleteKeyPassphrase => {
@@ -292,6 +353,7 @@ impl ProfileIpcService {
                     preview: None,
                     detail: String::new(),
                     host_key_preview: None,
+                    local_shells: Vec::new(),
                 })
             }
             ProfileOperation::CommitImport => {
@@ -352,6 +414,7 @@ impl ProfileIpcService {
                 Ok(ProfileResponse {
                     status: ProfileStatus::Ok as i32,
                     revision: request.expected_revision,
+                    local_shells: Vec::new(),
                     host_key_preview: Some(Box::new(preview)),
                     ..ProfileResponse::default()
                 })
@@ -492,6 +555,14 @@ fn decode_change(change: ProfileChange) -> Result<CatalogChange, ProfileCodecErr
         profile_change::Change::UpsertSshConnection(value) => Ok(
             CatalogChange::UpsertSshConnection(SshConnectionRecord::try_from(value)?),
         ),
+        profile_change::Change::UpsertLocalConnection(value) => {
+            Ok(CatalogChange::UpsertLocalConnection(
+                cshell_domain::LocalConnectionRecord::try_from(value)?,
+            ))
+        }
+        profile_change::Change::RemoveLocalConnection(value) => Ok(
+            CatalogChange::RemoveLocalConnection(ProfileId::from_bytes(decode_id(&value)?)),
+        ),
         profile_change::Change::RemoveSshConnection(value) => Ok(
             CatalogChange::RemoveSshConnection(ProfileId::from_bytes(decode_id(&value)?)),
         ),
@@ -515,6 +586,11 @@ fn catalog_response(snapshot: CatalogSnapshot) -> ProfileResponse {
                 .iter()
                 .map(ProfileRecordData::from)
                 .collect(),
+            local_connections: snapshot
+                .local_connections
+                .iter()
+                .map(cshell_ipc::LocalConnectionData::from)
+                .collect(),
             ssh_connections: snapshot
                 .ssh_connections
                 .iter()
@@ -524,6 +600,7 @@ fn catalog_response(snapshot: CatalogSnapshot) -> ProfileResponse {
         preview: None,
         detail: String::new(),
         host_key_preview: None,
+        local_shells: Vec::new(),
     }
 }
 

@@ -241,16 +241,16 @@ async fn future_schema_is_not_downgraded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("future.db");
     let pool = raw_pool(&path).await?;
-    query("PRAGMA user_version = 5").execute(&pool).await?;
+    query("PRAGMA user_version = 6").execute(&pool).await?;
     pool.close().await;
     assert!(matches!(
         SqliteProfileRepository::open(&path).await,
-        Err(StorageError::UnsupportedSchema(5))
+        Err(StorageError::UnsupportedSchema(6))
     ));
     assert!(backups(temp.path())?.is_empty());
     let pool = raw_pool(&path).await?;
     let version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     pool.close().await;
     Ok(())
 }
@@ -428,6 +428,9 @@ async fn v3_route_migration_preserves_identity_and_backup_is_restorable()
     query("ALTER TABLE profile_ssh_connections DROP COLUMN route_json")
         .execute(&pool)
         .await?;
+    query("DROP TABLE profile_local_connections")
+        .execute(&pool)
+        .await?;
     query("PRAGMA user_version = 3").execute(&pool).await?;
     pool.close().await;
     let repository = SqliteProfileRepository::open(&path).await?;
@@ -446,6 +449,141 @@ async fn v3_route_migration_preserves_identity_and_backup_is_restorable()
     cshell_storage::restore_backup(&path, &backups[0]).await?;
     let repository = SqliteProfileRepository::open(&path).await?;
     assert_eq!(repository.load().await?.ssh_connections, vec![target]);
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_configuration_round_trip_failure_rollback_and_backup_restore()
+-> Result<(), Box<dyn Error>> {
+    use cshell_domain::{LocalConnectionRecord, LocalWorkingDirectory};
+    use std::collections::BTreeMap;
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("local.db");
+    let mut record = profile("local", None);
+    record.kind = ProfileKind::Local;
+    let target = LocalConnectionRecord {
+        profile_id: record.id,
+        program: "/custom path/shell".into(),
+        args: vec!["".into(), "literal spaces \"quote\" $()".into()],
+        cwd: LocalWorkingDirectory::Explicit {
+            path: "/directory with spaces".into(),
+        },
+        env_overrides: BTreeMap::from([
+            ("LANG".into(), "zh_CN.UTF-8".into()),
+            ("CSHELL_EMPTY".into(), "".into()),
+        ]),
+    };
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    service
+        .apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertLocalConnection(target.clone()),
+            ],
+        )
+        .await?;
+    let repository = service.into_repository();
+    let backup = repository.backup().await?;
+    repository.close().await;
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    assert_eq!(
+        service.load().await?.snapshot().local_connections,
+        vec![target.clone()]
+    );
+    let pool = raw_pool(&path).await?;
+    query("CREATE TRIGGER fail_local BEFORE INSERT ON profile_local_connections BEGIN SELECT RAISE(ABORT, 'injected local write failure'); END").execute(&pool).await?;
+    pool.close().await;
+    let mut changed_record = record.clone();
+    changed_record.name = "changed".into();
+    let mut changed_target = target.clone();
+    changed_target.program = "/changed".into();
+    assert!(
+        service
+            .apply_batch(
+                1,
+                &[
+                    CatalogChange::UpsertProfile(changed_record),
+                    CatalogChange::UpsertLocalConnection(changed_target)
+                ]
+            )
+            .await
+            .is_err()
+    );
+    let snapshot = service.load().await?.snapshot();
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.profiles, vec![record.clone()]);
+    assert_eq!(snapshot.local_connections, vec![target.clone()]);
+    let pool = raw_pool(&path).await?;
+    query("DROP TRIGGER fail_local").execute(&pool).await?;
+    pool.close().await;
+    service
+        .apply_batch(1, &[CatalogChange::RemoveProfile(record.id)])
+        .await?;
+    assert!(
+        service
+            .load()
+            .await?
+            .snapshot()
+            .local_connections
+            .is_empty()
+    );
+    service.into_repository().close().await;
+    restore_backup(&path, &backup).await?;
+    let repository = SqliteProfileRepository::open(&path).await?;
+    let snapshot = repository.load().await?;
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.profiles, vec![record]);
+    assert_eq!(snapshot.local_connections, vec![target]);
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v4_local_migration_preserves_metadata_and_backup() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("v4.db");
+    let mut record = profile("legacy local", None);
+    record.kind = ProfileKind::Local;
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    service
+        .apply_batch(0, &[CatalogChange::UpsertProfile(record.clone())])
+        .await?;
+    service.into_repository().close().await;
+    let pool = raw_pool(&path).await?;
+    query("DROP TABLE profile_local_connections")
+        .execute(&pool)
+        .await?;
+    query("PRAGMA user_version = 4").execute(&pool).await?;
+    pool.close().await;
+    let repository = SqliteProfileRepository::open(&path).await?;
+    let snapshot = repository.load().await?;
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.profiles, vec![record.clone()]);
+    assert!(snapshot.local_connections.is_empty());
+    repository.close().await;
+    let backup_paths = backups(temp.path())?;
+    assert_eq!(backup_paths.len(), 1);
+    let pool = raw_pool(&backup_paths[0]).await?;
+    assert_eq!(
+        query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?,
+        4
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'profile_local_connections'"
+        )
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
+    pool.close().await;
+    restore_backup(&path, &backup_paths[0]).await?;
+    let repository = SqliteProfileRepository::open(&path).await?;
+    assert_eq!(repository.load().await?.profiles, vec![record]);
     repository.close().await;
     Ok(())
 }

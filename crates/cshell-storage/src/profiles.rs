@@ -4,8 +4,8 @@ use cshell_application::{
     CatalogSnapshot, ProfileCatalog, ProfileRepository, ProfileRepositoryError,
 };
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAgentBackend, SshAuthMethod,
-    SshConnectionRecord, TerminalDefaults, TerminalOverrides,
+    FolderId, LocalConnectionRecord, ProfileFolder, ProfileId, ProfileKind, ProfileRecord,
+    SshAgentBackend, SshAuthMethod, SshConnectionRecord, TerminalDefaults, TerminalOverrides,
 };
 use sqlx::{Row, SqlitePool, query};
 use std::collections::{BTreeSet, HashMap};
@@ -162,6 +162,19 @@ impl ProfileRepository for SqliteProfileRepository {
                 .map_err(|_| ProfileRepositoryError::Corrupt)?,
             });
         }
+        let local_rows = query("SELECT profile_id, configuration_json FROM profile_local_connections ORDER BY profile_id")
+            .fetch_all(&mut *tx).await.map_err(|_| ProfileRepositoryError::Unavailable)?;
+        let mut local_connections = Vec::with_capacity(local_rows.len());
+        for row in local_rows {
+            let id: String = row.try_get("profile_id").map_err(corrupt)?;
+            let json: String = row.try_get("configuration_json").map_err(corrupt)?;
+            let connection: LocalConnectionRecord =
+                serde_json::from_str(&json).map_err(|_| ProfileRepositoryError::Corrupt)?;
+            if connection.profile_id != parse_profile_id(&id)? {
+                return Err(ProfileRepositoryError::Corrupt);
+            }
+            local_connections.push(connection);
+        }
         tx.commit()
             .await
             .map_err(|_| ProfileRepositoryError::Unavailable)?;
@@ -171,6 +184,7 @@ impl ProfileRepository for SqliteProfileRepository {
             folders,
             profiles,
             ssh_connections,
+            local_connections,
         };
         ProfileCatalog::from_snapshot(snapshot.clone())
             .map_err(|_| ProfileRepositoryError::Corrupt)?;
@@ -216,6 +230,10 @@ impl ProfileRepository for SqliteProfileRepository {
             return Err(ProfileRepositoryError::Conflict);
         }
 
+        query("DELETE FROM profile_local_connections")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ProfileRepositoryError::Unavailable)?;
         query("DELETE FROM profile_ssh_connections")
             .execute(&mut *tx)
             .await
@@ -304,6 +322,12 @@ impl ProfileRepository for SqliteProfileRepository {
             .execute(&mut *tx)
             .await
             .map_err(|_| ProfileRepositoryError::Unavailable)?;
+        }
+        for connection in &next.local_connections {
+            query("INSERT INTO profile_local_connections (profile_id, configuration_json) VALUES (?1, ?2)")
+                .bind(connection.profile_id.to_string())
+                .bind(serde_json::to_string(connection).map_err(|_| ProfileRepositoryError::Corrupt)?)
+                .execute(&mut *tx).await.map_err(|_| ProfileRepositoryError::Unavailable)?;
         }
         tx.commit()
             .await

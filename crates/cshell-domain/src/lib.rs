@@ -10,8 +10,8 @@ pub use error::{DomainError, ErrorCode};
 pub use id::{ConnectionId, FolderId, ProfileId, SessionId, TargetId, TaskId, TaskRunId};
 pub use input::{ControlAction, InputAction, KeyCode, KeyEvent, Modifiers, TerminalSize};
 pub use profile::{
-    ProfileFolder, ProfileKind, ProfileRecord, ResolvedField, ResolvedTerminalSettings,
-    SettingSource, SshAgentBackend, SshAuthMethod, SshConnectionRecord, SshRoute, TerminalDefaults,
-    TerminalOverrides,
+    LocalConnectionRecord, LocalWorkingDirectory, ProfileFolder, ProfileKind, ProfileRecord,
+    ResolvedField, ResolvedTerminalSettings, SettingSource, SshAgentBackend, SshAuthMethod,
+    SshConnectionRecord, SshRoute, TerminalDefaults, TerminalOverrides,
 };
 pub use state::{ConnectionState, TargetState, TaskState};

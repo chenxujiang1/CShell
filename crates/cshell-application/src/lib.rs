@@ -12,6 +12,7 @@ pub use profile_import::{
 pub use profiles::{
     CatalogChange, CatalogError, CatalogPreview, CatalogSnapshot, ChangeOutcome, ProfileCatalog,
     ProfileQuery, ProfileRepository, ProfileRepositoryError, ProfileService, ProfileServiceError,
+    validate_local_connection,
 };
 
 use async_trait::async_trait;

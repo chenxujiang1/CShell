@@ -1,20 +1,78 @@
 use crate::profile_connection::{DesktopProfileCatalog, DesktopProfileView, ProfileClientCommand};
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAgentBackend, SshAuthMethod,
-    SshConnectionRecord, SshRoute, TerminalOverrides,
+    FolderId, LocalConnectionRecord, LocalWorkingDirectory, ProfileFolder, ProfileId, ProfileKind,
+    ProfileRecord, SshAgentBackend, SshAuthMethod, SshConnectionRecord, SshRoute,
+    TerminalOverrides,
 };
 use cshell_ipc::{
     HostKeyPreviewData, ProfileChange, ProfileFolderData, ProfileImportAction,
     ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData, ProfileRecordData,
     SshConnectionData, profile_change,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Selected {
     Folder(FolderId),
     Profile(ProfileId),
+}
+
+#[derive(Default)]
+struct LocalDraft {
+    program: String,
+    args: Vec<String>,
+    cwd_kind: u8,
+    cwd_path: String,
+    env: Vec<(String, String)>,
+}
+
+impl LocalDraft {
+    fn from_connection(connection: Option<&LocalConnectionRecord>) -> Self {
+        let Some(connection) = connection else {
+            return Self::default();
+        };
+        Self {
+            program: connection.program.clone(),
+            args: connection.args.clone(),
+            cwd_kind: match connection.cwd {
+                LocalWorkingDirectory::Inherit => 0,
+                LocalWorkingDirectory::Home => 1,
+                LocalWorkingDirectory::Explicit { .. } => 2,
+            },
+            cwd_path: match &connection.cwd {
+                LocalWorkingDirectory::Explicit { path } => path.clone(),
+                _ => String::new(),
+            },
+            env: connection
+                .env_overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        }
+    }
+    fn record(&self, profile_id: ProfileId) -> Result<LocalConnectionRecord, String> {
+        let env_overrides: BTreeMap<_, _> = self.env.iter().cloned().collect();
+        if env_overrides.len() != self.env.len() {
+            return Err("Environment names must be unique".into());
+        }
+        let record = LocalConnectionRecord {
+            profile_id,
+            program: self.program.clone(),
+            args: self.args.clone(),
+            cwd: match self.cwd_kind {
+                1 => LocalWorkingDirectory::Home,
+                2 => LocalWorkingDirectory::Explicit {
+                    path: self.cwd_path.clone(),
+                },
+                _ => LocalWorkingDirectory::Inherit,
+            },
+            env_overrides,
+        };
+        cshell_application::validate_local_connection(&record)
+            .map_err(|error| error.to_string())?;
+        Ok(record)
+    }
 }
 
 struct ProfileDraft {
@@ -36,6 +94,8 @@ struct ProfileDraft {
     key_passphrase: String,
     host_key_confirmation: String,
     had_ssh_connection: bool,
+    had_local_connection: bool,
+    local: LocalDraft,
 }
 
 impl ProfileDraft {
@@ -84,6 +144,7 @@ pub struct ProfilePanel {
     preview: Option<ProfileImportPreviewData>,
     preview_source: Option<(String, ProfileImportPolicy)>,
     host_key_preview: Option<HostKeyPreviewData>,
+    local_shells: Vec<cshell_ipc::LocalShellData>,
     error: Option<String>,
     launch_error: Option<String>,
     status: String,
@@ -104,6 +165,7 @@ impl Default for ProfilePanel {
             preview: None,
             preview_source: None,
             host_key_preview: None,
+            local_shells: Vec::new(),
             error: None,
             launch_error: None,
             status: String::new(),
@@ -139,6 +201,7 @@ impl ProfilePanel {
             self.profile_draft = None;
             self.host_key_preview = None;
         }
+        self.local_shells = view.local_shells.clone();
         self.catalog = view.catalog.clone();
         self.preview = view.preview.clone();
         self.preview_source = view.preview_source.clone();
@@ -157,6 +220,7 @@ impl ProfilePanel {
         let mut clear_selection = false;
         let catalog = self.catalog.clone();
         let host_key_preview = self.host_key_preview.clone();
+        let local_shells = self.local_shells.clone();
         egui::Window::new("Profiles and folders")
             .open(&mut open)
             .default_size([760.0, 580.0])
@@ -167,7 +231,7 @@ impl ProfilePanel {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
                 if let Some(error) = &self.launch_error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("SSH launch: {error}"));
+                    ui.colored_label(egui::Color32::LIGHT_RED, format!("Profile launch: {error}"));
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Refresh").clicked() {
@@ -467,6 +531,19 @@ impl ProfilePanel {
                                         command = Some(ProfileClientCommand::OpenProfile(draft.record.id));
                                     }
                                 }
+                                if draft.record.kind == ProfileKind::Local {
+                                    if draw_local_fields(ui, &mut draft.local, &local_shells) {
+                                        command = Some(ProfileClientCommand::DiscoverLocalShells);
+                                    }
+                                    let saved_local = catalog.local_connections.iter().any(|item| item.profile_id == draft.record.id);
+                                    if ui.add_enabled(saved_local, egui::Button::new("Open saved Local Profile")).clicked() {
+                                        command = Some(ProfileClientCommand::OpenProfile(draft.record.id));
+                                    }
+                                }
+                                let local_target = draft.local.record(draft.record.id);
+                                if draft.record.kind == ProfileKind::Local && let Err(error) = &local_target {
+                                    ui.colored_label(egui::Color32::YELLOW, error);
+                                }
                                 let target_incomplete = draft.record.kind == ProfileKind::Ssh
                                     && (draft.ssh_host.trim().is_empty()
                                         != draft.ssh_username.trim().is_empty());
@@ -479,7 +556,7 @@ impl ProfilePanel {
                                 ui.horizontal(|ui| {
                                     if ui
                                         .add_enabled(
-                                            !target_incomplete,
+                                            !target_incomplete && (draft.record.kind != ProfileKind::Local || local_target.is_ok()),
                                             egui::Button::new("Save Profile"),
                                         )
                                         .clicked()
@@ -531,6 +608,13 @@ impl ProfilePanel {
                                                     ),
                                                 ),
                                             });
+                                        }
+                                        if draft.record.kind == ProfileKind::Local {
+                                            if let Ok(target) = &local_target {
+                                                changes.push(ProfileChange { change: Some(profile_change::Change::UpsertLocalConnection(cshell_ipc::LocalConnectionData::from(target))) });
+                                            }
+                                        } else if draft.had_local_connection {
+                                            changes.push(ProfileChange { change: Some(profile_change::Change::RemoveLocalConnection(draft.record.id.as_uuid().as_bytes().to_vec())) });
                                         }
                                         command = Some(ProfileClientCommand::Apply {
                                             expected_revision: catalog.revision,
@@ -721,6 +805,12 @@ impl ProfilePanel {
                 .iter()
                 .find(|connection| connection.profile_id == record.id)
         });
+        let local = self.catalog.as_ref().and_then(|catalog| {
+            catalog
+                .local_connections
+                .iter()
+                .find(|connection| connection.profile_id == record.id)
+        });
         self.selected = Some(Selected::Profile(record.id));
         self.profile_draft = Some(ProfileDraft {
             tags: record.tags.iter().cloned().collect::<Vec<_>>().join(", "),
@@ -768,6 +858,8 @@ impl ProfilePanel {
                 _ => None,
             }),
             had_ssh_connection: connection.is_some(),
+            had_local_connection: local.is_some(),
+            local: LocalDraft::from_connection(local),
             record,
         });
         self.folder_draft = None;
@@ -842,4 +934,99 @@ fn terminal_fields(ui: &mut egui::Ui, terminal: &mut TerminalOverrides) {
 fn optional_text(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn draw_local_fields(
+    ui: &mut egui::Ui,
+    draft: &mut LocalDraft,
+    shells: &[cshell_ipc::LocalShellData],
+) -> bool {
+    ui.heading("Local program");
+    let mut refresh = false;
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_label("Installed shells")
+            .selected_text("Choose a shell")
+            .show_ui(ui, |ui| {
+                for shell in shells {
+                    if ui.selectable_label(false, &shell.name).clicked() {
+                        draft.program.clone_from(&shell.program);
+                        draft.args.clone_from(&shell.args);
+                    }
+                }
+            });
+        refresh = ui.button("Refresh shells").clicked();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Program");
+        ui.text_edit_singleline(&mut draft.program);
+    });
+    ui.label("Arguments are passed separately, exactly as entered. No command-line splitting.");
+    ui.collapsing("Arguments", |ui| {
+        let mut remove = None;
+        for (index, arg) in draft.args.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{}", index + 1));
+                ui.text_edit_singleline(arg);
+                if ui.button("Remove").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            draft.args.remove(index);
+        }
+        if ui
+            .add_enabled(draft.args.len() < 256, egui::Button::new("Add argument"))
+            .clicked()
+        {
+            draft.args.push(String::new());
+        }
+    });
+    egui::ComboBox::from_label("Working directory")
+        .selected_text(match draft.cwd_kind {
+            1 => "Home",
+            2 => "Explicit directory",
+            _ => "Inherit daemon directory",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut draft.cwd_kind, 0, "Inherit daemon directory");
+            ui.selectable_value(&mut draft.cwd_kind, 1, "Home");
+            ui.selectable_value(&mut draft.cwd_kind, 2, "Explicit directory");
+        });
+    if draft.cwd_kind == 2 {
+        ui.horizontal(|ui| {
+            ui.label("Directory");
+            ui.text_edit_singleline(&mut draft.cwd_path);
+        });
+    }
+    ui.label("The directory applies to the local process. For WSL, set its Linux directory with WSL arguments.");
+    ui.collapsing("Environment overrides", |ui| {
+        ui.label(
+            "Values are saved as plain configuration. Use these fields for non-secret values.",
+        );
+        let mut remove = None;
+        for (index, (key, value)) in draft.env.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(key);
+                ui.label("=");
+                ui.text_edit_singleline(value);
+                if ui.button("Remove").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            draft.env.remove(index);
+        }
+        if ui
+            .add_enabled(
+                draft.env.len() < 128,
+                egui::Button::new("Add environment override"),
+            )
+            .clicked()
+        {
+            draft.env.push((String::new(), String::new()));
+        }
+    });
+    refresh
 }

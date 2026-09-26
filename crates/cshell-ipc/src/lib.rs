@@ -41,10 +41,10 @@ pub use replica::{
 pub use subscription::{ClientFrameUpdate, SubscriptionClientError, TerminalSubscriptionReplica};
 
 pub use profile::{
-    HostKeyPreviewData, MAX_PROFILE_CONTROL_CHANGES, ProfileCatalogData, ProfileChange,
-    ProfileCodecError, ProfileDefaultsData, ProfileFolderData, ProfileImportAction,
-    ProfileImportItemData, ProfileImportItemKind, ProfileImportPolicy, ProfileImportPreviewData,
-    ProfileKindData, ProfileOperation, ProfileRecordData, ProfileRequest, ProfileResponse,
-    ProfileStatus, ProfileTerminalOverridesData, SshConnectionData, SshRouteData, decode_id,
-    profile_change,
+    HostKeyPreviewData, LocalConnectionData, LocalShellData, MAX_PROFILE_CONTROL_CHANGES,
+    ProfileCatalogData, ProfileChange, ProfileCodecError, ProfileDefaultsData, ProfileFolderData,
+    ProfileImportAction, ProfileImportItemData, ProfileImportItemKind, ProfileImportPolicy,
+    ProfileImportPreviewData, ProfileKindData, ProfileOperation, ProfileRecordData, ProfileRequest,
+    ProfileResponse, ProfileStatus, ProfileTerminalOverridesData, SshConnectionData, SshRouteData,
+    decode_id, profile_change,
 };

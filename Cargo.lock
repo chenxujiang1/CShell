@@ -1125,6 +1125,7 @@ dependencies = [
 name = "cshell-gui"
 version = "0.1.0"
 dependencies = [
+ "cshell-application",
  "cshell-domain",
  "cshell-ipc",
  "cshell-local",

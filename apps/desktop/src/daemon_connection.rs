@@ -137,18 +137,18 @@ pub enum DesktopConnectionError {
     Subscription(#[from] SubscriptionClientError),
     #[error("daemon returned an unexpected session control response")]
     UnexpectedControlResponse,
-    #[error("switching to saved SSH Profile")]
+    #[error("switching to saved Profile")]
     SwitchSession(DesktopSessionAction),
-    #[error("saved SSH Profile could not start: {0}")]
+    #[error("saved Profile could not start: {0}")]
     ProfileLaunch(String),
     #[error("previous session is unavailable; reconnect explicitly to open a New Shell")]
     SessionUnavailable,
     #[error(
-        "SSH open request outcome is unknown; inspect existing sessions before opening a New Shell"
+        "Profile open request outcome is unknown; inspect existing sessions before opening a New Shell"
     )]
     SessionCreationUncertain,
-    #[error("daemon did not negotiate saved SSH Profile sessions")]
-    SshProfileNotNegotiated,
+    #[error("daemon did not negotiate saved Profile sessions")]
+    ProfileSessionNotNegotiated,
     #[error("daemon returned an invalid session identifier")]
     InvalidSessionId,
     #[error("daemon did not negotiate bounded log paging")]
@@ -349,7 +349,7 @@ impl DesktopDaemonConnection {
             view.terminal_detail.clear();
             view.connected = false;
             view.snapshot = None;
-            view.detail = "opening saved SSH Profile".into();
+            view.detail = "opening saved Profile".into();
         }
         sent
     }
@@ -371,7 +371,7 @@ impl DesktopDaemonConnection {
             .is_ok();
         if sent {
             view.launch_error = None;
-            view.detail = "Opening a New Shell; the previous remote process is not restored".into();
+            view.detail = "Opening a New Shell; the previous process is not restored".into();
             view.session_opening = true;
             view.terminal_detail.clear();
         }
@@ -557,7 +557,7 @@ async fn reconnect_loop(
             Err(DesktopConnectionError::ProfileLaunch(_)
                 | DesktopConnectionError::SessionUnavailable
                 | DesktopConnectionError::SessionCreationUncertain
-                | DesktopConnectionError::SshProfileNotNegotiated
+                | DesktopConnectionError::ProfileSessionNotNegotiated
                 | DesktopConnectionError::TerminalControlNotNegotiated
                 | DesktopConnectionError::LogPagingNotNegotiated)
         ) {
@@ -668,7 +668,8 @@ async fn connect_once(
         | features::LOG_PAGING
         | features::TERMINAL_CONTROL
         | features::SSH_PROFILE_SESSION
-        | features::SSH_SESSION_STATUS;
+        | features::SSH_SESSION_STATUS
+        | features::LOCAL_PROFILE;
     let negotiated = client_handshake(&mut stream, 1, handshake).await?;
     if config.request_log_pages && negotiated.feature_bits & features::LOG_PAGING == 0 {
         return Err(DesktopConnectionError::LogPagingNotNegotiated);
@@ -686,8 +687,10 @@ async fn connect_once(
         DesktopSessionAction::OpenProfile(profile_id) | DesktopSessionAction::NewShell(profile_id),
     ) = requested_action
     {
-        if negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0 {
-            return Err(DesktopConnectionError::SshProfileNotNegotiated);
+        if negotiated.feature_bits & (features::SSH_PROFILE_SESSION | features::LOCAL_PROFILE)
+            != (features::SSH_PROFILE_SESSION | features::LOCAL_PROFILE)
+        {
+            return Err(DesktopConnectionError::ProfileSessionNotNegotiated);
         }
         let size = *requests.resize.borrow();
         let created = create_saved_profile_session(
@@ -742,8 +745,7 @@ async fn connect_once(
                 .session_title
                 .as_ref()
                 .map(|title| format!("{title} · New Shell"));
-            view.terminal_detail =
-                "New Shell opened; the previous remote process is not restored".into();
+            view.terminal_detail = "New Shell opened; the previous process is not restored".into();
         }
     }
     let mut replica = TerminalSubscriptionReplica::new(session_id);

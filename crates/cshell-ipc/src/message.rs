@@ -36,6 +36,7 @@ pub mod features {
     pub const SSH_HOST_KEY_IMPORT: u64 = 1 << 10;
     pub const SSH_SESSION_STATUS: u64 = 1 << 11;
     pub const SSH_PROFILE_ROUTE: u64 = 1 << 12;
+    pub const LOCAL_PROFILE: u64 = 1 << 13;
 }
 
 #[derive(Clone, PartialEq, Message)]

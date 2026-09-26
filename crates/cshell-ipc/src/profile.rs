@@ -1,11 +1,12 @@
 //! Bounded Profile control messages shared by desktop and daemon.
 
 use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileKind, ProfileRecord, SshAgentBackend, SshAuthMethod,
-    SshConnectionRecord, TerminalDefaults, TerminalOverrides,
+    FolderId, LocalConnectionRecord, LocalWorkingDirectory, ProfileFolder, ProfileId, ProfileKind,
+    ProfileRecord, SshAgentBackend, SshAuthMethod, SshConnectionRecord, TerminalDefaults,
+    TerminalOverrides,
 };
 use prost::{Enumeration, Message};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 pub const MAX_PROFILE_CONTROL_CHANGES: usize = 2048;
@@ -45,6 +46,7 @@ pub enum ProfileOperation {
     DeleteKeyPassphrase = 7,
     PreviewHostKey = 8,
     ConfirmHostKey = 9,
+    DiscoverLocalShells = 10,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -69,6 +71,8 @@ pub struct ProfileResponse {
     pub detail: String,
     #[prost(message, optional, boxed, tag = "6")]
     pub host_key_preview: Option<Box<HostKeyPreviewData>>,
+    #[prost(message, repeated, tag = "7")]
+    pub local_shells: Vec<LocalShellData>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -114,6 +118,8 @@ pub struct ProfileCatalogData {
     pub profiles: Vec<ProfileRecordData>,
     #[prost(message, repeated, tag = "5")]
     pub ssh_connections: Vec<SshConnectionData>,
+    #[prost(message, repeated, tag = "6")]
+    pub local_connections: Vec<LocalConnectionData>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -164,6 +170,69 @@ pub struct ProfileRecordData {
     pub favorite: bool,
     #[prost(message, optional, tag = "7")]
     pub terminal: Option<ProfileTerminalOverridesData>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct LocalShellData {
+    #[prost(string, tag = "1")]
+    pub name: String,
+    #[prost(string, tag = "2")]
+    pub program: String,
+    #[prost(string, repeated, tag = "3")]
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct LocalConnectionData {
+    #[prost(bytes = "vec", tag = "1")]
+    pub profile_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub program: String,
+    #[prost(string, repeated, tag = "3")]
+    pub args: Vec<String>,
+    #[prost(uint32, tag = "4")]
+    pub cwd_kind: u32,
+    #[prost(string, tag = "5")]
+    pub cwd_path: String,
+    #[prost(btree_map = "string, string", tag = "6")]
+    pub env_overrides: BTreeMap<String, String>,
+}
+
+impl From<&LocalConnectionRecord> for LocalConnectionData {
+    fn from(value: &LocalConnectionRecord) -> Self {
+        let (cwd_kind, cwd_path) = match &value.cwd {
+            LocalWorkingDirectory::Inherit => (0, String::new()),
+            LocalWorkingDirectory::Home => (1, String::new()),
+            LocalWorkingDirectory::Explicit { path } => (2, path.clone()),
+        };
+        Self {
+            profile_id: value.profile_id.as_uuid().as_bytes().to_vec(),
+            program: value.program.clone(),
+            args: value.args.clone(),
+            cwd_kind,
+            cwd_path,
+            env_overrides: value.env_overrides.clone(),
+        }
+    }
+}
+
+impl TryFrom<LocalConnectionData> for LocalConnectionRecord {
+    type Error = ProfileCodecError;
+    fn try_from(value: LocalConnectionData) -> Result<Self, Self::Error> {
+        let cwd = match (value.cwd_kind, value.cwd_path.as_str()) {
+            (0, "") => LocalWorkingDirectory::Inherit,
+            (1, "") => LocalWorkingDirectory::Home,
+            (2, path) if !path.is_empty() => LocalWorkingDirectory::Explicit { path: path.into() },
+            _ => return Err(ProfileCodecError::InvalidLocalDirectory),
+        };
+        Ok(Self {
+            profile_id: ProfileId::from_bytes(decode_id(&value.profile_id)?),
+            program: value.program,
+            args: value.args,
+            cwd,
+            env_overrides: value.env_overrides,
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -285,12 +354,12 @@ pub enum ProfileKindData {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ProfileChange {
-    #[prost(oneof = "profile_change::Change", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "profile_change::Change", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     pub change: Option<profile_change::Change>,
 }
 
 pub mod profile_change {
-    use super::{ProfileFolderData, ProfileRecordData, SshConnectionData};
+    use super::{LocalConnectionData, ProfileFolderData, ProfileRecordData, SshConnectionData};
     use prost::Oneof;
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -307,6 +376,10 @@ pub mod profile_change {
         UpsertSshConnection(SshConnectionData),
         #[prost(bytes, tag = "6")]
         RemoveSshConnection(Vec<u8>),
+        #[prost(message, tag = "7")]
+        UpsertLocalConnection(LocalConnectionData),
+        #[prost(bytes, tag = "8")]
+        RemoveLocalConnection(Vec<u8>),
     }
 }
 
@@ -350,6 +423,8 @@ pub enum ProfileImportAction {
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum ProfileCodecError {
+    #[error("invalid local working directory policy")]
+    InvalidLocalDirectory,
     #[error("Profile identifier must contain 16 bytes")]
     InvalidId,
     #[error("Profile kind is unknown")]
