@@ -34,6 +34,7 @@ pub mod features {
     pub const SSH_PROFILE_SESSION: u64 = 1 << 8;
     pub const SSH_PROFILE_AUTH: u64 = 1 << 9;
     pub const SSH_HOST_KEY_IMPORT: u64 = 1 << 10;
+    pub const SSH_SESSION_STATUS: u64 = 1 << 11;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -736,6 +737,10 @@ pub struct SessionSummary {
     pub running: bool,
     #[prost(fixed64, tag = "4")]
     pub generation: u64,
+    #[prost(bytes = "vec", optional, tag = "5")]
+    pub profile_id: Option<Vec<u8>>,
+    #[prost(string, tag = "6")]
+    pub terminal_detail: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -754,6 +759,25 @@ pub struct SessionCreateResponse {
     pub session: Option<SessionSummary>,
     #[prost(string, tag = "2")]
     pub detail: String,
+    #[prost(enumeration = "SessionFailureCode", tag = "3")]
+    pub failure_code: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum SessionFailureCode {
+    None = 0,
+    InvalidConfiguration = 1,
+    CredentialUnavailable = 2,
+    HostKeyUnknown = 3,
+    HostKeyChanged = 4,
+    HostKeyRevoked = 5,
+    HostKeyDataInvalid = 6,
+    NetworkUnavailable = 7,
+    AuthenticationRejected = 8,
+    ProtocolRejected = 9,
+    StorageUnavailable = 10,
+    Unsupported = 11,
 }
 
 #[derive(Clone, PartialEq, Message)]

@@ -7,12 +7,15 @@ use cshell_domain::{ProfileId, SessionId, SshAgentBackend, SshAuthMethod, Termin
 use cshell_ipc::{
     Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
     LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse, SessionCreateResponse,
-    SessionListResponse, SessionSummary, TerminalControlCodecError, TerminalControlResponse,
-    TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest, TerminalStyle, envelope,
-    read_envelope, write_envelope,
+    SessionFailureCode, SessionListResponse, SessionSummary, TerminalControlCodecError,
+    TerminalControlResponse, TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest,
+    TerminalStyle, envelope, read_envelope, write_envelope,
 };
 use cshell_output_store::{JournalColor, JournalStyle};
-use cshell_ssh::{AgentBackend, KnownHostsVerifier, SshCertificate, SshPrivateKey};
+use cshell_ssh::{
+    AgentBackend, HostKeyCheck, KnownHostsError, KnownHostsVerifier, SshCertificate, SshError,
+    SshPrivateKey,
+};
 use cshell_terminal::{Color, Style};
 use cshell_vault::{
     KeychainError, ProfileKeyPassphraseRef, ProfilePasswordBinding, ProfilePasswordRef,
@@ -56,6 +59,29 @@ pub struct SessionIpcService {
 struct DispatchResult {
     response: Envelope,
     subscription: Option<TerminalFrameSubscription>,
+}
+
+struct SshLaunchFailure {
+    code: SessionFailureCode,
+    detail: String,
+}
+impl SshLaunchFailure {
+    fn new(code: SessionFailureCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+}
+impl From<String> for SshLaunchFailure {
+    fn from(detail: String) -> Self {
+        Self::new(SessionFailureCode::InvalidConfiguration, detail)
+    }
+}
+impl From<&str> for SshLaunchFailure {
+    fn from(detail: &str) -> Self {
+        Self::from(detail.to_owned())
+    }
 }
 
 impl SessionIpcService {
@@ -304,21 +330,28 @@ impl SessionIpcService {
             && let Some(profile_id) = &create.profile_id
         {
             let result = if negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
-                Err("SSH Profile sessions were not negotiated".to_owned())
+                Err(SshLaunchFailure::new(
+                    SessionFailureCode::Unsupported,
+                    "SSH Profile sessions were not negotiated",
+                ))
             } else {
                 self.spawn_ssh_profile(profile_id, create.rows, create.cols)
                     .await
             };
-            let (session, detail) = match result {
-                Ok(session) => (Some(session), String::new()),
-                Err(detail) => (None, detail),
+            let (session, detail, failure_code) = match result {
+                Ok(session) => (Some(session), String::new(), SessionFailureCode::None),
+                Err(error) => (None, error.detail, error.code),
             };
             return Ok(DispatchResult {
                 response: Envelope {
                     request_id: request.request_id,
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateResponse(
-                        SessionCreateResponse { session, detail },
+                        SessionCreateResponse {
+                            session,
+                            detail,
+                            failure_code: failure_code as i32,
+                        },
                     )),
                 },
                 subscription: None,
@@ -378,12 +411,14 @@ impl SessionIpcService {
         bytes: &[u8],
         rows: u32,
         cols: u32,
-    ) -> Result<SessionSummary, String> {
+    ) -> Result<SessionSummary, SshLaunchFailure> {
         let profile_id = ProfileId::from_bytes(bytes.try_into().map_err(|_| "invalid Profile ID")?);
-        let profiles = self
-            .profiles
-            .as_ref()
-            .ok_or("Profile storage unavailable")?;
+        let profiles = self.profiles.as_ref().ok_or_else(|| {
+            SshLaunchFailure::new(
+                SessionFailureCode::StorageUnavailable,
+                "Profile storage unavailable",
+            )
+        })?;
         let (title, target) = profiles.ssh_target(profile_id).await?;
         let rows = u16::try_from(rows)
             .ok()
@@ -407,8 +442,14 @@ impl SessionIpcService {
         })
         .await
         .map_err(|_| "known_hosts loading failed")?
-        .map_err(|error| format!("strict known_hosts check cannot start: {error}"))?;
-        let authentication = match target.auth_method {
+        .map_err(|error| {
+            let code = if matches!(&error, KnownHostsError::Io(error) if error.kind() == std::io::ErrorKind::NotFound) {
+                SessionFailureCode::HostKeyUnknown
+            } else { SessionFailureCode::HostKeyDataInvalid };
+            SshLaunchFailure::new(code, format!("strict known_hosts check cannot start: {error}"))
+        })?;
+        let authentication = async {
+            let authentication = match target.auth_method {
             SshAuthMethod::Password => {
                 let reference =
                     ProfilePasswordRef::from_profile_bytes(*profile_id.as_uuid().as_bytes());
@@ -492,7 +533,11 @@ impl SessionIpcService {
                     identity_fingerprint: target.agent_identity.clone(),
                 }
             }
-        };
+            };
+            Ok::<_, String>(authentication)
+        }
+        .await
+        .map_err(|detail| SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, detail))?;
         let id = SessionId::new();
         let size = TerminalSize::cells(rows, cols);
         let session = SshSession::connect(
@@ -508,14 +553,11 @@ impl SessionIpcService {
             256,
         )
         .await
-        .map_err(|error| format!("SSH session failed: {error}"))?;
-        let session = self.ssh_sessions.insert(session);
-        Ok(SessionSummary {
-            session_id: id.as_uuid().as_bytes().to_vec(),
-            title,
-            running: session.running(),
-            generation: session.generation(),
-        })
+        .map_err(ssh_launch_failure)?;
+        let session = self
+            .ssh_sessions
+            .insert(session.with_profile_id(profile_id));
+        Ok(session.summary())
     }
 
     fn dispatch(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
@@ -538,12 +580,7 @@ impl SessionIpcService {
                         self.ssh_sessions
                             .list()
                             .into_iter()
-                            .map(|session| SessionSummary {
-                                session_id: session.id().as_uuid().as_bytes().to_vec(),
-                                title: session.title().to_owned(),
-                                running: session.running(),
-                                generation: session.generation(),
-                            }),
+                            .map(|session| session.summary()),
                     )
                     .collect();
                 (
@@ -559,6 +596,7 @@ impl SessionIpcService {
                     envelope::Payload::SessionCreateResponse(SessionCreateResponse {
                         session: Some(SessionSummary::from(session)),
                         detail: String::new(),
+                        failure_code: SessionFailureCode::None as i32,
                     }),
                     None,
                 )
@@ -776,6 +814,53 @@ async fn read_ssh_auth_file(path: &str, label: &str) -> Result<Zeroizing<String>
         .map_err(|_| format!("{label} file is not UTF-8"))
 }
 
+fn ssh_launch_failure(error: SshSessionError) -> SshLaunchFailure {
+    let (code, detail) = match error {
+        SshSessionError::Ssh(SshError::HostKeyRejected(HostKeyCheck::Unknown)) => (
+            SessionFailureCode::HostKeyUnknown,
+            "Unknown SSH host key. Preview and confirm its fingerprint in the Profile editor.",
+        ),
+        SshSessionError::Ssh(SshError::HostKeyRejected(HostKeyCheck::Changed)) => (
+            SessionFailureCode::HostKeyChanged,
+            "SSH host key changed. Verify the change with the server administrator.",
+        ),
+        SshSessionError::Ssh(SshError::HostKeyRejected(HostKeyCheck::Revoked)) => (
+            SessionFailureCode::HostKeyRevoked,
+            "SSH host key is revoked. Contact the server administrator.",
+        ),
+        SshSessionError::Ssh(SshError::AuthenticationRejected) => (
+            SessionFailureCode::AuthenticationRejected,
+            "SSH authentication rejected. Check the saved username and authentication settings.",
+        ),
+        SshSessionError::Ssh(error) if error.is_transport_failure() => (
+            SessionFailureCode::NetworkUnavailable,
+            "SSH network connection failed or timed out. Check the host, port and network, then retry manually.",
+        ),
+        SshSessionError::Ssh(
+            SshError::Agent(_)
+            | SshError::AgentAuthentication(_)
+            | SshError::AgentIdentityUnavailable
+            | SshError::AgentBackendUnsupported { .. }
+            | SshError::AgentBackendsUnavailable(_)
+            | SshError::PrivateKey(_)
+            | SshError::Certificate(_)
+            | SshError::CertificateKeyMismatch,
+        ) => (
+            SessionFailureCode::CredentialUnavailable,
+            "SSH key, certificate or agent credential is unavailable. Check the Profile authentication settings.",
+        ),
+        SshSessionError::Pipeline(_) => (
+            SessionFailureCode::StorageUnavailable,
+            "SSH terminal output storage could not be opened.",
+        ),
+        _ => (
+            SessionFailureCode::ProtocolRejected,
+            "SSH negotiation or terminal request failed. Check server SSH compatibility and shell access.",
+        ),
+    };
+    SshLaunchFailure::new(code, detail)
+}
+
 pub(crate) fn default_known_hosts_path() -> Result<std::path::PathBuf, String> {
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
@@ -847,6 +932,12 @@ impl From<LocalSessionInfo> for SessionSummary {
             title: info.title,
             running: info.running,
             generation: info.generation,
+            profile_id: None,
+            terminal_detail: if info.running {
+                String::new()
+            } else {
+                "Local terminal exited".into()
+            },
         }
     }
 }

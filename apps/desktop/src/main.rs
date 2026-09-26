@@ -350,6 +350,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             redraw_needed |= self.view_model.terminal_generation
                 != view.snapshot.as_ref().map(|snapshot| snapshot.generation);
             self.view_model.daemon_connected = view.connected;
+            let can_reconnect =
+                view.session_profile_id.is_some() && !view.connected && !view.session_opening;
+            redraw_needed |= self.view_model.can_reconnect_ssh != can_reconnect;
+            self.view_model.can_reconnect_ssh = can_reconnect;
             self.view_model.daemon_status_detail = view.detail;
             self.view_model.terminal_generation =
                 view.snapshot.as_ref().map(|snapshot| snapshot.generation);
@@ -919,6 +923,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::Quit) => event_loop.exit(),
+                    Some(WorkbenchMenuCommand::ReconnectNewShell) => {
+                        if let Some(daemon) = &self.daemon {
+                            daemon.reconnect_new_shell();
+                        }
+                        window.request_redraw();
+                    }
                     None => {}
                 }
                 if let Some(command) = profile_command {

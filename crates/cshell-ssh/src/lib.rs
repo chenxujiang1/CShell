@@ -324,24 +324,32 @@ pub async fn scan_host_key(host: &str, port: u16) -> Result<ScannedHostKey, Stri
 }
 
 impl russh::client::Handler for VerifiedClient {
-    type Error = russh::Error;
+    type Error = SshError;
 
     async fn check_server_key(
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        Ok(match &self.host_key {
+        let check = match &self.host_key {
             HostKeyPolicy::Pinned(pinned) => {
-                server_public_key
+                if server_public_key
                     .public_key()
                     .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
                     .to_string()
                     == pinned.sha256_fingerprint
+                {
+                    HostKeyCheck::Trusted
+                } else {
+                    HostKeyCheck::Changed
+                }
             }
-            HostKeyPolicy::KnownHosts(verifier) => {
-                verifier.check(server_public_key) == HostKeyCheck::Trusted
-            }
-        })
+            HostKeyPolicy::KnownHosts(verifier) => verifier.check(server_public_key),
+        };
+        if check == HostKeyCheck::Trusted {
+            Ok(true)
+        } else {
+            Err(SshError::HostKeyRejected(check))
+        }
     }
 
     fn server_channel_open_forwarded_tcpip(
@@ -372,6 +380,8 @@ impl russh::client::Handler for VerifiedClient {
 
 #[derive(Debug, Error)]
 pub enum SshError {
+    #[error("SSH host key rejected: {0:?}")]
+    HostKeyRejected(HostKeyCheck),
     #[error(transparent)]
     Protocol(#[from] russh::Error),
     #[error("SSH authentication was rejected")]
@@ -426,6 +436,18 @@ pub enum SshError {
     Socks5(String),
     #[error("SSH forwarding task failed: {0}")]
     ForwardTask(String),
+}
+
+impl SshError {
+    #[must_use]
+    pub fn is_transport_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectionTimeout
+                | Self::AuthenticationTimeout
+                | Self::Protocol(russh::Error::IO(_) | russh::Error::Disconnect)
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1083,7 +1105,7 @@ impl RusshClient {
         Ok(cshell_sftp::SftpClient::connect(channel.into_stream()).await?)
     }
 
-    pub async fn disconnect(self) -> Result<(), SshError> {
+    pub async fn disconnect(&self) -> Result<(), SshError> {
         self.session
             .disconnect(russh::Disconnect::ByApplication, "", "")
             .await?;
@@ -1131,8 +1153,7 @@ where
         ),
     )
     .await
-    .map_err(|_elapsed| SshError::ConnectionTimeout)?
-    .map_err(SshError::Protocol)?;
+    .map_err(|_elapsed| SshError::ConnectionTimeout)??;
     Ok((session, forward_routes))
 }
 
@@ -1157,8 +1178,7 @@ where
         ),
     )
     .await
-    .map_err(|_elapsed| SshError::ConnectionTimeout)?
-    .map_err(SshError::Protocol)?;
+    .map_err(|_elapsed| SshError::ConnectionTimeout)??;
     Ok((session, forward_routes))
 }
 
@@ -1355,9 +1375,9 @@ where
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        AgentBackend, AlgorithmPolicy, KeyboardInteractiveChallenge, KnownHostsVerifier,
-        PinnedHostKey, RusshClient, RusshProvider, SshCertificate, SshError, SshPrivateKey,
-        SshProvider, authenticate_with_agent_selected, connect_verified,
+        AgentBackend, AlgorithmPolicy, HostKeyCheck, KeyboardInteractiveChallenge,
+        KnownHostsVerifier, PinnedHostKey, RusshClient, RusshProvider, SshCertificate, SshError,
+        SshPrivateKey, SshProvider, authenticate_with_agent_selected, connect_verified,
     };
     use futures::stream;
     use rand::rng;
@@ -1809,6 +1829,45 @@ mod tests {
         assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
         client.disconnect().await.unwrap();
         await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn strict_host_key_rejections_preserve_their_reason() {
+        for expected in [
+            HostKeyCheck::Unknown,
+            HostKeyCheck::Changed,
+            HostKeyCheck::Revoked,
+        ] {
+            let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+            let public = host_key.public_key().to_openssh().unwrap();
+            let (address, _, server) =
+                spawn_protocol_server_with_host_key(None, None, host_key).await;
+            let contents = match expected {
+                HostKeyCheck::Unknown => String::new(),
+                HostKeyCheck::Changed => format!(
+                    "[127.0.0.1]:{} {}\n",
+                    address.port(),
+                    PrivateKey::random(&mut rng(), Algorithm::Ed25519)
+                        .unwrap()
+                        .public_key()
+                        .to_openssh()
+                        .unwrap()
+                ),
+                HostKeyCheck::Revoked => {
+                    format!("@revoked [127.0.0.1]:{} {public}\n", address.port())
+                }
+                HostKeyCheck::Trusted => unreachable!(),
+            };
+            let verifier =
+                KnownHostsVerifier::parse(&contents, "127.0.0.1", address.port()).unwrap();
+            let result =
+                RusshClient::connect_password_known_hosts("cshell", "phase0", verifier).await;
+            assert!(
+                matches!(result, Err(SshError::HostKeyRejected(reason)) if reason == expected),
+                "{result:?}"
+            );
+            server.abort();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

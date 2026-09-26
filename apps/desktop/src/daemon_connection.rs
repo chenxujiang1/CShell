@@ -3,10 +3,11 @@ use cshell_ipc::{
     ClientFrameUpdate, DiscoveryRecord, Envelope, Handshake, HistorySearchCodecError,
     HistorySearchDirection, HistorySearchRequest as IpcHistorySearchRequest,
     HistorySearchResult as IpcHistorySearchResult, LogPage as IpcLogPage, LogPageCodecError,
-    LogPageRequest as IpcLogPageRequest, RuntimePaths, SnapshotCodecError, SubscriptionClientError,
-    TerminalControlCodecError, TerminalControlResponse, TerminalControlStatus,
-    TerminalInputRequest, TerminalResizeRequest, TerminalSubscriptionReplica, client_handshake,
-    envelope, features, read_envelope, transport, write_envelope,
+    LogPageRequest as IpcLogPageRequest, RuntimePaths, SessionFailureCode, SnapshotCodecError,
+    SubscriptionClientError, TerminalControlCodecError, TerminalControlResponse,
+    TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest,
+    TerminalSubscriptionReplica, client_handshake, envelope, features, read_envelope, transport,
+    write_envelope,
 };
 use cshell_render::{
     LogPage as RenderLogPage, LogPageRequest as RenderLogPageRequest, LogRow as RenderLogRow,
@@ -51,6 +52,10 @@ pub struct DesktopDaemonView {
     pub log_page: Option<Arc<RenderLogPage>>,
     pub control_error: Option<String>,
     pub launch_error: Option<String>,
+    pub session_profile_id: Option<ProfileId>,
+    pub session_running: bool,
+    pub session_opening: bool,
+    pub terminal_detail: String,
     pub history_search: Option<Arc<DesktopHistorySearchResponse>>,
 }
 
@@ -69,6 +74,7 @@ pub struct DesktopDaemonConnection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DesktopSessionAction {
     OpenProfile(ProfileId),
+    NewShell(ProfileId),
     Attach(SessionId),
 }
 
@@ -135,6 +141,12 @@ pub enum DesktopConnectionError {
     SwitchSession(DesktopSessionAction),
     #[error("saved SSH Profile could not start: {0}")]
     ProfileLaunch(String),
+    #[error("previous session is unavailable; reconnect explicitly to open a New Shell")]
+    SessionUnavailable,
+    #[error(
+        "SSH open request outcome is unknown; inspect existing sessions before opening a New Shell"
+    )]
+    SessionCreationUncertain,
     #[error("daemon did not negotiate saved SSH Profile sessions")]
     SshProfileNotNegotiated,
     #[error("daemon returned an invalid session identifier")]
@@ -332,9 +344,36 @@ impl DesktopDaemonConnection {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             view.launch_error = None;
+            view.session_profile_id = Some(id);
+            view.session_opening = true;
+            view.terminal_detail.clear();
             view.connected = false;
             view.snapshot = None;
             view.detail = "opening saved SSH Profile".into();
+        }
+        sent
+    }
+
+    pub fn reconnect_new_shell(&self) -> bool {
+        let mut view = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(id) = view
+            .session_profile_id
+            .filter(|_| !view.connected && !view.session_opening)
+        else {
+            return false;
+        };
+        let sent = self
+            .open_requests
+            .send(Some(DesktopSessionAction::NewShell(id)))
+            .is_ok();
+        if sent {
+            view.launch_error = None;
+            view.detail = "Opening a New Shell; the previous remote process is not restored".into();
+            view.session_opening = true;
+            view.terminal_detail.clear();
         }
         sent
     }
@@ -353,6 +392,7 @@ impl DesktopDaemonConnection {
             view.connected = false;
             view.snapshot = None;
             view.detail = "switching terminal session".into();
+            view.session_opening = true;
         }
         sent
     }
@@ -475,12 +515,13 @@ async fn reconnect_loop(
             format!("daemon connecting (attempt {})", attempt + 1),
             None,
         );
+        let requested_action = pending_action.take();
         let result = connect_once(
             &config,
             &shared,
             &mut shutdown,
             &mut log_delivery_revision,
-            pending_action.take(),
+            requested_action,
             DesktopRequestReceivers {
                 log_pages: &mut log_requests,
                 history_search: &mut history_search_requests,
@@ -502,6 +543,50 @@ async fn reconnect_loop(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .launch_error = Some(message.clone());
+        }
+        if matches!(
+            &result,
+            Err(DesktopConnectionError::Connect(_)
+                | DesktopConnectionError::Discovery(_)
+                | DesktopConnectionError::Handshake(_))
+        ) {
+            pending_action = requested_action;
+        }
+        if matches!(
+            &result,
+            Err(DesktopConnectionError::ProfileLaunch(_)
+                | DesktopConnectionError::SessionUnavailable
+                | DesktopConnectionError::SessionCreationUncertain
+                | DesktopConnectionError::SshProfileNotNegotiated
+                | DesktopConnectionError::TerminalControlNotNegotiated
+                | DesktopConnectionError::LogPagingNotNegotiated)
+        ) {
+            {
+                let mut view = shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                view.session_opening = false;
+                view.terminal_detail = result
+                    .as_ref()
+                    .err()
+                    .map_or_else(String::new, ToString::to_string);
+            }
+            update_view(
+                &shared,
+                false,
+                result
+                    .as_ref()
+                    .err()
+                    .map_or_else(String::new, ToString::to_string),
+                None,
+            );
+            tokio::select! {
+                changed = open_requests.changed() => {
+                    if changed.is_ok() { pending_action = *open_requests.borrow_and_update(); }
+                }
+                _ = shutdown.changed() => { return; }
+            }
+            continue;
         }
         let was_connected = shared
             .lock()
@@ -582,7 +667,8 @@ async fn connect_once(
         | features::PRIORITY_STREAMS
         | features::LOG_PAGING
         | features::TERMINAL_CONTROL
-        | features::SSH_PROFILE_SESSION;
+        | features::SSH_PROFILE_SESSION
+        | features::SSH_SESSION_STATUS;
     let negotiated = client_handshake(&mut stream, 1, handshake).await?;
     if config.request_log_pages && negotiated.feature_bits & features::LOG_PAGING == 0 {
         return Err(DesktopConnectionError::LogPagingNotNegotiated);
@@ -596,8 +682,9 @@ async fn connect_once(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .session_id;
-    let (session_id, session_title) = if let Some(DesktopSessionAction::OpenProfile(profile_id)) =
-        requested_action
+    let (session_id, session_title) = if let Some(
+        DesktopSessionAction::OpenProfile(profile_id) | DesktopSessionAction::NewShell(profile_id),
+    ) = requested_action
     {
         if negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0 {
             return Err(DesktopConnectionError::SshProfileNotNegotiated);
@@ -610,7 +697,11 @@ async fn connect_once(
             size.map_or(24, |value| u32::from(value.rows)),
             size.map_or(80, |value| u32::from(value.cols)),
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            DesktopConnectionError::ProfileLaunch(_) => error,
+            _ => DesktopConnectionError::SessionCreationUncertain,
+        })?;
         shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -619,11 +710,42 @@ async fn connect_once(
     } else if let Some(DesktopSessionAction::Attach(session_id)) = requested_action {
         discover_or_create_session(&mut stream, &mut request_id, Some(session_id), false).await?
     } else if let Some(session_id) = config.session_id {
-        (session_id, "Terminal".to_owned())
+        discover_or_create_session(&mut stream, &mut request_id, Some(session_id), false).await?
     } else {
-        discover_or_create_session(&mut stream, &mut request_id, existing_session, true).await?
+        discover_or_create_session(
+            &mut stream,
+            &mut request_id,
+            existing_session,
+            existing_session.is_none(),
+        )
+        .await?
     };
     update_session(shared, session_id, session_title);
+    {
+        let mut view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        view.session_opening = negotiated.feature_bits & features::SSH_SESSION_STATUS != 0;
+        if view.session_opening {
+            view.session_running = false;
+        }
+    }
+    if let Some(DesktopSessionAction::OpenProfile(id) | DesktopSessionAction::NewShell(id)) =
+        requested_action
+    {
+        let mut view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        view.session_profile_id = Some(id);
+        if matches!(requested_action, Some(DesktopSessionAction::NewShell(_))) {
+            view.session_title = view
+                .session_title
+                .as_ref()
+                .map(|title| format!("{title} · New Shell"));
+            view.terminal_detail =
+                "New Shell opened; the previous remote process is not restored".into();
+        }
+    }
     let mut replica = TerminalSubscriptionReplica::new(session_id);
     write_snapshot_request(&mut stream, request_id, replica.snapshot_request()).await?;
     request_id = request_id.saturating_add(1);
@@ -652,40 +774,70 @@ async fn connect_once(
         requests.history_search,
     );
     tokio::pin!(history_search);
+    let mut lifecycle_tick = tokio::time::interval(Duration::from_secs(1));
+    lifecycle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut lifecycle_request_id = None;
+    let (mut reader, mut writer) = tokio::io::split(stream);
     loop {
-        let envelope = tokio::select! {
-            envelope = read_envelope(&mut stream) => envelope?,
-            result = &mut log_pages => return result,
-            result = &mut history_search => return result,
-            Some(action) = requests.input.recv() => {
-                write_input_request(&mut stream, request_id, session_id, &action).await?;
-                request_id = request_id.saturating_add(1);
-                continue;
-            }
-            changed = requests.resize.changed() => {
-                if changed.is_err() {
-                    return Ok(());
-                }
-                if let Some(size) = *requests.resize.borrow_and_update() {
-                    write_resize_request(&mut stream, request_id, session_id, size).await?;
+        // Keep a partial frame read alive while lifecycle and input writes run.
+        // read_envelope uses read_exact and cannot be restarted after cancellation.
+        let envelope = {
+            let incoming = read_envelope(&mut reader);
+            tokio::pin!(incoming);
+            loop {
+                tokio::select! {
+                envelope = &mut incoming => break envelope?,
+                result = &mut log_pages => return result,
+                result = &mut history_search => return result,
+                Some(action) = requests.input.recv() => {
+                    if !shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).connected { continue; }
+                    write_input_request(&mut writer, request_id, session_id, &action).await?;
                     request_id = request_id.saturating_add(1);
+                    continue;
                 }
-                continue;
-            }
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return Ok(());
+                _ = lifecycle_tick.tick(), if negotiated.feature_bits & features::SSH_SESSION_STATUS != 0 && lifecycle_request_id.is_none() => {
+                    write_envelope(&mut writer, &Envelope {
+                        request_id, deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::SessionListRequest(cshell_ipc::SessionListRequest {})),
+                    }).await?;
+                    lifecycle_request_id = Some(request_id);
+                    request_id = request_id.saturating_add(1);
+                    continue;
                 }
-                continue;
-            }
-            changed = requests.open.changed() => {
-                if changed.is_ok()
-                    && let Some(id) = *requests.open.borrow_and_update() {
-                        return Err(DesktopConnectionError::SwitchSession(id));
+                changed = requests.resize.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
                     }
-                continue;
+                    if let Some(size) = *requests.resize.borrow_and_update() {
+                        write_resize_request(&mut writer, request_id, session_id, size).await?;
+                        request_id = request_id.saturating_add(1);
+                    }
+                    continue;
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                changed = requests.open.changed() => {
+                    if changed.is_ok()
+                        && let Some(id) = *requests.open.borrow_and_update() {
+                            return Err(DesktopConnectionError::SwitchSession(id));
+                        }
+                    continue;
+                }
+                }
             }
         };
+        if let Some(envelope::Payload::SessionListResponse(list)) = envelope.payload.as_ref() {
+            if lifecycle_request_id != Some(envelope.request_id) {
+                return Err(DesktopConnectionError::UnexpectedControlResponse);
+            }
+            lifecycle_request_id = None;
+            update_session_lifecycle(shared, session_id, list)?;
+            continue;
+        }
         if let Some(envelope::Payload::TerminalControlResponse(response)) =
             envelope.payload.as_ref()
         {
@@ -704,7 +856,7 @@ async fn connect_once(
             }
             ClientFrameUpdate::IgnoredStale => {}
             ClientFrameUpdate::RequestFull(request) => {
-                write_snapshot_request(&mut stream, request_id, request).await?;
+                write_snapshot_request(&mut writer, request_id, request).await?;
                 request_id = request_id.saturating_add(1);
             }
         }
@@ -749,7 +901,12 @@ where
         DesktopConnectionError::ProfileLaunch(if created.detail.is_empty() {
             "daemon did not return a session".into()
         } else {
-            created.detail
+            format!(
+                "{:?}: {}",
+                SessionFailureCode::try_from(created.failure_code)
+                    .unwrap_or(SessionFailureCode::ProtocolRejected),
+                created.detail
+            )
         })
     })?;
     let bytes: [u8; 16] = session
@@ -814,9 +971,7 @@ where
     let session = match session {
         Some(session) => session,
         None if !allow_fallback => {
-            return Err(DesktopConnectionError::ProfileLaunch(
-                "session no longer exists".into(),
-            ));
+            return Err(DesktopConnectionError::SessionUnavailable);
         }
         None => {
             let create_request_id = *request_id;
@@ -1316,7 +1471,7 @@ fn update_view(
     let mut view = shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    view.connected = connected;
+    view.connected = connected && (view.session_id.is_none() || view.session_running);
     if !connected {
         view.control_error = None;
     }
@@ -1330,7 +1485,12 @@ fn update_view(
         .as_deref()
         .map(|error| format!(" · SSH: {error}"))
         .unwrap_or_default();
-    view.detail = format!("{detail}{control_error}{launch_error}");
+    let lifecycle = if view.terminal_detail.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", view.terminal_detail)
+    };
+    view.detail = format!("{detail}{lifecycle}{control_error}{launch_error}");
     if let Some(snapshot) = snapshot {
         view.snapshot = Some(Arc::new(snapshot));
     }
@@ -1368,6 +1528,12 @@ fn update_terminal_control(
     if status == TerminalControlStatus::Accepted {
         view.control_error = None;
     } else {
+        if status == TerminalControlStatus::SessionClosed {
+            view.connected = false;
+            view.session_running = false;
+            view.terminal_detail =
+                "Terminal session is closed; reconnecting opens a New Shell".into();
+        }
         let error = format!("terminal control rejected: {status:?}");
         view.control_error = Some(error.clone());
         view.detail = format!("daemon connected · {error}");
@@ -1383,9 +1549,55 @@ fn update_session(shared: &Arc<Mutex<DesktopDaemonView>>, id: SessionId, title: 
         view.snapshot = None;
         view.log_page = None;
         view.history_search = None;
+        view.session_profile_id = None;
+        view.terminal_detail.clear();
+        view.session_running = true;
     }
     view.session_id = Some(id);
     view.session_title = Some(title);
+}
+
+fn update_session_lifecycle(
+    shared: &Arc<Mutex<DesktopDaemonView>>,
+    id: SessionId,
+    list: &cshell_ipc::SessionListResponse,
+) -> Result<(), DesktopConnectionError> {
+    {
+        let mut view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        view.session_opening = false;
+        if let Some(session) = list
+            .sessions
+            .iter()
+            .find(|session| session.session_id == id.as_uuid().as_bytes())
+        {
+            view.session_profile_id = session
+                .profile_id
+                .as_ref()
+                .map(|bytes| {
+                    let bytes: [u8; 16] = bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| DesktopConnectionError::InvalidSessionId)?;
+                    Ok::<_, DesktopConnectionError>(ProfileId::from_bytes(bytes))
+                })
+                .transpose()?;
+            view.session_running = session.running;
+            if !session.running {
+                view.terminal_detail = if session.terminal_detail.is_empty() {
+                    "Terminal disconnected; reconnecting opens a New Shell".into()
+                } else {
+                    session.terminal_detail.clone()
+                };
+            }
+        } else {
+            view.session_running = false;
+            view.terminal_detail = "Previous session is no longer available".into();
+        }
+    }
+    update_view(shared, true, "daemon connected".into(), None);
+    Ok(())
 }
 
 fn required_hex<const N: usize>(name: &'static str) -> Result<[u8; N], DesktopConnectionError> {
@@ -1544,7 +1756,8 @@ mod tests {
             | features::PRIORITY_STREAMS
             | features::LOG_PAGING
             | features::TERMINAL_CONTROL
-            | features::HISTORY_SEARCH;
+            | features::HISTORY_SEARCH
+            | features::SSH_SESSION_STATUS;
         let server = Arc::new(SessionIpcServer::new(
             listener,
             HandshakePolicy::with_instance_id(token, daemon_instance_id, supported_features),
@@ -1649,6 +1862,29 @@ mod tests {
         }
         assert!(connection.cancel_history_search());
 
+        registry
+            .close(session_id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let disconnected_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while connection.view().connected {
+            assert!(
+                tokio::time::Instant::now() < disconnected_deadline,
+                "closed terminal still accepts input"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(connection.view().snapshot.is_some());
+        assert!(!connection.send_input(InputAction::Paste {
+            text: "must not replay".into(),
+            bracketed: true
+        }));
+        assert!(
+            registry
+                .list()
+                .unwrap_or_else(|error| panic!("{error}"))
+                .is_empty()
+        );
+
         drop(connection);
         server_shutdown
             .send(true)
@@ -1658,9 +1894,6 @@ mod tests {
             .unwrap_or_else(|_| panic!("server must stop before timeout"))
             .unwrap_or_else(|error| panic!("server task must join: {error}"))
             .unwrap_or_else(|error| panic!("server must stop cleanly: {error}"));
-        registry
-            .close(session_id)
-            .unwrap_or_else(|error| panic!("PTY session must close: {error}"));
     }
 
     #[test]
@@ -1697,6 +1930,192 @@ mod tests {
                 .instance_token,
             second.instance_token
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::unwrap_used)]
+    async fn lifecycle_poll_preserves_a_fragmented_frame_and_disables_closed_session_input() {
+        use cshell_terminal::{ProbeTerminalEngine, TerminalEngine};
+        use tokio::io::AsyncWriteExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = SessionId::new();
+        let profile_id = ProfileId::new();
+        #[cfg(windows)]
+        let endpoint = format!(r"\\.\pipe\cshell-fragmented-status-{session_id}");
+        #[cfg(unix)]
+        let endpoint = directory.path().join("fragmented-status.sock");
+        let listener = transport::LocalListener::bind(&endpoint).unwrap();
+        let token = [0x73; 32];
+        let daemon_instance_id = [0x45; 16];
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            server_handshake(
+                &mut stream,
+                &HandshakePolicy::with_instance_id(
+                    token,
+                    daemon_instance_id,
+                    features::FULL_FRAME_RECOVERY
+                        | features::TERMINAL_CONTROL
+                        | features::SSH_SESSION_STATUS,
+                ),
+            )
+            .await
+            .unwrap();
+            let summary = |running| SessionSummary {
+                session_id: session_id.as_uuid().as_bytes().to_vec(),
+                profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
+                title: "saved SSH".into(),
+                running,
+                terminal_detail: if running {
+                    String::new()
+                } else {
+                    "Remote shell exited with status 42".into()
+                },
+                ..SessionSummary::default()
+            };
+            let list = read_envelope(&mut stream).await.unwrap();
+            assert!(matches!(
+                list.payload,
+                Some(envelope::Payload::SessionListRequest(_))
+            ));
+            write_envelope(
+                &mut stream,
+                &Envelope {
+                    request_id: list.request_id,
+                    payload: Some(envelope::Payload::SessionListResponse(
+                        SessionListResponse {
+                            sessions: vec![summary(true)],
+                        },
+                    )),
+                    ..Envelope::default()
+                },
+            )
+            .await
+            .unwrap();
+            let snapshot_request = read_envelope(&mut stream).await.unwrap();
+            assert!(matches!(
+                snapshot_request.payload,
+                Some(envelope::Payload::SnapshotRequest(_))
+            ));
+            let first_poll = read_envelope(&mut stream).await.unwrap();
+            assert!(matches!(
+                first_poll.payload,
+                Some(envelope::Payload::SessionListRequest(_))
+            ));
+            write_envelope(
+                &mut stream,
+                &Envelope {
+                    request_id: first_poll.request_id,
+                    payload: Some(envelope::Payload::SessionListResponse(
+                        SessionListResponse {
+                            sessions: vec![summary(true)],
+                        },
+                    )),
+                    ..Envelope::default()
+                },
+            )
+            .await
+            .unwrap();
+            let mut terminal = ProbeTerminalEngine::new(TerminalSize::cells(2, 20));
+            terminal.feed(b"preserved output");
+            let mut frame = Default::default();
+            cshell_ipc::FrameCodec::default()
+                .encode(
+                    &Envelope {
+                        request_id: snapshot_request.request_id,
+                        payload: Some(envelope::Payload::FullFrame(
+                            cshell_ipc::FullFrame::from_terminal_snapshot(
+                                session_id,
+                                &terminal.snapshot(),
+                            ),
+                        )),
+                        ..Envelope::default()
+                    },
+                    &mut frame,
+                )
+                .unwrap();
+            // The next poll must be writable while the frame reader owns a partial payload.
+            stream.write_all(&frame[..7]).await.unwrap();
+            let second_poll =
+                tokio::time::timeout(Duration::from_secs(5), read_envelope(&mut stream))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(
+                second_poll.payload,
+                Some(envelope::Payload::SessionListRequest(_))
+            ));
+            stream.write_all(&frame[7..]).await.unwrap();
+            write_envelope(
+                &mut stream,
+                &Envelope {
+                    request_id: second_poll.request_id,
+                    payload: Some(envelope::Payload::SessionListResponse(
+                        SessionListResponse {
+                            sessions: vec![summary(false)],
+                        },
+                    )),
+                    ..Envelope::default()
+                },
+            )
+            .await
+            .unwrap();
+            while let Ok(request) = read_envelope(&mut stream).await {
+                assert!(matches!(
+                    request.payload,
+                    Some(envelope::Payload::SessionListRequest(_))
+                ));
+                write_envelope(
+                    &mut stream,
+                    &Envelope {
+                        request_id: request.request_id,
+                        payload: Some(envelope::Payload::SessionListResponse(
+                            SessionListResponse {
+                                sessions: vec![summary(false)],
+                            },
+                        )),
+                        ..Envelope::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let connection = DesktopDaemonConnection::start(DesktopConnectionConfig {
+            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
+                endpoint,
+                instance_token: token,
+                daemon_instance_id,
+            }),
+            session_id: Some(session_id),
+            request_log_pages: false,
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let view = connection.view();
+                if !view.connected && view.detail.contains("status 42") {
+                    assert_eq!(view.session_profile_id, Some(profile_id));
+                    assert!(view.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot
+                            .cells
+                            .iter()
+                            .map(|cell| cell.character)
+                            .collect::<String>()
+                            .contains("preserved output")
+                    }));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!connection.send_input(InputAction::Text("stale input".into())));
+        drop(connection);
+        server.await.unwrap();
+        drop(directory);
     }
 
     #[tokio::test]
@@ -1743,8 +2162,11 @@ mod tests {
                                 title: "Local shell".to_owned(),
                                 running: true,
                                 generation: 1,
+                                profile_id: None,
+                                terminal_detail: String::new(),
                             }),
                             detail: String::new(),
+                            failure_code: 0,
                         },
                     )),
                 },
@@ -2138,8 +2560,11 @@ mod tests {
                                 title: "saved SSH".into(),
                                 running: true,
                                 generation: 0,
+                                profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
+                                terminal_detail: String::new(),
                             }),
                             detail: String::new(),
+                            failure_code: 0,
                         },
                     )),
                 },
@@ -2157,5 +2582,45 @@ mod tests {
             (session_id, "saved SSH".into())
         );
         assert_eq!(request_id, 3);
+    }
+
+    #[tokio::test]
+    async fn missing_previous_session_does_not_create_or_select_a_fallback_shell() {
+        let previous = SessionId::new();
+        let unrelated = SessionId::new();
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let server_work = async {
+            let request = read_envelope(&mut server)
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            write_envelope(
+                &mut server,
+                &Envelope {
+                    request_id: request.request_id,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::SessionListResponse(
+                        SessionListResponse {
+                            sessions: vec![SessionSummary {
+                                session_id: unrelated.as_uuid().as_bytes().to_vec(),
+                                title: "unrelated".into(),
+                                running: true,
+                                ..SessionSummary::default()
+                            }],
+                        },
+                    )),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        };
+        let mut request_id = 2;
+        let (result, ()) = tokio::join!(
+            discover_or_create_session(&mut client, &mut request_id, Some(previous), false),
+            server_work,
+        );
+        assert!(matches!(
+            result,
+            Err(super::DesktopConnectionError::SessionUnavailable)
+        ));
     }
 }

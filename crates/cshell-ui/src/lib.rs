@@ -15,6 +15,7 @@ pub struct WorkbenchViewModel {
     pub selected: Option<SessionId>,
     pub daemon_connected: bool,
     pub daemon_status_detail: String,
+    pub can_reconnect_ssh: bool,
     pub input_warning: Option<String>,
     pub terminal_generation: Option<u64>,
     pub about_open: bool,
@@ -25,6 +26,7 @@ pub struct WorkbenchViewModel {
 pub enum WorkbenchMenuCommand {
     SearchTerminal,
     Profiles,
+    ReconnectNewShell,
     Quit,
 }
 
@@ -55,10 +57,19 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             });
             ui.separator();
             ui.heading("CShell");
+            if ui
+                .add_enabled(
+                    model.can_reconnect_ssh,
+                    egui::Button::new("Reconnect · New Shell"),
+                )
+                .clicked()
+            {
+                model.menu_command = Some(WorkbenchMenuCommand::ReconnectNewShell);
+            }
             let status = if model.daemon_connected {
-                "daemon connected"
+                "terminal connected"
             } else {
-                "daemon offline"
+                "terminal disconnected"
             };
             ui.label(status);
             if !model.daemon_status_detail.is_empty() {

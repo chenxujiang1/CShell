@@ -188,6 +188,10 @@ async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocke
         return Err("missing SSH session response".into());
     };
     assert!(blocked.session.is_none());
+    assert_eq!(
+        blocked.failure_code,
+        cshell_ipc::SessionFailureCode::HostKeyUnknown as i32
+    );
     assert!(blocked.detail.contains("known_hosts"), "{}", blocked.detail);
 
     let mut preview_request = request(ProfileOperation::PreviewHostKey);

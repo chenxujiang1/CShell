@@ -1,6 +1,6 @@
 use crate::{LatestSnapshot, PipelineIngress, TerminalFrameSubscription, TerminalPipeline};
-use cshell_domain::{InputAction, SessionId, TerminalSize};
-use cshell_ipc::FullFrame;
+use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
+use cshell_ipc::{FullFrame, SessionSummary};
 use cshell_output_store::JournalLineIndex;
 use cshell_ssh::{
     AgentBackend, KnownHostsVerifier, RusshClient, SshCertificate, SshError, SshPrivateKey,
@@ -82,7 +82,9 @@ enum Command {
 pub struct SshSession {
     id: SessionId,
     title: String,
-    _client: RusshClient,
+    profile_id: Option<ProfileId>,
+    terminal_detail: Arc<Mutex<String>>,
+    client: Arc<RusshClient>,
     writer: Arc<SshTerminalWriter>,
     pipeline: Mutex<Option<TerminalPipeline>>,
     ingress: Mutex<Option<PipelineIngress>>,
@@ -145,6 +147,7 @@ impl SshSession {
                 .await?
             }
         };
+        let client = Arc::new(client);
         let terminal = client
             .open_terminal(u32::from(size.rows), u32::from(size.cols))
             .await?;
@@ -156,9 +159,12 @@ impl SshSession {
         let line_index = pipeline.line_index();
         let responses = pipeline.responses();
         let closed = Arc::new(AtomicBool::new(false));
+        let terminal_detail = Arc::new(Mutex::new(String::new()));
+        let reader_detail = Arc::clone(&terminal_detail);
         let (commands, mut receiver) = tokio::sync::mpsc::channel(256);
         let reader_ingress = ingress.clone();
         let reader_closed = Arc::clone(&closed);
+        let reader_client = Arc::clone(&client);
         let reader_task = tokio::spawn(async move {
             while let Some(event) = reader.next_event().await {
                 match event {
@@ -168,17 +174,37 @@ impl SshSession {
                             tokio::task::spawn_blocking(move || ingress.submit_blocking(data))
                                 .await;
                         if !matches!(result, Ok(Ok(()))) {
+                            set_terminal_detail(
+                                &reader_detail,
+                                "SSH output storage failed; the terminal is disconnected".into(),
+                            );
                             break;
                         }
                     }
-                    TerminalEvent::Closed | TerminalEvent::Eof => break,
+                    TerminalEvent::ExitStatus(code) => set_terminal_detail(
+                        &reader_detail,
+                        format!("Remote shell exited with status {code}"),
+                    ),
+                    TerminalEvent::ExitSignal { .. } => set_terminal_detail(
+                        &reader_detail,
+                        "Remote shell exited due to a signal".into(),
+                    ),
+                    TerminalEvent::Closed => break,
+                    TerminalEvent::Eof => {}
                     _ => {}
                 }
             }
+            set_terminal_detail(
+                &reader_detail,
+                "SSH disconnected without an exit status; remote process outcome is unknown".into(),
+            );
             reader_closed.store(true, Ordering::Release);
+            let _ = reader_client.disconnect().await;
         });
         let command_writer = Arc::clone(&writer);
         let command_closed = Arc::clone(&closed);
+        let command_detail = Arc::clone(&terminal_detail);
+        let command_client = Arc::clone(&client);
         let writer_task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -186,9 +212,12 @@ impl SshSession {
                 tokio::select! {
                     biased;
                     _ = tick.tick() => {
+                        if command_closed.load(Ordering::Acquire) { return; }
                         for bytes in responses.drain() {
                             if command_writer.send_input(bytes).await.is_err() {
+                                set_terminal_detail(&command_detail, "SSH input delivery failed; remote process outcome is unknown".into());
                                 command_closed.store(true, Ordering::Release);
+                                let _ = command_client.disconnect().await;
                                 return;
                             }
                         }
@@ -197,7 +226,9 @@ impl SshSession {
                         let Some(command) = command else { break };
                         for bytes in responses.drain() {
                             if command_writer.send_input(bytes).await.is_err() {
+                                set_terminal_detail(&command_detail, "SSH input delivery failed; remote process outcome is unknown".into());
                                 command_closed.store(true, Ordering::Release);
+                                let _ = command_client.disconnect().await;
                                 return;
                             }
                         }
@@ -208,16 +239,22 @@ impl SshSession {
                                 u32::from(size.pixel_width), u32::from(size.pixel_height),
                             ).await,
                         };
-                        if result.is_err() { break; }
+                        if result.is_err() {
+                            set_terminal_detail(&command_detail, "SSH connection lost while sending input or resizing; remote process outcome is unknown".into());
+                            break;
+                        }
                     }
                 }
             }
             command_closed.store(true, Ordering::Release);
+            let _ = command_client.disconnect().await;
         });
         Ok(Self {
             id,
             title,
-            _client: client,
+            profile_id: None,
+            terminal_detail,
+            client,
             writer,
             pipeline: Mutex::new(Some(pipeline)),
             ingress: Mutex::new(Some(ingress)),
@@ -232,6 +269,25 @@ impl SshSession {
 
     pub fn id(&self) -> SessionId {
         self.id
+    }
+    #[must_use]
+    pub fn with_profile_id(mut self, id: ProfileId) -> Self {
+        self.profile_id = Some(id);
+        self
+    }
+    pub fn summary(&self) -> SessionSummary {
+        SessionSummary {
+            session_id: self.id.as_uuid().as_bytes().to_vec(),
+            title: self.title.clone(),
+            running: self.running(),
+            generation: self.generation(),
+            profile_id: self.profile_id.map(|id| id.as_uuid().as_bytes().to_vec()),
+            terminal_detail: self
+                .terminal_detail
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        }
     }
     pub fn title(&self) -> &str {
         &self.title
@@ -285,6 +341,7 @@ impl SshSession {
             .map_err(|_| SshSessionError::Backpressure)
     }
     pub async fn close(&self) -> Result<(), SshSessionError> {
+        set_terminal_detail(&self.terminal_detail, "SSH session closed by user".into());
         self.closed.store(true, Ordering::Release);
         let reader = self
             .reader_task
@@ -309,6 +366,7 @@ impl SshSession {
             let _ = task.await;
         }
         let _ = self.writer.close().await;
+        let _ = self.client.disconnect().await;
         self.ingress
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -322,6 +380,15 @@ impl SshSession {
             pipeline.shutdown()?;
         }
         Ok(())
+    }
+}
+
+fn set_terminal_detail(detail: &Mutex<String>, value: String) {
+    let mut detail = detail
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if detail.is_empty() {
+        *detail = value;
     }
 }
 
@@ -399,7 +466,7 @@ impl SshSessionRegistry {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{SshConnect, SshSession};
-    use cshell_domain::{InputAction, SessionId, TerminalSize};
+    use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
     use cshell_ssh::KnownHostsVerifier;
     use rand::rng;
     use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey};
@@ -467,6 +534,8 @@ mod tests {
         ) -> Result<(), Self::Error> {
             let channel = self.channels.remove(&channel).unwrap();
             session.channel_success(channel.id())?;
+            let handle = session.handle();
+            let channel_id = channel.id();
             tokio::spawn(async move {
                 let (reader, mut writer) = tokio::io::split(channel.into_stream());
                 let mut reader = BufReader::new(reader);
@@ -477,6 +546,11 @@ mod tests {
                         break;
                     };
                     if count == 0 {
+                        break;
+                    }
+                    if line == b"exit\n" {
+                        let _ = handle.exit_status_request(channel_id, 42).await;
+                        let _ = handle.close(channel_id).await;
                         break;
                     }
                     if writer.write_all(b"ACK:").await.is_err()
@@ -550,6 +624,116 @@ mod tests {
             .unwrap()
             .unwrap();
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_exit_retains_history_and_explicit_new_shell_has_a_new_identity() {
+        let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let public = key.public_key().to_openssh().unwrap();
+        let mut config = russh::server::Config::default();
+        config.keys.push(key);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = Arc::new(config);
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let config = Arc::clone(&config);
+                tokio::spawn(async move {
+                    let running = russh::server::run_stream(config, stream, EchoServer::default())
+                        .await
+                        .unwrap();
+                    let _ = running.await;
+                });
+            }
+        });
+        let verifier = KnownHostsVerifier::parse(
+            &format!("[127.0.0.1]:{} {public}\n", address.port()),
+            "127.0.0.1",
+            address.port(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let profile_id = ProfileId::new();
+        let first_id = SessionId::new();
+        let first = SshSession::connect(
+            first_id,
+            "saved profile".into(),
+            SshConnect {
+                username: "cshell".into(),
+                verifier: verifier.clone(),
+                authentication: super::SshAuthentication::Password("phase1".into()),
+            },
+            TerminalSize::cells(24, 80),
+            &directory.path().join("first.csjr"),
+            16,
+        )
+        .await
+        .unwrap()
+        .with_profile_id(profile_id);
+        first
+            .send_input(&InputAction::Text("before exit\n".into()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !first.snapshots.latest().is_some_and(|frame| {
+                frame
+                    .cells
+                    .iter()
+                    .map(|cell| cell.character)
+                    .collect::<String>()
+                    .contains("ACK:before exit")
+            }) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        first
+            .send_input(&InputAction::Text("exit\n".into()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while first.running() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let summary = first.summary();
+        assert!(!summary.running);
+        assert_eq!(
+            summary.profile_id,
+            Some(profile_id.as_uuid().as_bytes().to_vec())
+        );
+        assert_eq!(
+            summary.terminal_detail,
+            "Remote shell exited with status 42"
+        );
+        assert!(first.full_frame().is_some());
+        assert!(matches!(
+            first.send_input(&InputAction::Text("stale input\n".into())),
+            Err(super::SshSessionError::Closed)
+        ));
+        let second = SshSession::connect(
+            SessionId::new(),
+            "saved profile · New Shell".into(),
+            SshConnect {
+                username: "cshell".into(),
+                verifier,
+                authentication: super::SshAuthentication::Password("phase1".into()),
+            },
+            TerminalSize::cells(24, 80),
+            &directory.path().join("second.csjr"),
+            16,
+        )
+        .await
+        .unwrap()
+        .with_profile_id(profile_id);
+        assert_ne!(first.id(), second.id());
+        assert!(second.running());
+        assert_eq!(second.summary().profile_id, summary.profile_id);
+        first.close().await.unwrap();
+        second.close().await.unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
