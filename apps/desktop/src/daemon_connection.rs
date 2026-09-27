@@ -2462,8 +2462,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         #[cfg(unix)]
         let endpoint = directory.path().join("save.sock");
+        #[cfg(windows)]
         let listener =
             transport::LocalListener::bind(endpoint.clone()).unwrap_or_else(|e| panic!("{e}"));
+        #[cfg(unix)]
+        let listener = transport::LocalListener::bind(&endpoint).unwrap_or_else(|e| panic!("{e}"));
         let initial = WorkspaceDocument::default();
         let server_initial = initial.clone();
         let server = tokio::spawn(async move {
@@ -2593,8 +2596,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         #[cfg(unix)]
         let endpoint = directory.path().join("idle.sock");
+        #[cfg(windows)]
         let listener =
             transport::LocalListener::bind(endpoint.clone()).unwrap_or_else(|e| panic!("{e}"));
+        #[cfg(unix)]
+        let listener = transport::LocalListener::bind(&endpoint).unwrap_or_else(|e| panic!("{e}"));
         let server = tokio::spawn(async move {
             let mut stream = listener.accept().await.unwrap_or_else(|e| panic!("{e}"));
             server_handshake(
