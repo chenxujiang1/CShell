@@ -116,11 +116,24 @@ try {
     Write-Output "::error title=Windows OpenSSH interop ($phase)::$($_.Exception.Message)"
     throw
 } finally {
+    $phase = 'clean up isolated sshd process tree'
     if ($null -ne $sshdProcess) {
         $sshdProcess.Refresh()
         if (-not $sshdProcess.HasExited) {
-            Stop-Process -Id $sshdProcess.Id -Force -ErrorAction SilentlyContinue
-            $sshdProcess.WaitForExit(5000) | Out-Null
+            # Session child processes inherit stderr. Killing only the listener
+            # can leave sshd.log open and mask the interoperability result.
+            & (Join-Path $env:WINDIR 'System32\taskkill.exe') /PID $sshdProcess.Id /T /F | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                $sshdProcess.Refresh()
+                if (-not $sshdProcess.HasExited) {
+                    throw 'failed to stop the isolated OpenSSH process tree'
+                }
+            }
+            if (-not $sshdProcess.WaitForExit(5000)) {
+                throw 'isolated OpenSSH process tree did not stop'
+            }
+            # The parent has exited; finish redirected stderr draining.
+            $sshdProcess.WaitForExit()
         }
         $sshdProcess.Dispose()
     }
@@ -135,7 +148,17 @@ try {
     if (-not $resolvedInteropRoot.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing to remove unexpected interoperability path: $resolvedInteropRoot"
     }
-    if (Test-Path -LiteralPath $resolvedInteropRoot) {
-        Remove-Item -LiteralPath $resolvedInteropRoot -Recurse -Force
+    $phase = 'remove isolated OpenSSH files'
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (-not (Test-Path -LiteralPath $resolvedInteropRoot)) { break }
+        try {
+            Remove-Item -LiteralPath $resolvedInteropRoot -Recurse -Force -ErrorAction Stop
+            break
+        } catch {
+            # Windows can release inherited handles shortly after tree exit.
+            # Retry cleanup only; authentication/test failures are never retried.
+            if ($attempt -eq 19) { throw }
+            Start-Sleep -Milliseconds 100
+        }
     }
 }
