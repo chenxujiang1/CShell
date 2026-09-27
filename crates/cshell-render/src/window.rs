@@ -90,6 +90,7 @@ struct GlyphAtlas {
     shaped_cells: HashMap<ShapeKey, Vec<ShapedGlyph>>,
     dynamic_allocator: AtlasAllocator,
     pinned_glyphs: HashSet<cosmic_text::CacheKey>,
+    preserve_frame_pins: bool,
     use_clock: u64,
     evictions: u64,
     revision: u64,
@@ -174,6 +175,7 @@ impl GlyphAtlas {
                 (ATLAS_HEIGHT - STATIC_ATLAS_HEIGHT) as i32,
             )),
             pinned_glyphs: HashSet::new(),
+            preserve_frame_pins: false,
             use_clock: 0,
             evictions: 0,
             revision: 0,
@@ -192,7 +194,9 @@ impl GlyphAtlas {
     }
 
     fn begin_frame(&mut self) {
-        self.pinned_glyphs.clear();
+        if !self.preserve_frame_pins {
+            self.pinned_glyphs.clear();
+        }
     }
 
     fn shape_cell(&mut self, cell: &cshell_terminal::Cell) -> Vec<GlyphInfo> {
@@ -783,8 +787,27 @@ pub struct EguiFrame<'a> {
     pub pixels_per_point: f32,
 }
 
+#[derive(Debug)]
+pub struct PaneFrame<'a> {
+    pub viewport: TerminalViewport,
+    pub content: PaneContent<'a>,
+}
+#[derive(Debug)]
+pub enum PaneContent<'a> {
+    Terminal {
+        frame: Option<&'a TerminalSurfaceFrame>,
+        decorations: &'a TerminalDecorations,
+        cursor_visible: bool,
+    },
+    Log {
+        frame: Option<&'a LogSurfaceFrame>,
+        decorations: &'a LogDecorations,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GeometryKey {
+    Panes,
     Terminal {
         generation: u64,
         decorations_revision: u64,
@@ -811,6 +834,7 @@ enum GeometryKey {
 }
 
 enum GeometryFrame<'a> {
+    Panes(&'a [PaneFrame<'a>]),
     Terminal {
         frame: Option<&'a TerminalSurfaceFrame>,
         decorations: &'a TerminalDecorations,
@@ -1223,6 +1247,7 @@ pub struct WindowRenderer {
     vertex_count: u32,
     geometry_key: Option<GeometryKey>,
     geometry_snapshot: Option<Arc<FrameSnapshot>>,
+    draw_batches: Vec<(TerminalViewport, std::ops::Range<u32>)>,
     device_lost: Arc<AtomicBool>,
     cpu_adapter: bool,
 }
@@ -1454,6 +1479,7 @@ impl WindowRenderer {
             vertex_count: 0,
             geometry_key: None,
             geometry_snapshot: None,
+            draw_batches: Vec::new(),
             device_lost,
             cpu_adapter,
         })
@@ -1532,6 +1558,23 @@ impl WindowRenderer {
         )
     }
 
+    pub fn render_panes(
+        &mut self,
+        frames: &[PaneFrame<'_>],
+        egui_frame: Option<EguiFrame<'_>>,
+    ) -> Result<RenderOutcome, WindowRendererError> {
+        self.render_inner(
+            GeometryFrame::Panes(frames),
+            TerminalViewport {
+                x: 0,
+                y: 0,
+                width: self.config.width,
+                height: self.config.height,
+            },
+            egui_frame,
+        )
+    }
+
     fn render_inner(
         &mut self,
         frame: GeometryFrame<'_>,
@@ -1559,7 +1602,19 @@ impl WindowRenderer {
             textures_to_free.extend(egui_frame.textures_delta.free.drain());
         }
         let viewport = viewport.clamp(self.config.width, self.config.height);
+        let multiple = matches!(&frame, GeometryFrame::Panes(_));
         match frame {
+            GeometryFrame::Panes(frames) => {
+                let (vertices, batches) = build_pane_geometry(
+                    frames,
+                    &mut self.atlas,
+                    self.config.width,
+                    self.config.height,
+                );
+                self.upload_geometry(vertices, GeometryKey::Panes);
+                self.geometry_snapshot = None;
+                self.draw_batches = batches;
+            }
             GeometryFrame::Terminal {
                 frame: Some(frame),
                 decorations,
@@ -1574,6 +1629,12 @@ impl WindowRenderer {
                 self.vertex_count = 0;
                 self.geometry_key = None;
                 self.geometry_snapshot = None;
+            }
+        }
+        if !multiple {
+            self.draw_batches.clear();
+            if self.vertex_count > 0 && !viewport.is_empty() {
+                self.draw_batches.push((viewport, 0..self.vertex_count));
             }
         }
         let (output, reconfigure_after_present) = match self.surface.get_current_texture() {
@@ -1645,12 +1706,14 @@ impl WindowRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if self.vertex_count > 0 && !viewport.is_empty() {
-                pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+            if self.vertex_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.atlas_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..self.vertex_count, 0..1);
+                for (viewport, range) in &self.draw_batches {
+                    pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+                    pass.draw(range.clone(), 0..1);
+                }
             }
             if let (Some(egui_frame), Some(screen_descriptor)) = (&egui_frame, &screen_descriptor) {
                 self.egui_renderer.render(
@@ -1798,6 +1861,54 @@ impl WindowRenderer {
         self.vertex_count = vertices.len().min(u32::MAX as usize) as u32;
         self.geometry_key = Some(key);
     }
+}
+
+type PaneGeometry = (Vec<Vertex>, Vec<(TerminalViewport, std::ops::Range<u32>)>);
+fn build_pane_geometry(
+    frames: &[PaneFrame<'_>],
+    atlas: &mut GlyphAtlas,
+    width: u32,
+    height: u32,
+) -> PaneGeometry {
+    atlas.begin_frame();
+    atlas.preserve_frame_pins = true;
+    let mut vertices = Vec::new();
+    let mut batches = Vec::new();
+    for pane in frames {
+        let viewport = pane.viewport.clamp(width, height);
+        if viewport.is_empty() {
+            continue;
+        }
+        let start = vertices.len() as u32;
+        let next = match &pane.content {
+            PaneContent::Terminal {
+                frame: Some(frame),
+                decorations,
+                cursor_visible,
+            } => build_vertices(
+                &frame.snapshot,
+                atlas,
+                width,
+                height,
+                viewport,
+                frame.plan.visible_rows.clone(),
+                decorations,
+                *cursor_visible,
+            ),
+            PaneContent::Log {
+                frame: Some(frame),
+                decorations,
+            } => build_log_vertices(frame, atlas, width, height, viewport, decorations),
+            _ => Vec::new(),
+        };
+        vertices.extend(next);
+        let end = vertices.len() as u32;
+        if end > start {
+            batches.push((viewport, start..end));
+        }
+    }
+    atlas.preserve_frame_pins = false;
+    (vertices, batches)
 }
 
 // Keeping the complete render context explicit here makes the allocation-free hot path easier to
@@ -2366,6 +2477,103 @@ mod tests {
             CacheKeyFlags::empty(),
         )
         .0
+    }
+
+    #[test]
+    fn panes_keep_equal_generation_frames_and_scissors_independent() {
+        let mut atlas = GlyphAtlas::build().unwrap_or_else(|e| panic!("{e}"));
+        let mut frames = Vec::new();
+        for (text, background) in [("A", Color::Rgb(255, 0, 0)), ("B", Color::Rgb(0, 255, 0))] {
+            let mut model = crate::TerminalSurfaceModel::default();
+            model.submit_snapshot(Arc::new(FrameSnapshot {
+                generation: 1,
+                rows: 1,
+                cols: 1,
+                cursor_row: 0,
+                cursor_col: 0,
+                cursor_appearance: Default::default(),
+                terminal_modes: Default::default(),
+                cells: vec![Cell::new(
+                    text.chars().next().unwrap_or('?'),
+                    CellWidth::Single,
+                    Style {
+                        bold: true,
+                        background,
+                        ..Style::default()
+                    },
+                )],
+            }));
+            frames.push(model.prepare_frame(0, 1).unwrap_or_else(|| panic!("frame")));
+        }
+        let decorations = TerminalDecorations::default();
+        let viewport = |x| TerminalViewport {
+            x,
+            y: 10,
+            width: 80,
+            height: 50,
+        };
+        let panes = [
+            super::PaneFrame {
+                viewport: viewport(10),
+                content: super::PaneContent::Terminal {
+                    frame: Some(&frames[0]),
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+            super::PaneFrame {
+                viewport: viewport(110),
+                content: super::PaneContent::Terminal {
+                    frame: Some(&frames[1]),
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+            super::PaneFrame {
+                viewport: viewport(300),
+                content: super::PaneContent::Terminal {
+                    frame: Some(&frames[0]),
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+        ];
+        let mut expected_pins = std::collections::HashSet::new();
+        for frame in &frames {
+            let _ = build_vertices(
+                &frame.snapshot,
+                &mut atlas,
+                200,
+                100,
+                viewport(10),
+                0..1,
+                &decorations,
+                false,
+            );
+            expected_pins.extend(atlas.pinned_glyphs.iter().copied());
+        }
+        let (vertices, batches) = super::build_pane_geometry(&panes, &mut atlas, 200, 100);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].0, viewport(10));
+        assert_eq!(batches[1].0, viewport(110));
+        assert_eq!(batches[0].1.end, batches[1].1.start);
+        assert_eq!(batches[1].1.end as usize, vertices.len());
+        for (index, (viewport, range)) in batches.iter().enumerate() {
+            let batch = &vertices[range.start as usize..range.end as usize];
+            let color = if index == 0 {
+                [1.0, 0.0, 0.0, 1.0]
+            } else {
+                [0.0, 1.0, 0.0, 1.0]
+            };
+            assert!(batch.iter().any(|v| v.color == color));
+            assert!(batch.iter().all(|v| {
+                let x = (v.position[0] + 1.0) * 100.0;
+                x >= viewport.x as f32 - 0.01 && x <= (viewport.x + viewport.width) as f32 + 0.01
+            }));
+        }
+        assert!(expected_pins.len() >= 2);
+        assert_eq!(atlas.pinned_glyphs, expected_pins);
+        assert!(!atlas.preserve_frame_pins);
     }
 
     #[test]

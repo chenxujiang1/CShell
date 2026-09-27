@@ -24,9 +24,9 @@ pub use terminal_interaction::{
 };
 pub use window::{
     AtlasPressureBenchmarkReport, EguiFrame, HeadlessRenderReport, HeadlessTerminalRenderer,
-    LogGeometryBenchmarkReport, RenderOutcome, TerminalGeometryBenchmarkReport, TerminalViewport,
-    WindowRenderer, WindowRendererError, benchmark_atlas_pressure, benchmark_log_geometry,
-    benchmark_terminal_geometry,
+    LogGeometryBenchmarkReport, PaneContent, PaneFrame, RenderOutcome,
+    TerminalGeometryBenchmarkReport, TerminalViewport, WindowRenderer, WindowRendererError,
+    benchmark_atlas_pressure, benchmark_log_geometry, benchmark_terminal_geometry,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -74,6 +74,8 @@ struct DesktopApp {
     workspace_connection: Option<workspace_connection::WorkspaceConnection>,
     workspace_config: Option<DesktopConnectionConfig>,
     workspace_loaded: bool,
+    pane_daemons: std::collections::BTreeMap<cshell_domain::TabId, DesktopDaemonConnection>,
+    daemon_config: Option<DesktopConnectionConfig>,
     workspace_layout_error: Option<String>,
     closing_workspace_tab: Option<cshell_domain::TabId>,
     current_workspace_tab: Option<cshell_domain::TabId>,
@@ -108,6 +110,16 @@ struct DesktopApp {
 }
 
 #[derive(Default)]
+struct SplitRenderFrame {
+    viewport: TerminalViewport,
+    terminal: Option<cshell_render::TerminalSurfaceFrame>,
+    log: Option<cshell_render::LogSurfaceFrame>,
+    decorations: TerminalDecorations,
+    log_decorations: LogDecorations,
+    focused: bool,
+}
+
+#[derive(Default)]
 struct CachedTabView {
     surface: TerminalSurfaceModel,
     decorations: TerminalDecorations,
@@ -116,6 +128,7 @@ struct CachedTabView {
     query: String,
     options: cshell_render::TerminalSearchOptions,
     search_open: bool,
+    last_log_page: Option<(LogSourceId, u64)>,
 }
 
 struct TabReflowRequest {
@@ -152,8 +165,94 @@ struct PendingPaste {
 }
 
 impl DesktopApp {
+    fn prepare_split_frames(&mut self, scale: f32) -> Option<Vec<SplitRenderFrame>> {
+        if self.view_model.pane_views.len() < 2 {
+            return None;
+        }
+        let renderer = self.renderer.as_ref()?;
+        let mut frames = Vec::new();
+        for pane in &self.view_model.pane_views {
+            let viewport = TerminalViewport::from_logical_rect(pane.rect, scale);
+            let rows = renderer.viewport_rows(viewport);
+            let columns = renderer.viewport_columns(viewport);
+            let focused = pane.tab_id == self.current_workspace_tab && pane.tab_id.is_some();
+            let cached = pane
+                .tab_id
+                .and_then(|tab| self.cached_tab_views.get_mut(&tab));
+            let (surface, log_surface, decorations, log_decorations) = if focused {
+                (
+                    &mut self.terminal_surface,
+                    &mut self.log_surface,
+                    &self.terminal_decorations,
+                    &self.log_decorations,
+                )
+            } else if let Some(cached) = cached {
+                (
+                    &mut cached.surface,
+                    &mut cached.log_surface,
+                    &cached.decorations,
+                    &cached.log_decorations,
+                )
+            } else {
+                frames.push(SplitRenderFrame {
+                    viewport,
+                    ..Default::default()
+                });
+                continue;
+            };
+            let connection = if focused {
+                self.daemon.as_ref()
+            } else {
+                pane.tab_id.and_then(|t| self.pane_daemons.get(&t))
+            };
+            let mut frame = SplitRenderFrame {
+                viewport,
+                decorations: decorations.clone(),
+                log_decorations: log_decorations.clone(),
+                focused,
+                ..Default::default()
+            };
+            if let Some(log_surface) = log_surface {
+                if let Some(request) = log_surface.request_reflow(columns)
+                    && self
+                        .log_reflow
+                        .as_ref()
+                        .is_none_or(|w| !w.submit(request, pane.tab_id))
+                {
+                    log_surface.reflow_failed();
+                }
+                if let Some(request) = log_surface.take_page_request(rows)
+                    && let Some(connection) = connection
+                {
+                    connection.request_log_page(request);
+                }
+                frame.log = log_surface.prepare_frame(rows);
+            } else {
+                if let Some(connection) = connection {
+                    connection.request_resize(
+                        rows,
+                        columns,
+                        viewport.width.min(u32::from(u16::MAX)) as u16,
+                        viewport.height.min(u32::from(u16::MAX)) as u16,
+                    );
+                }
+                frame.terminal = surface.prepare_frame(0, rows);
+            }
+            frames.push(frame);
+        }
+        Some(frames)
+    }
+
     fn refresh_workspace_tabs(&mut self) {
-        self.view_model.tabs = self.workspace.document.tab_groups[0]
+        self.view_model.workspace_document = Some(self.workspace.document.clone());
+        let focused = self.workspace.focused_group();
+        self.view_model.tabs = self
+            .workspace
+            .document
+            .tab_groups
+            .iter()
+            .find(|g| g.id == focused)
+            .unwrap_or(&self.workspace.document.tab_groups[0])
             .tabs
             .iter()
             .filter_map(|id| {
@@ -182,6 +281,20 @@ impl DesktopApp {
         if self.current_workspace_tab == Some(tab) {
             return;
         }
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(false);
+        }
+        if let Some(previous) = self.current_workspace_tab {
+            if let Some(connection) = self.daemon.take() {
+                self.pane_daemons.insert(previous, connection);
+            }
+            self.daemon = self.pane_daemons.remove(&tab);
+        }
+        if self.daemon.is_none()
+            && let Some(config) = &self.daemon_config
+        {
+            self.daemon = DesktopDaemonConnection::start_idle(config.clone()).ok();
+        }
         let old = CachedTabView {
             surface: std::mem::take(&mut self.terminal_surface),
             decorations: std::mem::take(&mut self.terminal_decorations),
@@ -190,6 +303,7 @@ impl DesktopApp {
             query: std::mem::take(&mut self.terminal_search_query),
             options: std::mem::take(&mut self.terminal_search_options),
             search_open: self.terminal_search_open,
+            last_log_page: self.submitted_log_page,
         };
         if let Some(id) = self.current_workspace_tab {
             self.cached_tab_views.insert(id, old);
@@ -204,7 +318,7 @@ impl DesktopApp {
         self.terminal_search_open = next.search_open;
         self.terminal_search_revision = self.terminal_search_revision.saturating_add(1);
         self.terminal_search_requested_generation = None;
-        self.submitted_log_page = None;
+        self.submitted_log_page = next.last_log_page;
         self.submitted_history_search = None;
         self.history_search_direction = None;
         self.terminal_search_focus_requested = false;
@@ -222,8 +336,12 @@ impl DesktopApp {
         self.view_model.selected = self.workspace.sessions.get(&tab).copied();
         if let Some(daemon) = &self.daemon {
             if let Some(id) = self.view_model.selected {
-                self.pending_tab = Some(id);
-                daemon.attach_session(id);
+                if daemon.view().session_id != Some(id) {
+                    self.pending_tab = Some(id);
+                    daemon.attach_session(id);
+                } else {
+                    self.pending_tab = None;
+                }
             } else {
                 self.pending_tab = None;
                 daemon.detach_for_placeholder();
@@ -274,7 +392,11 @@ impl DesktopApp {
                 if let Some(e2e) = &mut self.window_e2e {
                     e2e.note_reflow(promoted);
                 }
-                promoted && active
+                promoted
+                    && (active
+                        || completed
+                            .tab_id
+                            .is_some_and(|tab| self.workspace.visible_tabs().contains(&tab)))
             }
             Err(error) => {
                 surface.reflow_failed();
@@ -286,8 +408,14 @@ impl DesktopApp {
 
     fn discard_closed_tab_view(&mut self, tab: cshell_domain::TabId) {
         self.cached_tab_views.remove(&tab);
+        if let Some(connection) = self.pane_daemons.remove(&tab) {
+            connection.retire();
+        }
         if self.current_workspace_tab == Some(tab) {
             self.current_workspace_tab = None;
+            if let Some(connection) = self.daemon.take() {
+                connection.retire();
+            }
             self.terminal_surface = Default::default();
             self.terminal_decorations = Default::default();
             self.log_surface = None;
@@ -297,6 +425,8 @@ impl DesktopApp {
             self.terminal_search_revision = self.terminal_search_revision.saturating_add(1);
             self.pending_paste = None;
             self.view_model.selected = None;
+            self.view_model.daemon_connected = false;
+            self.view_model.can_reconnect_ssh = false;
         }
     }
 
@@ -350,6 +480,7 @@ impl DesktopApp {
                 self.workspace_loaded = true;
                 self.current_workspace_tab = self.workspace.active();
                 if let Some(config) = self.workspace_config.take() {
+                    self.daemon_config = Some(config.clone());
                     self.daemon = match if idle {
                         DesktopDaemonConnection::start_idle(config)
                     } else {
@@ -364,6 +495,53 @@ impl DesktopApp {
                 }
                 self.refresh_workspace_tabs();
                 changed = true;
+            }
+        }
+        let visible = self.workspace.visible_tabs();
+        let hidden: Vec<_> = self
+            .pane_daemons
+            .keys()
+            .copied()
+            .filter(|tab| !visible.contains(tab))
+            .collect();
+        for tab in hidden {
+            if let Some(connection) = self.pane_daemons.remove(&tab) {
+                connection.retire();
+            }
+        }
+        // Moving a tab can expose a previously hidden sibling. Attach its existing
+        // runtime session only; saved placeholders never create sessions here.
+        for tab in &visible {
+            if Some(*tab) == self.current_workspace_tab || self.pane_daemons.contains_key(tab) {
+                continue;
+            }
+            if let (Some(session), Some(config)) = (
+                self.workspace.sessions.get(tab),
+                self.daemon_config.as_ref(),
+            ) && let Ok(connection) = DesktopDaemonConnection::start_idle(config.clone())
+            {
+                connection.attach_session(*session);
+                self.pane_daemons.insert(*tab, connection);
+            }
+        }
+        for (tab, connection) in &self.pane_daemons {
+            let view = connection.view();
+            if view.session_id != self.workspace.sessions.get(tab).copied() {
+                continue;
+            }
+            let cached = self.cached_tab_views.entry(*tab).or_default();
+            if let Some(snapshot) = view.snapshot {
+                changed |= cached.surface.submit_snapshot(snapshot);
+            }
+            if let (Some(page), Some(surface)) = (view.log_page, cached.log_surface.as_mut()) {
+                let key = (page.source_id, page.revision);
+                if cached.last_log_page != Some(key) {
+                    if let Err(error) = surface.submit_page(page) {
+                        tracing::warn!(%error, "background pane log page rejected");
+                    }
+                    cached.last_log_page = Some(key);
+                    changed = true;
+                }
             }
         }
         let view = self.daemon.as_ref().map(DesktopDaemonConnection::view);
@@ -899,6 +1077,39 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 window.request_redraw();
             }
         }
+        if !egui_consumed
+            && self.pending_paste.is_none()
+            && !self.view_model.about_open
+            && !self.view_model.confirm_terminate
+            && matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                }
+            )
+            && let Some(position) = self.cursor_position
+        {
+            let scale = window.scale_factor() as f32;
+            let logical = egui::pos2(position.x as f32 / scale, position.y as f32 / scale);
+            if let Some(pane) = self
+                .view_model
+                .pane_views
+                .iter()
+                .find(|p| p.rect.contains(logical))
+                .cloned()
+                && let Some(tab) = pane.tab_id
+                && Some(tab) != self.current_workspace_tab
+            {
+                self.activate_workspace_tab(tab);
+                let viewport = TerminalViewport::from_logical_rect(pane.rect, scale);
+                self.terminal_viewport = Some(viewport);
+                if let Some(renderer) = &self.renderer {
+                    self.viewport_rows = renderer.viewport_rows(viewport);
+                }
+            }
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -1388,6 +1599,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             window.request_redraw();
                         }
                     }
+                    Some(WorkbenchMenuCommand::SplitWorkspace(axis)) => {
+                        if self.workspace_loaded
+                            && self.workspace.pending_launch.is_none()
+                            && let Some(tab) = self.workspace.split(axis)
+                        {
+                            self.activate_workspace_tab(tab);
+                        }
+                    }
+                    Some(WorkbenchMenuCommand::MoveTabToGroup(tab, group)) => {
+                        self.workspace.move_to_group(tab, group);
+                        self.activate_workspace_tab(tab);
+                    }
+                    Some(WorkbenchMenuCommand::ResizeSplit(pane, ratio)) => {
+                        self.workspace.set_ratio(pane, ratio);
+                        self.refresh_workspace_tabs();
+                    }
                     Some(WorkbenchMenuCommand::NewWorkspaceTab) => {
                         if self.workspace_loaded
                             && self.workspace.pending_launch.is_none()
@@ -1541,6 +1768,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                     }
                 }
+                let split_frames = self.prepare_split_frames(pixels_per_point);
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -1564,7 +1792,33 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     textures_delta: &mut textures_delta,
                     pixels_per_point,
                 };
-                let render_result = if let Some(log_surface) = &mut self.log_surface {
+                if self.log_surface.is_none() {
+                    window.set_ime_allowed(true);
+                    if let Some(snapshot) = self.terminal_surface.latest_snapshot() {
+                        position_terminal_ime(&window, viewport, snapshot);
+                    }
+                }
+                let render_result = if let Some(frames) = &split_frames {
+                    let panes: Vec<_> = frames
+                        .iter()
+                        .map(|frame| cshell_render::PaneFrame {
+                            viewport: frame.viewport,
+                            content: if frame.log.is_some() {
+                                cshell_render::PaneContent::Log {
+                                    frame: frame.log.as_ref(),
+                                    decorations: &frame.log_decorations,
+                                }
+                            } else {
+                                cshell_render::PaneContent::Terminal {
+                                    frame: frame.terminal.as_ref(),
+                                    decorations: &frame.decorations,
+                                    cursor_visible: frame.focused && self.cursor_blink.visible(),
+                                }
+                            },
+                        })
+                        .collect();
+                    renderer.render_panes(&panes, Some(egui_frame))
+                } else if let Some(log_surface) = &mut self.log_surface {
                     let viewport_columns = renderer.viewport_columns(viewport);
                     if let Some(request) = log_surface.request_reflow(viewport_columns)
                         && self.log_reflow.as_ref().is_none_or(|worker| {
@@ -2254,6 +2508,33 @@ mod tests {
         app.close_workspace_tab(second);
         assert!(app.log_surface.is_none());
         assert!(app.current_workspace_tab.is_none());
+    }
+
+    #[test]
+    fn visible_background_pane_reflow_requests_redraw() {
+        let mut app = super::DesktopApp::default();
+        let first = app
+            .workspace
+            .add(None, "First".into())
+            .unwrap_or_else(|| panic!("tab"));
+        app.switch_tab_view(first);
+        let mut surface = cshell_render::LogSurfaceModel::default();
+        surface
+            .submit_page(super::visual_corpus::log_page())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let request = surface
+            .request_reflow(40)
+            .unwrap_or_else(|| panic!("reflow"));
+        app.log_surface = Some(surface);
+        let second = app
+            .workspace
+            .split(cshell_domain::SplitAxis::Horizontal)
+            .unwrap_or_else(|| panic!("split"));
+        app.switch_tab_view(second);
+        assert!(app.apply_log_reflow(super::TabReflowResult {
+            tab_id: Some(first),
+            result: request.execute(),
+        }));
     }
 
     #[test]

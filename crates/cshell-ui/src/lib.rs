@@ -1,6 +1,8 @@
 //! Egui workbench controls. Terminal cells are never represented as egui widgets.
 
-use cshell_domain::{SessionId, TabId};
+use cshell_domain::{
+    PaneId, SessionId, SplitAxis, TabGroupId, TabId, WorkspaceDocument, WorkspacePaneContent,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTabViewModel {
@@ -16,11 +18,20 @@ pub struct WorkspaceTabViewModel {
     pub session_id: Option<SessionId>,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorkspacePaneView {
+    pub group_id: TabGroupId,
+    pub tab_id: Option<TabId>,
+    pub rect: egui::Rect,
+}
+
 #[derive(Debug, Default)]
 pub struct WorkbenchViewModel {
     pub sessions: Vec<SessionTabViewModel>,
     pub tabs: Vec<WorkspaceTabViewModel>,
     pub selected_tab: Option<TabId>,
+    pub workspace_document: Option<WorkspaceDocument>,
+    pub pane_views: Vec<WorkspacePaneView>,
     pub workspace_status: String,
     pub selected: Option<SessionId>,
     pub daemon_connected: bool,
@@ -45,6 +56,9 @@ pub enum WorkbenchMenuCommand {
     OpenWorkspaceTab(TabId),
     CloseWorkspaceTab(TabId),
     MoveWorkspaceTab(TabId, isize),
+    MoveTabToGroup(TabId, TabGroupId),
+    SplitWorkspace(SplitAxis),
+    ResizeSplit(PaneId, u16),
     Quit,
 }
 
@@ -160,6 +174,14 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                 if ui.button("+ New tab").clicked() {
                     model.menu_command = Some(WorkbenchMenuCommand::NewWorkspaceTab);
                 }
+                for (label, axis) in [
+                    ("Split right", SplitAxis::Horizontal),
+                    ("Split down", SplitAxis::Vertical),
+                ] {
+                    if ui.button(label).clicked() {
+                        model.menu_command = Some(WorkbenchMenuCommand::SplitWorkspace(axis));
+                    }
+                }
                 for tab in &model.tabs {
                     let selected = model.selected_tab == Some(tab.id);
                     let label = if tab.session_id.is_none() {
@@ -181,6 +203,18 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                             model.menu_command =
                                 Some(WorkbenchMenuCommand::MoveWorkspaceTab(tab.id, 1));
                             ui.close();
+                        }
+                        if let Some(document) = &model.workspace_document {
+                            for (index, group) in document.tab_groups.iter().enumerate() {
+                                if !group.tabs.contains(&tab.id)
+                                    && ui.button(format!("Move to group {}", index + 1)).clicked()
+                                {
+                                    model.menu_command = Some(
+                                        WorkbenchMenuCommand::MoveTabToGroup(tab.id, group.id),
+                                    );
+                                    ui.close();
+                                }
+                            }
                         }
                     });
                     if selected
@@ -212,9 +246,23 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
         }
     });
 
+    model.pane_views.clear();
+    let document = model.workspace_document.clone();
     let terminal_rect = egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
-        .show(ui, |ui| ui.max_rect())
+        .show(ui, |ui| {
+            let rect = ui.max_rect();
+            if let Some(document) = &document {
+                draw_workspace_pane(ui, document, document.windows[0].root, rect, model);
+                model
+                    .pane_views
+                    .iter()
+                    .find(|p| p.tab_id == model.selected_tab)
+                    .map_or(rect, |p| p.rect)
+            } else {
+                rect
+            }
+        })
         .inner;
 
     if model.about_open {
@@ -233,6 +281,131 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
     }
 
     terminal_rect
+}
+
+fn draw_workspace_pane(
+    ui: &mut egui::Ui,
+    document: &WorkspaceDocument,
+    id: PaneId,
+    rect: egui::Rect,
+    model: &mut WorkbenchViewModel,
+) {
+    let Some(pane) = document.panes.iter().find(|p| p.id == id) else {
+        return;
+    };
+    match pane.content {
+        WorkspacePaneContent::Tabs { group_id } => {
+            let Some(group) = document.tab_groups.iter().find(|g| g.id == group_id) else {
+                return;
+            };
+            let header = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.max.x, (rect.min.y + 30.0).min(rect.max.y)),
+            );
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(group_id)
+                    .max_rect(header)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            egui::ScrollArea::horizontal()
+                .id_salt(group_id)
+                .show(&mut child, |ui| {
+                    ui.horizontal(|ui| {
+                        for tab in &group.tabs {
+                            let title = document
+                                .bindings
+                                .iter()
+                                .find(|b| b.tab_id == *tab)
+                                .map_or("Tab", |b| b.title.as_str());
+                            if ui
+                                .selectable_label(group.active_tab == Some(*tab), title)
+                                .clicked()
+                            {
+                                model.selected_tab = Some(*tab);
+                            }
+                        }
+                    });
+                });
+            let body = egui::Rect::from_min_max(egui::pos2(rect.min.x, header.max.y), rect.max);
+            let focused = group
+                .tabs
+                .iter()
+                .any(|tab| Some(*tab) == model.selected_tab);
+            ui.painter().rect_stroke(
+                body,
+                0.0,
+                egui::Stroke::new(
+                    if focused { 2.0 } else { 1.0 },
+                    if focused {
+                        egui::Color32::LIGHT_BLUE
+                    } else {
+                        egui::Color32::DARK_GRAY
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+            model.pane_views.push(WorkspacePaneView {
+                group_id,
+                tab_id: group.active_tab,
+                rect: body.shrink2(egui::vec2(
+                    2.0_f32.min(body.width() / 2.0),
+                    2.0_f32.min(body.height() / 2.0),
+                )),
+            });
+        }
+        WorkspacePaneContent::Split {
+            axis,
+            ratio_permille,
+            first,
+            second,
+        } => {
+            let horizontal = axis == SplitAxis::Horizontal;
+            let size = if horizontal {
+                rect.width()
+            } else {
+                rect.height()
+            };
+            let origin = if horizontal { rect.min.x } else { rect.min.y };
+            let gap = 6.0_f32.min(size.max(0.0));
+            let split =
+                origin + gap / 2.0 + (size - gap).max(0.0) * f32::from(ratio_permille) / 1000.0;
+            let mut left = rect;
+            let mut right = rect;
+            let mut divider = rect;
+            if horizontal {
+                left.max.x = split - gap / 2.0;
+                right.min.x = split + gap / 2.0;
+                divider.min.x = split - gap / 2.0;
+                divider.max.x = split + gap / 2.0;
+            } else {
+                left.max.y = split - gap / 2.0;
+                right.min.y = split + gap / 2.0;
+                divider.min.y = split - gap / 2.0;
+                divider.max.y = split + gap / 2.0;
+            }
+            let response = ui.interact(
+                divider,
+                egui::Id::new(("workspace-divider", id)),
+                egui::Sense::drag(),
+            );
+            response.clone().on_hover_cursor(if horizontal {
+                egui::CursorIcon::ResizeHorizontal
+            } else {
+                egui::CursorIcon::ResizeVertical
+            });
+            if response.dragged()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                let position = if horizontal { pointer.x } else { pointer.y };
+                let ratio = (((position - origin - gap / 2.0) / (size - gap).max(1.0)) * 1000.0)
+                    .clamp(100.0, 900.0) as u16;
+                model.menu_command = Some(WorkbenchMenuCommand::ResizeSplit(id, ratio));
+            }
+            draw_workspace_pane(ui, document, first, left, model);
+            draw_workspace_pane(ui, document, second, right, model);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -301,6 +474,137 @@ mod tests {
                 },
             ],
         )
+    }
+
+    fn split_document() -> cshell_domain::WorkspaceDocument {
+        use cshell_domain::*;
+        let mut doc = WorkspaceDocument::default();
+        let group = TabGroupId::new();
+        let first = PaneId::new();
+        let second = PaneId::new();
+        let old_group = doc.tab_groups[0].id;
+        doc.panes[0].content = WorkspacePaneContent::Split {
+            axis: SplitAxis::Horizontal,
+            ratio_permille: 500,
+            first,
+            second,
+        };
+        doc.panes.extend([
+            WorkspacePane {
+                id: first,
+                content: WorkspacePaneContent::Tabs {
+                    group_id: old_group,
+                },
+            },
+            WorkspacePane {
+                id: second,
+                content: WorkspacePaneContent::Tabs { group_id: group },
+            },
+        ]);
+        doc.tab_groups.push(WorkspaceTabGroup {
+            id: group,
+            tabs: vec![],
+            active_tab: None,
+        });
+        for (index, title) in ["Left pane", "Right pane"].into_iter().enumerate() {
+            let tab = TabId::new();
+            doc.bindings.push(WorkspaceBinding {
+                tab_id: tab,
+                profile_id: None,
+                title: title.into(),
+            });
+            doc.tab_groups[index].tabs.push(tab);
+            doc.tab_groups[index].active_tab = Some(tab);
+        }
+        doc
+    }
+
+    #[test]
+    fn split_controls_select_group_tabs_and_drag_the_divider() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let doc = split_document();
+        let root = doc.windows[0].root;
+        let mut model = WorkbenchViewModel {
+            selected_tab: doc.tab_groups[0].active_tab,
+            workspace_document: Some(doc.clone()),
+            ..Default::default()
+        };
+        frame(&context, &mut model, vec![]);
+        let update = frame(&context, &mut model, vec![]);
+        let split = button_center(&update, "Split down");
+        click(&context, &mut model, split);
+        assert_eq!(
+            model.menu_command.take(),
+            Some(WorkbenchMenuCommand::SplitWorkspace(
+                cshell_domain::SplitAxis::Vertical
+            ))
+        );
+        let update = frame(&context, &mut model, vec![]);
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Right pane"))
+            .unwrap_or_else(|| panic!("right pane tab"));
+        let bounds = node.bounds().unwrap_or_else(|| panic!("tab bounds"));
+        click(
+            &context,
+            &mut model,
+            egui::pos2(
+                ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                ((bounds.y0 + bounds.y1) / 2.0) as f32,
+            ),
+        );
+        assert_eq!(model.selected_tab, doc.tab_groups[1].active_tab);
+        let left = model.pane_views[0].rect;
+        let right = model.pane_views[1].rect;
+        assert!(left.max.x < right.min.x);
+        let start = egui::pos2((left.max.x + right.min.x) / 2.0, left.center().y);
+        frame(
+            &context,
+            &mut model,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame(
+            &context,
+            &mut model,
+            vec![egui::Event::PointerMoved(start + egui::vec2(60.0, 0.0))],
+        );
+        assert!(
+            matches!(model.menu_command, Some(WorkbenchMenuCommand::ResizeSplit(id, ratio)) if id == root && ratio > 500 && ratio <= 900)
+        );
+    }
+
+    #[test]
+    fn tiny_split_layout_keeps_pane_rectangles_nonnegative() {
+        let context = egui::Context::default();
+        let doc = split_document();
+        let mut model = WorkbenchViewModel::default();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            super::draw_workspace_pane(
+                ui,
+                &doc,
+                doc.windows[0].root,
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(3.0, 4.0)),
+                &mut model,
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(model.pane_views.len(), 2);
+        assert!(
+            model
+                .pane_views
+                .iter()
+                .all(|pane| pane.rect.width() >= 0.0 && pane.rect.height() >= 0.0)
+        );
     }
 
     #[test]

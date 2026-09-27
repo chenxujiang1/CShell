@@ -13,11 +13,8 @@ pub struct DesktopWorkspace {
 impl DesktopWorkspace {
     pub fn restore(document: WorkspaceDocument) -> Result<Self, String> {
         cshell_application::validate_workspace(&document).map_err(|e| e.to_string())?;
-        if document.windows.len() != 1
-            || document.tab_groups.len() != 1
-            || document.panes.len() != 1
-        {
-            return Err("This workspace requires split/multiple-window support; the saved layout is preserved".into());
+        if document.windows.len() != 1 || document.tab_groups.len() > 8 {
+            return Err("This workspace requires multiple-window or larger-layout support; the saved layout is preserved".into());
         }
         Ok(Self {
             document,
@@ -26,11 +23,31 @@ impl DesktopWorkspace {
         })
     }
     pub fn active(&self) -> Option<TabId> {
-        self.document.tab_groups[0].active_tab
+        self.document
+            .tab_groups
+            .iter()
+            .find(|g| g.id == self.focused_group())
+            .and_then(|g| g.active_tab)
+    }
+    pub fn focused_group(&self) -> TabGroupId {
+        self.document.windows[0].focused_group
+    }
+    pub fn visible_tabs(&self) -> Vec<TabId> {
+        self.document
+            .tab_groups
+            .iter()
+            .filter_map(|g| g.active_tab)
+            .collect()
     }
     pub fn select(&mut self, id: TabId) {
-        if self.document.tab_groups[0].tabs.contains(&id) {
-            self.document.tab_groups[0].active_tab = Some(id);
+        if let Some(group) = self
+            .document
+            .tab_groups
+            .iter_mut()
+            .find(|g| g.tabs.contains(&id))
+        {
+            group.active_tab = Some(id);
+            self.document.windows[0].focused_group = group.id;
         }
     }
     pub fn add(&mut self, profile_id: Option<ProfileId>, title: String) -> Option<TabId> {
@@ -43,7 +60,13 @@ impl DesktopWorkspace {
             profile_id,
             title,
         });
-        self.document.tab_groups[0].tabs.push(id);
+        let focused = self.focused_group();
+        self.document
+            .tab_groups
+            .iter_mut()
+            .find(|g| g.id == focused)?
+            .tabs
+            .push(id);
         self.select(id);
         Some(id)
     }
@@ -73,26 +96,178 @@ impl DesktopWorkspace {
             self.pending_launch = None;
         }
         self.document.bindings.retain(|b| b.tab_id != id);
-        let group = &mut self.document.tab_groups[0];
-        let position = group.tabs.iter().position(|tab| *tab == id);
-        group.tabs.retain(|tab| *tab != id);
-        if group.active_tab == Some(id) {
-            group.active_tab = position.and_then(|index| {
-                group
-                    .tabs
-                    .get(index.min(group.tabs.len().saturating_sub(1)))
-                    .copied()
-            });
+        if let Some(group) = self
+            .document
+            .tab_groups
+            .iter_mut()
+            .find(|g| g.tabs.contains(&id))
+        {
+            let position = group.tabs.iter().position(|tab| *tab == id);
+            group.tabs.retain(|tab| *tab != id);
+            if group.active_tab == Some(id) {
+                group.active_tab = position.and_then(|index| {
+                    group
+                        .tabs
+                        .get(index.min(group.tabs.len().saturating_sub(1)))
+                        .copied()
+                });
+            }
+            let group_id = group.id;
+            self.collapse_empty(group_id);
         }
         self.sessions.remove(&id);
     }
     pub fn move_tab(&mut self, id: TabId, delta: isize) {
-        let tabs = &mut self.document.tab_groups[0].tabs;
+        let Some(group) = self
+            .document
+            .tab_groups
+            .iter_mut()
+            .find(|g| g.tabs.contains(&id))
+        else {
+            return;
+        };
+        let tabs = &mut group.tabs;
         if let Some(index) = tabs.iter().position(|tab| *tab == id) {
             let target = index
                 .saturating_add_signed(delta)
                 .min(tabs.len().saturating_sub(1));
             tabs.swap(index, target);
+        }
+    }
+    pub fn split(&mut self, axis: SplitAxis) -> Option<TabId> {
+        if self.document.tab_groups.len() >= 8
+            || self.document.bindings.len() >= cshell_application::MAX_WORKSPACE_TABS
+        {
+            return None;
+        }
+        let group = self.focused_group();
+        let leaf = self.document.panes.iter().position(
+            |p| matches!(p.content, WorkspacePaneContent::Tabs { group_id } if group_id == group),
+        )?;
+        let before = self.document.clone();
+        let binding = self
+            .active()
+            .and_then(|tab| self.document.bindings.iter().find(|b| b.tab_id == tab))
+            .cloned();
+        let first = PaneId::new();
+        let second = PaneId::new();
+        let new_group = TabGroupId::new();
+        self.document.panes[leaf].content = WorkspacePaneContent::Split {
+            axis,
+            ratio_permille: 500,
+            first,
+            second,
+        };
+        self.document.panes.push(WorkspacePane {
+            id: first,
+            content: WorkspacePaneContent::Tabs { group_id: group },
+        });
+        self.document.panes.push(WorkspacePane {
+            id: second,
+            content: WorkspacePaneContent::Tabs {
+                group_id: new_group,
+            },
+        });
+        self.document.tab_groups.push(WorkspaceTabGroup {
+            id: new_group,
+            tabs: vec![],
+            active_tab: None,
+        });
+        self.document.windows[0].focused_group = new_group;
+        let tab = self.add(
+            binding.as_ref().and_then(|b| b.profile_id),
+            binding.map_or("Local shell".into(), |b| b.title),
+        );
+        if cshell_application::validate_workspace(&self.document).is_err() {
+            self.document = before;
+            return None;
+        }
+        tab
+    }
+    pub fn set_ratio(&mut self, pane: PaneId, ratio: u16) {
+        if let Some(WorkspacePane {
+            content: WorkspacePaneContent::Split { ratio_permille, .. },
+            ..
+        }) = self.document.panes.iter_mut().find(|p| p.id == pane)
+        {
+            *ratio_permille = ratio.clamp(100, 900);
+        }
+    }
+    pub fn move_to_group(&mut self, tab: TabId, target: TabGroupId) {
+        if !self.document.tab_groups.iter().any(|g| g.id == target) {
+            return;
+        }
+        let Some(source) = self
+            .document
+            .tab_groups
+            .iter()
+            .find(|g| g.tabs.contains(&tab))
+            .map(|g| g.id)
+        else {
+            return;
+        };
+        if source == target {
+            return;
+        }
+        for group in &mut self.document.tab_groups {
+            if group.id == source {
+                group.tabs.retain(|id| *id != tab);
+                if group.active_tab == Some(tab) {
+                    group.active_tab = group.tabs.last().copied();
+                }
+            }
+            if group.id == target {
+                group.tabs.push(tab);
+                group.active_tab = Some(tab);
+            }
+        }
+        self.document.windows[0].focused_group = target;
+        self.collapse_empty(source);
+    }
+    fn collapse_empty(&mut self, group: TabGroupId) {
+        if self.document.tab_groups.len() == 1
+            || !self
+                .document
+                .tab_groups
+                .iter()
+                .any(|g| g.id == group && g.tabs.is_empty())
+        {
+            return;
+        }
+        let Some(leaf) = self.document.panes.iter().find(|p| matches!(p.content, WorkspacePaneContent::Tabs { group_id } if group_id == group)).map(|p| p.id) else { return; };
+        let Some((parent, sibling)) =
+            self.document
+                .panes
+                .iter()
+                .enumerate()
+                .find_map(|(index, pane)| match pane.content {
+                    WorkspacePaneContent::Split { first, second, .. } if first == leaf => {
+                        Some((index, second))
+                    }
+                    WorkspacePaneContent::Split { first, second, .. } if second == leaf => {
+                        Some((index, first))
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let Some(content) = self
+            .document
+            .panes
+            .iter()
+            .find(|p| p.id == sibling)
+            .map(|p| p.content.clone())
+        else {
+            return;
+        };
+        self.document.panes[parent].content = content;
+        self.document
+            .panes
+            .retain(|p| p.id != leaf && p.id != sibling);
+        self.document.tab_groups.retain(|g| g.id != group);
+        if self.focused_group() == group {
+            self.document.windows[0].focused_group = self.document.tab_groups[0].id;
         }
     }
 }
@@ -101,7 +276,86 @@ impl DesktopWorkspace {
 mod tests {
     use super::*;
     #[test]
-    fn split_layout_round_trips_but_desktop_refuses_to_flatten_it() {
+    fn nested_splits_move_tabs_and_collapse_empty_groups_without_losing_bindings() {
+        let mut workspace = DesktopWorkspace::default();
+        let first = workspace
+            .add(Some(ProfileId::new()), "First".into())
+            .unwrap_or_else(|| panic!("tab"));
+        let hidden = workspace
+            .add(None, "Hidden".into())
+            .unwrap_or_else(|| panic!("tab"));
+        workspace.select(first);
+        let second = workspace
+            .split(SplitAxis::Horizontal)
+            .unwrap_or_else(|| panic!("split"));
+        let third = workspace
+            .split(SplitAxis::Vertical)
+            .unwrap_or_else(|| panic!("split"));
+        assert_eq!(workspace.visible_tabs().len(), 3);
+        assert!(!workspace.sessions.contains_key(&second));
+        assert!(!workspace.sessions.contains_key(&third));
+        let target = workspace.focused_group();
+        workspace.move_to_group(hidden, target);
+        assert_eq!(workspace.active(), Some(hidden));
+        workspace.remove(third);
+        workspace.remove(second);
+        assert_eq!(workspace.document.tab_groups.len(), 2);
+        workspace.remove(hidden);
+        assert_eq!(workspace.document.tab_groups.len(), 1);
+        assert_eq!(workspace.active(), Some(first));
+        assert_eq!(workspace.document.panes.len(), 1);
+        assert_eq!(workspace.document.bindings.len(), 1);
+        assert!(cshell_application::validate_workspace(&workspace.document).is_ok());
+        let restored =
+            DesktopWorkspace::restore(workspace.document.clone()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(restored.active(), Some(first));
+        assert!(restored.sessions.is_empty());
+    }
+
+    #[test]
+    fn split_limit_and_ratio_changes_leave_a_valid_versioned_layout() {
+        let mut workspace = DesktopWorkspace::default();
+        workspace.add(None, "Root".into());
+        for _ in 0..7 {
+            assert!(workspace.split(SplitAxis::Horizontal).is_some());
+        }
+        let before = workspace.document.clone();
+        assert!(workspace.split(SplitAxis::Vertical).is_none());
+        assert_eq!(workspace.document, before);
+        let root = workspace.document.windows[0].root;
+        workspace.set_ratio(root, 0);
+        assert!(matches!(
+            workspace
+                .document
+                .panes
+                .iter()
+                .find(|p| p.id == root)
+                .map(|p| &p.content),
+            Some(WorkspacePaneContent::Split {
+                ratio_permille: 100,
+                ..
+            })
+        ));
+        assert!(cshell_application::validate_workspace(&workspace.document).is_ok());
+        let restored =
+            DesktopWorkspace::restore(workspace.document.clone()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(restored.document, workspace.document);
+        assert!(restored.sessions.is_empty());
+    }
+
+    #[test]
+    fn full_tab_capacity_refuses_split_without_mutating_layout() {
+        let mut workspace = DesktopWorkspace::default();
+        for _ in 0..cshell_application::MAX_WORKSPACE_TABS {
+            assert!(workspace.add(None, "Tab".into()).is_some());
+        }
+        let before = workspace.document.clone();
+        assert!(workspace.split(SplitAxis::Horizontal).is_none());
+        assert_eq!(workspace.document, before);
+    }
+
+    #[test]
+    fn split_layout_restores_without_live_sessions() {
         let mut doc = WorkspaceDocument::default();
         let first = doc.panes[0].id;
         let second = PaneId::new();
@@ -131,7 +385,9 @@ mod tests {
             cshell_application::decode_workspace(&json).unwrap_or_else(|e| panic!("{e}")),
             doc
         );
-        assert!(DesktopWorkspace::restore(doc).is_err());
+        let restored = DesktopWorkspace::restore(doc.clone()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(restored.document, doc);
+        assert!(restored.sessions.is_empty());
     }
 
     #[test]

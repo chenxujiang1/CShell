@@ -367,6 +367,18 @@ impl DesktopDaemonConnection {
             .clone()
     }
 
+    /// Stop a view without joining its IPC thread on the GUI event thread.
+    pub fn retire(mut self) {
+        let _sent = self.shutdown.send(true);
+        if let Some(worker) = self.worker.take() {
+            let _reaper = std::thread::Builder::new()
+                .name("cshell-view-reaper".into())
+                .spawn(move || {
+                    let _joined = worker.join();
+                });
+        }
+    }
+
     pub fn open_profile(&self, id: ProfileId) -> bool {
         self.open_profile_action(id, DesktopSessionAction::OpenProfile(id))
     }
@@ -2059,7 +2071,7 @@ mod tests {
         };
         let connection = DesktopDaemonConnection::start(DesktopConnectionConfig {
             source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
-                endpoint,
+                endpoint: endpoint.clone(),
                 instance_token: token,
                 daemon_instance_id,
             }),
@@ -2094,6 +2106,57 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        let second_attachment = registry
+            .spawn_local(&interactive_profile(), TerminalSize::cells(18, 60))
+            .unwrap_or_else(|e| panic!("second PTY: {e}"));
+        let second_id = second_attachment.session_id();
+        drop(second_attachment);
+        let second = DesktopDaemonConnection::start(DesktopConnectionConfig {
+            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
+                endpoint,
+                instance_token: token,
+                daemon_instance_id,
+            }),
+            session_id: Some(second_id),
+            request_log_pages: false,
+        })
+        .unwrap_or_else(|e| panic!("second pane connection: {e}"));
+        tokio::time::timeout(PTY_E2E_TIMEOUT, async {
+            while !second
+                .view()
+                .snapshot
+                .as_deref()
+                .is_some_and(|s| snapshot_has_executed_line(s, READY_MARKER))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("second pane readiness: {e}"));
+        assert_ne!(session_id, second_id);
+        assert!(second.send_input(InputAction::Paste {
+            text: "echo CSHELL_SECOND_PANE_ONLY\r".into(),
+            bracketed: true
+        }));
+        assert!(second.request_resize(18, 60, 600, 360));
+        tokio::time::timeout(PTY_E2E_TIMEOUT, async {
+            while !second.view().snapshot.as_deref().is_some_and(|s| {
+                s.rows == 18
+                    && s.cols == 60
+                    && snapshot_has_executed_line(s, "CSHELL_SECOND_PANE_ONLY")
+            }) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("second pane output/resize: {e}"));
+        assert!(
+            !connection
+                .view()
+                .snapshot
+                .as_deref()
+                .is_some_and(|s| snapshot_has_executed_line(s, "CSHELL_SECOND_PANE_ONLY"))
+        );
         assert!(connection.send_input(InputAction::Paste {
             text: format!("echo {MARKER}\r"),
             bracketed: true,
@@ -2117,6 +2180,18 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+
+        assert!(
+            !second
+                .view()
+                .snapshot
+                .as_deref()
+                .is_some_and(|s| snapshot_has_executed_line(s, MARKER))
+        );
+        second.retire();
+        registry
+            .close(second_id)
+            .unwrap_or_else(|e| panic!("close second pane: {e}"));
 
         assert!(
             connection.request_history_search(DesktopHistorySearchRequest {
