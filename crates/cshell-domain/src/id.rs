@@ -53,6 +53,10 @@ domain_id!(SessionId);
 domain_id!(TargetId);
 domain_id!(TaskId);
 domain_id!(TaskRunId);
+domain_id!(WorkspaceWindowId);
+domain_id!(TabGroupId);
+domain_id!(PaneId);
+domain_id!(TabId);
 
 #[cfg(test)]
 mod tests {

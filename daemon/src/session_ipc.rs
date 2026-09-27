@@ -213,6 +213,31 @@ impl SessionIpcService {
         mut request: Envelope,
         negotiated_features: u64,
     ) -> Result<DispatchResult, SessionIpcError> {
+        if let Some(envelope::Payload::WorkspaceRequest(workspace)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::WORKSPACE_CONTROL == 0 {
+                cshell_ipc::WorkspaceResponse {
+                    status: cshell_ipc::WorkspaceStatus::Unsupported as i32,
+                    detail: "Workspace control was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else if let Some(profiles) = &self.profiles {
+                profiles.handle_workspace(workspace.clone()).await
+            } else {
+                cshell_ipc::WorkspaceResponse {
+                    status: cshell_ipc::WorkspaceStatus::Unavailable as i32,
+                    detail: "Workspace storage unavailable".into(),
+                    ..Default::default()
+                }
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::WorkspaceResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
         if matches!(
             request.payload.as_ref(),
             Some(envelope::Payload::ProfileRequest(_))
@@ -1094,6 +1119,93 @@ mod tests {
             cwd_policy: WorkingDirectoryPolicy::Inherit,
             env_overrides: BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_control_round_trip_refuses_stale_and_unnegotiated_writes_without_launching()
+    {
+        use cshell_application::{decode_workspace, encode_workspace};
+        use cshell_domain::WorkspaceDocument;
+        use cshell_ipc::{WorkspaceOperation, WorkspaceRequest, WorkspaceStatus, features};
+        let temp = tempfile::tempdir().unwrap();
+        let repository =
+            cshell_storage::SqliteProfileRepository::open(temp.path().join("workspace.db"))
+                .await
+                .unwrap();
+        let registry =
+            Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16).unwrap());
+        let service = SessionIpcService::new(Arc::clone(&registry)).with_profiles(Arc::new(
+            crate::profile_ipc::ProfileIpcService::new(repository),
+        ));
+        let request = |request_id, operation, expected_revision, document_json| Envelope {
+            request_id,
+            payload: Some(envelope::Payload::WorkspaceRequest(WorkspaceRequest {
+                operation: operation as i32,
+                expected_revision,
+                document_json,
+            })),
+            ..Default::default()
+        };
+        let doc = WorkspaceDocument::default();
+        let save = request(
+            10,
+            WorkspaceOperation::Save,
+            0,
+            encode_workspace(&doc).unwrap(),
+        );
+        let denied = service
+            .dispatch_with_features(save.clone(), 0)
+            .await
+            .unwrap()
+            .response;
+        let Some(envelope::Payload::WorkspaceResponse(denied)) = denied.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(denied.status, WorkspaceStatus::Unsupported as i32);
+        let result = service
+            .dispatch_with_features(save.clone(), features::WORKSPACE_CONTROL)
+            .await
+            .unwrap()
+            .response;
+        assert_eq!(result.request_id, 10);
+        let Some(envelope::Payload::WorkspaceResponse(saved)) = result.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(saved.status, WorkspaceStatus::Ok as i32);
+        assert_eq!(saved.revision, 1);
+        assert_eq!(decode_workspace(&saved.document_json).unwrap(), doc);
+        let stale = service.dispatch_any(save).await.unwrap().response;
+        let Some(envelope::Payload::WorkspaceResponse(stale)) = stale.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(stale.status, WorkspaceStatus::Conflict as i32);
+        let mut future = doc.clone();
+        future.version += 1;
+        let invalid = service
+            .dispatch_any(request(
+                12,
+                WorkspaceOperation::Save,
+                1,
+                serde_json::to_vec(&future).unwrap(),
+            ))
+            .await
+            .unwrap()
+            .response;
+        let Some(envelope::Payload::WorkspaceResponse(invalid)) = invalid.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(invalid.status, WorkspaceStatus::Invalid as i32);
+        let loaded = service
+            .dispatch_any(request(13, WorkspaceOperation::Load, 0, vec![]))
+            .await
+            .unwrap()
+            .response;
+        let Some(envelope::Payload::WorkspaceResponse(loaded)) = loaded.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(loaded.revision, 1);
+        assert_eq!(decode_workspace(&loaded.document_json).unwrap(), doc);
+        assert_eq!(registry.len(), 0);
     }
 
     #[test]

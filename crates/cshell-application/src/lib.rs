@@ -2,6 +2,8 @@
 
 mod profile_import;
 mod profiles;
+mod workspace;
+pub use workspace::*;
 
 pub use profile_import::{
     ImportAction, ImportConflictPolicy, ImportItemKind, ImportItemPreview,

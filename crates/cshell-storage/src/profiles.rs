@@ -15,7 +15,7 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub struct SqliteProfileRepository {
     path: PathBuf,
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 impl SqliteProfileRepository {

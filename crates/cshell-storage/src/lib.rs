@@ -2,6 +2,7 @@
 
 mod migration;
 mod profiles;
+mod workspace;
 
 pub use migration::restore_backup;
 pub use profiles::SqliteProfileRepository;

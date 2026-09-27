@@ -1,17 +1,27 @@
 //! Egui workbench controls. Terminal cells are never represented as egui widgets.
 
-use cshell_domain::SessionId;
+use cshell_domain::{SessionId, TabId};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTabViewModel {
     pub id: SessionId,
     pub title: String,
     pub connected: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorkspaceTabViewModel {
+    pub id: TabId,
+    pub title: String,
+    pub session_id: Option<SessionId>,
+}
+
 #[derive(Debug, Default)]
 pub struct WorkbenchViewModel {
     pub sessions: Vec<SessionTabViewModel>,
+    pub tabs: Vec<WorkspaceTabViewModel>,
+    pub selected_tab: Option<TabId>,
+    pub workspace_status: String,
     pub selected: Option<SessionId>,
     pub daemon_connected: bool,
     pub daemon_status_detail: String,
@@ -31,6 +41,10 @@ pub enum WorkbenchMenuCommand {
     ReconnectNewShell,
     CloseView,
     TerminateSession(SessionId),
+    NewWorkspaceTab,
+    OpenWorkspaceTab(TabId),
+    CloseWorkspaceTab(TabId),
+    MoveWorkspaceTab(TabId, isize),
     Quit,
 }
 
@@ -140,6 +154,64 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             }
         });
 
+    egui::Panel::top("workspace_tabs").show(ui, |ui| {
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("+ New tab").clicked() {
+                    model.menu_command = Some(WorkbenchMenuCommand::NewWorkspaceTab);
+                }
+                for tab in &model.tabs {
+                    let selected = model.selected_tab == Some(tab.id);
+                    let label = if tab.session_id.is_none() {
+                        format!("{} (not started)", tab.title)
+                    } else {
+                        tab.title.clone()
+                    };
+                    let response = ui.selectable_label(selected, label);
+                    if response.clicked() {
+                        model.selected_tab = Some(tab.id);
+                    }
+                    response.context_menu(|ui| {
+                        if ui.button("Move left").clicked() {
+                            model.menu_command =
+                                Some(WorkbenchMenuCommand::MoveWorkspaceTab(tab.id, -1));
+                            ui.close();
+                        }
+                        if ui.button("Move right").clicked() {
+                            model.menu_command =
+                                Some(WorkbenchMenuCommand::MoveWorkspaceTab(tab.id, 1));
+                            ui.close();
+                        }
+                    });
+                    if selected
+                        && ui
+                            .small_button("x")
+                            .on_hover_text("Close this view")
+                            .clicked()
+                    {
+                        model.menu_command = Some(WorkbenchMenuCommand::CloseWorkspaceTab(tab.id));
+                    }
+                }
+            });
+        });
+        if let Some(tab) = model
+            .tabs
+            .iter()
+            .find(|tab| Some(tab.id) == model.selected_tab)
+            && tab.session_id.is_none()
+        {
+            ui.horizontal(|ui| {
+                ui.label("Restored layout. The previous process has not been restarted.");
+                if ui.button("Open this tab").clicked() {
+                    model.menu_command = Some(WorkbenchMenuCommand::OpenWorkspaceTab(tab.id));
+                }
+            });
+        }
+        if !model.workspace_status.is_empty() {
+            ui.label(&model.workspace_status);
+        }
+    });
+
     let terminal_rect = egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
         .show(ui, |ui| ui.max_rect())
@@ -229,6 +301,45 @@ mod tests {
                 },
             ],
         )
+    }
+
+    #[test]
+    fn workspace_placeholder_requires_explicit_open_and_can_close_without_a_session() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let tab = cshell_domain::TabId::new();
+        let mut model = WorkbenchViewModel {
+            tabs: vec![super::WorkspaceTabViewModel {
+                id: tab,
+                title: "Restored".into(),
+                session_id: None,
+            }],
+            selected_tab: Some(tab),
+            ..Default::default()
+        };
+        let _initial = frame(&context, &mut model, vec![]);
+        let update = frame(&context, &mut model, vec![]);
+        assert!(model.menu_command.is_none());
+        let open = button_center(&update, "Open this tab");
+        click(&context, &mut model, open);
+        assert_eq!(
+            model.menu_command.take(),
+            Some(WorkbenchMenuCommand::OpenWorkspaceTab(tab))
+        );
+        let update = frame(&context, &mut model, vec![]);
+        let close = button_center(&update, "x");
+        click(&context, &mut model, close);
+        assert_eq!(
+            model.menu_command.take(),
+            Some(WorkbenchMenuCommand::CloseWorkspaceTab(tab))
+        );
+        let update = frame(&context, &mut model, vec![]);
+        let new = button_center(&update, "+ New tab");
+        click(&context, &mut model, new);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::NewWorkspaceTab)
+        );
     }
 
     #[test]

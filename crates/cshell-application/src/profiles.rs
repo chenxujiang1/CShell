@@ -169,6 +169,10 @@ impl<R: ProfileRepository> ProfileService<R> {
         Self { repository }
     }
 
+    pub fn repository(&self) -> &R {
+        &self.repository
+    }
+
     pub fn into_repository(self) -> R {
         self.repository
     }

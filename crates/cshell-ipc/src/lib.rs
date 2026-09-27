@@ -7,6 +7,8 @@ mod message;
 mod profile;
 mod replica;
 mod subscription;
+mod workspace;
+pub use workspace::*;
 pub mod transport;
 #[cfg(windows)]
 mod windows_security;

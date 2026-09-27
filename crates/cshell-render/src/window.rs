@@ -1222,6 +1222,7 @@ pub struct WindowRenderer {
     vertex_capacity: usize,
     vertex_count: u32,
     geometry_key: Option<GeometryKey>,
+    geometry_snapshot: Option<Arc<FrameSnapshot>>,
     device_lost: Arc<AtomicBool>,
     cpu_adapter: bool,
 }
@@ -1452,6 +1453,7 @@ impl WindowRenderer {
             vertex_capacity,
             vertex_count: 0,
             geometry_key: None,
+            geometry_snapshot: None,
             device_lost,
             cpu_adapter,
         })
@@ -1571,6 +1573,7 @@ impl WindowRenderer {
             | GeometryFrame::Log { frame: None, .. } => {
                 self.vertex_count = 0;
                 self.geometry_key = None;
+                self.geometry_snapshot = None;
             }
         }
         let (output, reconfigure_after_present) = match self.surface.get_current_texture() {
@@ -1692,7 +1695,14 @@ impl WindowRenderer {
             first_row: frame.plan.visible_rows.start,
             last_row: frame.plan.visible_rows.end,
         };
-        if self.geometry_key == Some(key) {
+        // Generations are local to each session. Retain the Arc so identity
+        // cannot be recycled while its geometry is cached.
+        if self.geometry_key == Some(key)
+            && self
+                .geometry_snapshot
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &frame.snapshot))
+        {
             return;
         }
         let vertices = build_vertices(
@@ -1706,6 +1716,7 @@ impl WindowRenderer {
             cursor_visible,
         );
         self.upload_geometry(vertices, key);
+        self.geometry_snapshot = Some(Arc::clone(&frame.snapshot));
     }
 
     fn update_log_geometry(
@@ -1739,6 +1750,7 @@ impl WindowRenderer {
             decorations,
         );
         self.upload_geometry(vertices, key);
+        self.geometry_snapshot = None;
     }
 
     fn upload_geometry(&mut self, vertices: Vec<Vertex>, key: GeometryKey) {

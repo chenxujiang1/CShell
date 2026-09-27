@@ -672,3 +672,74 @@ fn import_error(error: ProfileImportError) -> (ProfileStatus, String) {
     };
     (status, error.to_string())
 }
+
+impl ProfileIpcService {
+    pub(crate) async fn handle_workspace(
+        &self,
+        request: cshell_ipc::WorkspaceRequest,
+    ) -> cshell_ipc::WorkspaceResponse {
+        use cshell_application::{WorkspaceRepository, WorkspaceRepositoryError, decode_workspace};
+        use cshell_ipc::{WorkspaceOperation, WorkspaceResponse, WorkspaceStatus};
+        let result = match WorkspaceOperation::try_from(request.operation) {
+            Ok(WorkspaceOperation::Load)
+                if request.document_json.is_empty() && request.expected_revision == 0 =>
+            {
+                self.service.repository().load_workspace().await
+            }
+            Ok(WorkspaceOperation::Save) => {
+                let document = match decode_workspace(&request.document_json) {
+                    Ok(document) => document,
+                    Err(error) => {
+                        return WorkspaceResponse {
+                            status: WorkspaceStatus::Invalid as i32,
+                            detail: error.to_string(),
+                            ..Default::default()
+                        };
+                    }
+                };
+                self.service
+                    .repository()
+                    .save_workspace(request.expected_revision, &document)
+                    .await
+                    .map(Some)
+            }
+            _ => {
+                return WorkspaceResponse {
+                    status: WorkspaceStatus::Invalid as i32,
+                    detail: "Invalid workspace operation".into(),
+                    ..Default::default()
+                };
+            }
+        };
+        match result {
+            Ok(snapshot) => {
+                let revision = snapshot.as_ref().map_or(0, |s| s.revision);
+                let json = snapshot.map_or(Ok(Vec::new()), |s| {
+                    cshell_application::encode_workspace(&s.document)
+                });
+                match json {
+                    Ok(document_json) => WorkspaceResponse {
+                        status: WorkspaceStatus::Ok as i32,
+                        revision,
+                        document_json,
+                        detail: String::new(),
+                    },
+                    Err(error) => WorkspaceResponse {
+                        status: WorkspaceStatus::Corrupt as i32,
+                        detail: error.to_string(),
+                        ..Default::default()
+                    },
+                }
+            }
+            Err(error) => WorkspaceResponse {
+                status: match error {
+                    WorkspaceRepositoryError::Conflict { .. } => WorkspaceStatus::Conflict,
+                    WorkspaceRepositoryError::Unavailable => WorkspaceStatus::Unavailable,
+                    WorkspaceRepositoryError::Corrupt => WorkspaceStatus::Corrupt,
+                } as i32,
+                detail: error.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+}

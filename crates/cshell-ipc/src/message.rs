@@ -38,6 +38,7 @@ pub mod features {
     pub const SSH_PROFILE_ROUTE: u64 = 1 << 12;
     pub const LOCAL_PROFILE: u64 = 1 << 13;
     pub const LOCAL_LAUNCH_OPTIONS: u64 = 1 << 14;
+    pub const WORKSPACE_CONTROL: u64 = 1 << 15;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1573,7 +1574,7 @@ pub struct Envelope {
     pub deadline_unix_ms: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1636,6 +1637,10 @@ pub mod envelope {
         ProfileRequest(ProfileRequest),
         #[prost(message, tag = "32")]
         ProfileResponse(ProfileResponse),
+        #[prost(message, tag = "33")]
+        WorkspaceRequest(crate::WorkspaceRequest),
+        #[prost(message, tag = "34")]
+        WorkspaceResponse(crate::WorkspaceResponse),
     }
 }
 

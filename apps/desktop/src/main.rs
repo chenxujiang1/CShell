@@ -6,6 +6,8 @@ mod terminal_accessibility;
 mod terminal_search;
 mod visual_corpus;
 mod window_e2e;
+mod workspace_connection;
+mod workspace_model;
 
 use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers, SessionId};
 use cshell_ipc::{HistorySearchDirection, MAX_TERMINAL_INPUT_BYTES};
@@ -68,6 +70,14 @@ struct DesktopApp {
     profiles: Option<DesktopProfileConnection>,
     profile_panel: ProfilePanel,
     pending_tab: Option<SessionId>,
+    workspace: workspace_model::DesktopWorkspace,
+    workspace_connection: Option<workspace_connection::WorkspaceConnection>,
+    workspace_config: Option<DesktopConnectionConfig>,
+    workspace_loaded: bool,
+    workspace_layout_error: Option<String>,
+    closing_workspace_tab: Option<cshell_domain::TabId>,
+    current_workspace_tab: Option<cshell_domain::TabId>,
+    cached_tab_views: std::collections::BTreeMap<cshell_domain::TabId, CachedTabView>,
     terminal_surface: TerminalSurfaceModel,
     terminal_decorations: TerminalDecorations,
     terminal_search: Option<TerminalSearchWorker>,
@@ -97,9 +107,29 @@ struct DesktopApp {
     window_e2e: Option<window_e2e::WindowE2e>,
 }
 
+#[derive(Default)]
+struct CachedTabView {
+    surface: TerminalSurfaceModel,
+    decorations: TerminalDecorations,
+    log_surface: Option<LogSurfaceModel>,
+    log_decorations: LogDecorations,
+    query: String,
+    options: cshell_render::TerminalSearchOptions,
+    search_open: bool,
+}
+
+struct TabReflowRequest {
+    tab_id: Option<cshell_domain::TabId>,
+    request: LogReflowRequest,
+}
+struct TabReflowResult {
+    tab_id: Option<cshell_domain::TabId>,
+    result: Result<LogReflowLayout, LogSurfaceError>,
+}
+
 struct LogReflowWorker {
-    requests: Option<std::sync::mpsc::Sender<LogReflowRequest>>,
-    results: std::sync::mpsc::Receiver<Result<LogReflowLayout, LogSurfaceError>>,
+    requests: Option<std::sync::mpsc::Sender<TabReflowRequest>>,
+    results: std::sync::mpsc::Receiver<TabReflowResult>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -121,15 +151,339 @@ struct PendingPaste {
     session_title: String,
 }
 
+impl DesktopApp {
+    fn refresh_workspace_tabs(&mut self) {
+        self.view_model.tabs = self.workspace.document.tab_groups[0]
+            .tabs
+            .iter()
+            .filter_map(|id| {
+                let binding = self
+                    .workspace
+                    .document
+                    .bindings
+                    .iter()
+                    .find(|b| b.tab_id == *id)?;
+                Some(cshell_ui::WorkspaceTabViewModel {
+                    id: *id,
+                    title: binding.title.clone(),
+                    session_id: self.workspace.sessions.get(id).copied(),
+                })
+            })
+            .collect();
+        self.view_model.selected_tab = self.workspace.active();
+        if self.workspace.writable
+            && let Some(connection) = &self.workspace_connection
+        {
+            connection.save(&self.workspace.document);
+        }
+    }
+
+    fn switch_tab_view(&mut self, tab: cshell_domain::TabId) {
+        if self.current_workspace_tab == Some(tab) {
+            return;
+        }
+        let old = CachedTabView {
+            surface: std::mem::take(&mut self.terminal_surface),
+            decorations: std::mem::take(&mut self.terminal_decorations),
+            log_surface: self.log_surface.take(),
+            log_decorations: std::mem::take(&mut self.log_decorations),
+            query: std::mem::take(&mut self.terminal_search_query),
+            options: std::mem::take(&mut self.terminal_search_options),
+            search_open: self.terminal_search_open,
+        };
+        if let Some(id) = self.current_workspace_tab {
+            self.cached_tab_views.insert(id, old);
+        }
+        let next = self.cached_tab_views.remove(&tab).unwrap_or_default();
+        self.terminal_surface = next.surface;
+        self.terminal_decorations = next.decorations;
+        self.log_surface = next.log_surface;
+        self.log_decorations = next.log_decorations;
+        self.terminal_search_query = next.query;
+        self.terminal_search_options = next.options;
+        self.terminal_search_open = next.search_open;
+        self.terminal_search_revision = self.terminal_search_revision.saturating_add(1);
+        self.terminal_search_requested_generation = None;
+        self.submitted_log_page = None;
+        self.submitted_history_search = None;
+        self.history_search_direction = None;
+        self.terminal_search_focus_requested = false;
+        self.terminal_search_error = None;
+        self.pending_paste = None;
+        self.terminal_selecting = false;
+        self.wheel_row_accumulator = 0.0;
+        self.current_workspace_tab = Some(tab);
+    }
+
+    fn activate_workspace_tab(&mut self, tab: cshell_domain::TabId) {
+        self.workspace.pending_launch = None;
+        self.switch_tab_view(tab);
+        self.workspace.select(tab);
+        self.view_model.selected = self.workspace.sessions.get(&tab).copied();
+        if let Some(daemon) = &self.daemon {
+            if let Some(id) = self.view_model.selected {
+                self.pending_tab = Some(id);
+                daemon.attach_session(id);
+            } else {
+                self.pending_tab = None;
+                daemon.detach_for_placeholder();
+            }
+        }
+        self.refresh_workspace_tabs();
+    }
+
+    fn prepare_profile_tab(&mut self, id: cshell_domain::ProfileId) -> bool {
+        if self.workspace.pending_launch.is_some()
+            || (!self.workspace_loaded && self.workspace_connection.is_some())
+        {
+            return false;
+        }
+        let title = self
+            .profiles
+            .as_ref()
+            .and_then(|p| p.view().catalog)
+            .and_then(|catalog| catalog.profiles.into_iter().find(|p| p.id == id))
+            .map_or("Profile".into(), |p| p.name);
+        let Some(tab) = self.workspace.add(Some(id), title) else {
+            self.view_model.workspace_status = "Workspace tab limit reached".into();
+            return false;
+        };
+        self.switch_tab_view(tab);
+        self.workspace.pending_launch = Some(tab);
+        self.view_model.selected = None;
+        self.refresh_workspace_tabs();
+        true
+    }
+
+    fn apply_log_reflow(&mut self, completed: TabReflowResult) -> bool {
+        let active = completed.tab_id == self.current_workspace_tab;
+        let surface = if active {
+            self.log_surface.as_mut()
+        } else {
+            completed
+                .tab_id
+                .and_then(|tab| self.cached_tab_views.get_mut(&tab))
+                .and_then(|v| v.log_surface.as_mut())
+        };
+        let Some(surface) = surface else {
+            return false;
+        };
+        match completed.result {
+            Ok(layout) => {
+                let promoted = surface.submit_reflow(layout);
+                if let Some(e2e) = &mut self.window_e2e {
+                    e2e.note_reflow(promoted);
+                }
+                promoted && active
+            }
+            Err(error) => {
+                surface.reflow_failed();
+                tracing::error!(%error, "background log reflow failed");
+                false
+            }
+        }
+    }
+
+    fn discard_closed_tab_view(&mut self, tab: cshell_domain::TabId) {
+        self.cached_tab_views.remove(&tab);
+        if self.current_workspace_tab == Some(tab) {
+            self.current_workspace_tab = None;
+            self.terminal_surface = Default::default();
+            self.terminal_decorations = Default::default();
+            self.log_surface = None;
+            self.log_decorations = Default::default();
+            self.terminal_search_query.clear();
+            self.terminal_search_open = false;
+            self.terminal_search_revision = self.terminal_search_revision.saturating_add(1);
+            self.pending_paste = None;
+            self.view_model.selected = None;
+        }
+    }
+
+    fn close_workspace_tab(&mut self, tab: cshell_domain::TabId) {
+        if let Some(id) = self.workspace.sessions.get(&tab).copied() {
+            if self
+                .daemon
+                .as_ref()
+                .is_some_and(|daemon| daemon.close_session_view(id))
+            {
+                self.closing_workspace_tab = Some(tab);
+            }
+        } else {
+            self.workspace.remove(tab);
+            self.discard_closed_tab_view(tab);
+            if let Some(next) = self.workspace.active() {
+                self.activate_workspace_tab(next);
+            } else {
+                self.current_workspace_tab = None;
+                self.terminal_surface = Default::default();
+            }
+            self.refresh_workspace_tabs();
+        }
+    }
+
+    fn sync_workspace(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(connection) = &self.workspace_connection {
+            let view = connection.view();
+            let status = self
+                .workspace_layout_error
+                .clone()
+                .or(view.error.clone())
+                .unwrap_or(view.status);
+            changed |= status != self.view_model.workspace_status;
+            self.view_model.workspace_status = status;
+            if view.ready && !self.workspace_loaded {
+                let idle = view.snapshot.is_some() || view.error.is_some();
+                if let Some(snapshot) = view.snapshot {
+                    match workspace_model::DesktopWorkspace::restore(snapshot.document) {
+                        Ok(workspace) => self.workspace = workspace,
+                        Err(error) => {
+                            self.workspace.writable = false;
+                            self.view_model.workspace_status = error.clone();
+                            self.workspace_layout_error = Some(error);
+                        }
+                    }
+                } else {
+                    self.workspace.writable = view.error.is_none();
+                }
+                self.workspace_loaded = true;
+                self.current_workspace_tab = self.workspace.active();
+                if let Some(config) = self.workspace_config.take() {
+                    self.daemon = match if idle {
+                        DesktopDaemonConnection::start_idle(config)
+                    } else {
+                        DesktopDaemonConnection::start(config)
+                    } {
+                        Ok(daemon) => Some(daemon),
+                        Err(error) => {
+                            self.view_model.workspace_status = error.to_string();
+                            None
+                        }
+                    };
+                }
+                self.refresh_workspace_tabs();
+                changed = true;
+            }
+        }
+        let view = self.daemon.as_ref().map(DesktopDaemonConnection::view);
+        if let Some(view) = view {
+            if !view.session_opening && !view.connected && self.workspace.pending_launch.is_some() {
+                self.workspace.pending_launch = None;
+            }
+            if let Some(tab) = self.closing_workspace_tab
+                && view.closed_session == self.workspace.sessions.get(&tab).copied()
+            {
+                self.workspace.remove(tab);
+                self.discard_closed_tab_view(tab);
+                self.closing_workspace_tab = None;
+                if let Some(next) = self.workspace.active() {
+                    self.activate_workspace_tab(next);
+                } else {
+                    self.current_workspace_tab = None;
+                    self.view_model.selected = None;
+                    self.terminal_surface = Default::default();
+                }
+                self.refresh_workspace_tabs();
+                return true;
+            }
+            changed |= self
+                .profile_panel
+                .set_launch_error(view.launch_error.clone());
+            let matching = self
+                .current_workspace_tab
+                .and_then(|tab| self.workspace.sessions.get(&tab))
+                .copied()
+                == view.session_id
+                && view.session_id.is_some();
+            if !matching {
+                changed |= self.view_model.daemon_connected
+                    || self.view_model.daemon_status_detail != view.detail;
+                self.view_model.daemon_connected = false;
+                self.view_model.can_reconnect_ssh = false;
+                self.view_model
+                    .daemon_status_detail
+                    .clone_from(&view.detail);
+            }
+            if let Some(sessions) = &view.sessions {
+                let previous = self.view_model.sessions.clone();
+                self.view_model.sessions = sessions
+                    .iter()
+                    .filter_map(|summary| {
+                        Some(cshell_ui::SessionTabViewModel {
+                            id: SessionId::from_bytes(
+                                summary.session_id.as_slice().try_into().ok()?,
+                            ),
+                            title: summary.title.clone(),
+                            connected: false,
+                        })
+                    })
+                    .collect();
+                for entry in &mut self.view_model.sessions {
+                    entry.connected = view.connected && view.session_id == Some(entry.id);
+                }
+                changed |= previous != self.view_model.sessions;
+            }
+            if view.connected
+                && let Some(id) = view.session_id
+            {
+                let should_observe = self.workspace.pending_launch.is_some()
+                    || self.current_workspace_tab.is_none()
+                    || self
+                        .current_workspace_tab
+                        .and_then(|t| self.workspace.sessions.get(&t))
+                        .is_some_and(|bound| *bound == id);
+                if should_observe {
+                    let profile = view
+                        .sessions
+                        .as_ref()
+                        .and_then(|sessions| {
+                            sessions
+                                .iter()
+                                .find(|s| s.session_id == id.as_uuid().as_bytes())
+                        })
+                        .and_then(|s| s.profile_id.as_deref())
+                        .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                        .map(cshell_domain::ProfileId::from_bytes)
+                        .or(view.session_profile_id);
+                    let before = self.workspace.document.clone();
+                    let previous_session = self
+                        .current_workspace_tab
+                        .and_then(|t| self.workspace.sessions.get(&t))
+                        .copied();
+                    if let Some(tab) = self.workspace.observe(
+                        id,
+                        profile,
+                        view.session_title.unwrap_or("Terminal".into()),
+                    ) {
+                        self.switch_tab_view(tab);
+                        if before != self.workspace.document || previous_session != Some(id) {
+                            self.refresh_workspace_tabs();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        changed
+    }
+}
+
 impl LogReflowWorker {
     fn start() -> Result<Self, std::io::Error> {
-        let (request_sender, request_receiver) = std::sync::mpsc::channel::<LogReflowRequest>();
+        let (request_sender, request_receiver) = std::sync::mpsc::channel::<TabReflowRequest>();
         let (result_sender, result_receiver) = std::sync::mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("cshell-log-reflow".to_owned())
             .spawn(move || {
                 while let Ok(request) = request_receiver.recv() {
-                    if result_sender.send(request.execute()).is_err() {
+                    if result_sender
+                        .send(TabReflowResult {
+                            tab_id: request.tab_id,
+                            result: request.request.execute(),
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -141,10 +495,10 @@ impl LogReflowWorker {
         })
     }
 
-    fn submit(&self, request: LogReflowRequest) -> bool {
+    fn submit(&self, request: LogReflowRequest, tab_id: Option<cshell_domain::TabId>) -> bool {
         self.requests
             .as_ref()
-            .is_some_and(|sender| sender.send(request).is_ok())
+            .is_some_and(|sender| sender.send(TabReflowRequest { tab_id, request }).is_ok())
     }
 }
 
@@ -239,23 +593,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = std::time::Instant::now();
-        let mut redraw_needed = false;
-        if let (Some(reflow), Some(surface)) = (&self.log_reflow, &mut self.log_surface) {
-            while let Ok(result) = reflow.results.try_recv() {
-                match result {
-                    Ok(layout) => {
-                        let promoted = surface.submit_reflow(layout);
-                        redraw_needed |= promoted;
-                        if let Some(e2e) = &mut self.window_e2e {
-                            e2e.note_reflow(promoted);
-                        }
-                    }
-                    Err(error) => {
-                        surface.reflow_failed();
-                        tracing::error!(%error, "background log reflow failed");
-                    }
-                }
-            }
+        let mut redraw_needed = self.sync_workspace();
+        while let Some(completed) = self
+            .log_reflow
+            .as_ref()
+            .and_then(|worker| worker.results.try_recv().ok())
+        {
+            redraw_needed |= self.apply_log_reflow(completed);
         }
         let search_response = self
             .terminal_search
@@ -297,7 +641,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if let Some(profiles) = &self.profiles {
             redraw_needed |= self.profile_panel.sync(&profiles.view());
         }
-        if let Some(daemon) = &self.daemon {
+        if let Some(daemon) = &self.daemon
+            && (self.current_workspace_tab.is_none()
+                || self
+                    .current_workspace_tab
+                    .and_then(|tab| self.workspace.sessions.get(&tab))
+                    .is_some_and(|id| daemon.view().session_id == Some(*id)))
+        {
             let view = daemon.view();
             redraw_needed |= self
                 .profile_panel
@@ -736,6 +1086,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         snapshot.terminal_modes
                     });
                 if let Some(action) = terminal_key_action(&event, self.modifiers, terminal_modes)
+                    && self.active_terminal_session_id().is_some()
                     && let Some(daemon) = &self.daemon
                 {
                     if daemon.send_input(action) {
@@ -755,7 +1106,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     && !self.view_model.confirm_terminate
                     && !text.is_empty() =>
             {
-                if let Some(daemon) = &self.daemon {
+                if self.active_terminal_session_id().is_some()
+                    && let Some(daemon) = &self.daemon
+                {
                     if daemon.send_input(InputAction::Text(text)) {
                         if self.cursor_blink.note_activity(std::time::Instant::now()) {
                             window.request_redraw();
@@ -823,6 +1176,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let mut cancel_paste = false;
                 let mut profile_command = None;
                 let selected_before_draw = self.view_model.selected;
+                let tab_before_draw = self.view_model.selected_tab;
                 let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
                     profile_command = self.profile_panel.draw(ui.ctx());
@@ -952,16 +1306,39 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             });
                     }
                 });
-                if self.view_model.selected != selected_before_draw
-                    && let Some(id) = self.view_model.selected
-                    && let Some(daemon) = &self.daemon
-                    && daemon.view().session_id != Some(id)
-                    && daemon.attach_session(id)
+                if self.view_model.selected_tab != tab_before_draw
+                    && let Some(tab) = self.view_model.selected_tab
                 {
-                    self.pending_tab = Some(id);
-                    self.terminal_surface = TerminalSurfaceModel::default();
-                    self.terminal_decorations = TerminalDecorations::default();
-                    self.log_surface = None;
+                    self.activate_workspace_tab(tab);
+                } else if self.view_model.selected != selected_before_draw
+                    && let Some(id) = self.view_model.selected
+                {
+                    let existing = self
+                        .workspace
+                        .sessions
+                        .iter()
+                        .find(|(_, value)| **value == id)
+                        .map(|(tab, _)| *tab);
+                    let tab = existing.or_else(|| {
+                        let summary = self
+                            .daemon
+                            .as_ref()?
+                            .view()
+                            .sessions?
+                            .into_iter()
+                            .find(|s| s.session_id == id.as_uuid().as_bytes())?;
+                        let profile = summary
+                            .profile_id
+                            .as_deref()
+                            .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                            .map(cshell_domain::ProfileId::from_bytes);
+                        let tab = self.workspace.add(profile, summary.title)?;
+                        self.workspace.sessions.insert(tab, id);
+                        Some(tab)
+                    });
+                    if let Some(tab) = tab {
+                        self.activate_workspace_tab(tab);
+                    }
                 }
                 if self.view_model.about_open {
                     self.terminal_selecting = false;
@@ -981,8 +1358,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                     Some(WorkbenchMenuCommand::Quit) => event_loop.exit(),
                     Some(WorkbenchMenuCommand::ReconnectNewShell) => {
-                        if let Some(daemon) = &self.daemon {
-                            daemon.reconnect_new_shell();
+                        if let Some(daemon) = &self.daemon
+                            && daemon.reconnect_new_shell()
+                        {
+                            self.workspace.pending_launch = self.current_workspace_tab;
                         }
                         window.request_redraw();
                     }
@@ -994,9 +1373,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             WorkbenchMenuCommand::TerminateSession(id) => {
                                 daemon.terminate_confirmed_session(id)
                             }
-                            _ => daemon.close_current_view(false),
+                            _ => self
+                                .current_workspace_tab
+                                .and_then(|tab| self.workspace.sessions.get(&tab))
+                                .is_some_and(|id| daemon.close_session_view(*id)),
                         });
                         if accepted {
+                            self.closing_workspace_tab = self.current_workspace_tab;
                             self.pending_paste = None;
                             self.pending_tab = None;
                             self.terminal_surface = TerminalSurfaceModel::default();
@@ -1005,12 +1388,60 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             window.request_redraw();
                         }
                     }
+                    Some(WorkbenchMenuCommand::NewWorkspaceTab) => {
+                        if self.workspace_loaded
+                            && self.workspace.pending_launch.is_none()
+                            && let Some(tab) = self.workspace.add(None, "Local shell".into())
+                        {
+                            self.switch_tab_view(tab);
+                            self.view_model.selected = None;
+                            self.workspace.pending_launch = Some(tab);
+                            if !self
+                                .daemon
+                                .as_ref()
+                                .is_some_and(DesktopDaemonConnection::new_default_shell)
+                            {
+                                self.workspace.pending_launch = None;
+                            }
+                            self.refresh_workspace_tabs();
+                        }
+                    }
+                    Some(WorkbenchMenuCommand::OpenWorkspaceTab(tab)) => {
+                        if self.workspace.pending_launch.is_none()
+                            && let Some(binding) = self
+                                .workspace
+                                .document
+                                .bindings
+                                .iter()
+                                .find(|b| b.tab_id == tab)
+                                .cloned()
+                        {
+                            self.workspace.pending_launch = Some(tab);
+                            let accepted = self.daemon.as_ref().is_some_and(|daemon| {
+                                binding.profile_id.map_or_else(
+                                    || daemon.new_default_shell(),
+                                    |id| daemon.open_profile(id),
+                                )
+                            });
+                            if !accepted {
+                                self.workspace.pending_launch = None;
+                            }
+                        }
+                    }
+                    Some(WorkbenchMenuCommand::CloseWorkspaceTab(tab)) => {
+                        self.close_workspace_tab(tab);
+                    }
+                    Some(WorkbenchMenuCommand::MoveWorkspaceTab(tab, delta)) => {
+                        self.workspace.move_tab(tab, delta);
+                        self.refresh_workspace_tabs();
+                    }
                     None => {}
                 }
                 if let Some(command) = profile_command {
                     match command {
                         profile_connection::ProfileClientCommand::OpenProfile(id) => {
-                            if let Some(daemon) = &self.daemon {
+                            let prepared = self.prepare_profile_tab(id);
+                            if prepared && let Some(daemon) = &self.daemon {
                                 self.pending_tab = None;
                                 if daemon.open_profile(id) {
                                     self.terminal_surface = TerminalSurfaceModel::default();
@@ -1020,7 +1451,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             }
                         }
                         profile_connection::ProfileClientCommand::OpenLocal(id, options) => {
-                            if let Some(daemon) = &self.daemon {
+                            let prepared = self.prepare_profile_tab(id);
+                            if prepared && let Some(daemon) = &self.daemon {
                                 self.pending_tab = None;
                                 if daemon.open_local_profile(id, options) {
                                     self.terminal_surface = TerminalSurfaceModel::default();
@@ -1070,11 +1502,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 {
                     update.focus = terminal_accessibility::terminal_node_id().accesskit_id();
                 }
-                egui_state.handle_platform_output_with_event_loop(
-                    &window,
-                    event_loop,
-                    platform_output,
-                );
+                if let Some(egui_state) = &mut self.egui_state {
+                    egui_state.handle_platform_output_with_event_loop(
+                        &window,
+                        event_loop,
+                        platform_output,
+                    );
+                }
                 if cancel_paste {
                     self.pending_paste = None;
                 } else if confirm_paste && let Some(pending) = self.pending_paste.take() {
@@ -1133,10 +1567,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let render_result = if let Some(log_surface) = &mut self.log_surface {
                     let viewport_columns = renderer.viewport_columns(viewport);
                     if let Some(request) = log_surface.request_reflow(viewport_columns)
-                        && self
-                            .log_reflow
-                            .as_ref()
-                            .is_none_or(|worker| !worker.submit(request))
+                        && self.log_reflow.as_ref().is_none_or(|worker| {
+                            !worker.submit(request, self.current_workspace_tab)
+                        })
                     {
                         log_surface.reflow_failed();
                     }
@@ -1216,7 +1649,12 @@ impl DesktopApp {
     fn active_terminal_session_id(&self) -> Option<SessionId> {
         let view = self.daemon.as_ref()?.view();
         let session_id = view.session_id?;
-        (view.connected && self.view_model.selected == Some(session_id)).then_some(session_id)
+        (view.connected
+            && self.view_model.selected == Some(session_id)
+            && self
+                .current_workspace_tab
+                .is_none_or(|tab| self.workspace.sessions.get(&tab) == Some(&session_id)))
+        .then_some(session_id)
     }
 
     fn submit_paste(&mut self, text: String, window: &Window) {
@@ -1717,12 +2155,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .map(DesktopProfileConnection::start)
         .transpose()?;
-    let daemon = daemon_config
-        .map(|config| DesktopDaemonConnection::start(config.with_log_pages(show_session_log)))
+    let workspace_connection = daemon_config
+        .clone()
+        .map(workspace_connection::WorkspaceConnection::start)
         .transpose()?;
+    let workspace_config = daemon_config.map(|config| config.with_log_pages(show_session_log));
     let mut app = DesktopApp {
         accesskit_proxy: Some(event_loop.create_proxy()),
-        daemon,
+        workspace_config,
+        workspace_connection,
         profiles,
         terminal_search: Some(TerminalSearchWorker::start()?),
         ..DesktopApp::default()
@@ -1774,6 +2215,82 @@ mod tests {
         event::ElementState,
         keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    #[test]
+    fn hidden_tab_receives_its_pending_log_reflow_and_closed_tab_cache_is_discarded() {
+        let mut app = super::DesktopApp::default();
+        let first = app
+            .workspace
+            .add(None, "First".into())
+            .unwrap_or_else(|| panic!("tab"));
+        let second = app
+            .workspace
+            .add(None, "Second".into())
+            .unwrap_or_else(|| panic!("tab"));
+        app.switch_tab_view(first);
+        let mut surface = cshell_render::LogSurfaceModel::default();
+        surface
+            .submit_page(super::visual_corpus::log_page())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let request = surface
+            .request_reflow(40)
+            .unwrap_or_else(|| panic!("reflow"));
+        app.log_surface = Some(surface);
+        app.switch_tab_view(second);
+        assert!(!app.apply_log_reflow(super::TabReflowResult {
+            tab_id: Some(first),
+            result: request.execute()
+        }));
+        app.switch_tab_view(first);
+        assert!(
+            app.log_surface
+                .as_ref()
+                .and_then(|s| s.prepare_frame(10))
+                .is_some()
+        );
+        app.close_workspace_tab(first);
+        assert!(!app.cached_tab_views.contains_key(&first));
+        assert_eq!(app.current_workspace_tab, Some(second));
+        app.close_workspace_tab(second);
+        assert!(app.log_surface.is_none());
+        assert!(app.current_workspace_tab.is_none());
+    }
+
+    #[test]
+    fn tab_switch_preserves_search_state_and_cancels_stale_paste() {
+        let mut app = super::DesktopApp::default();
+        let first = app
+            .workspace
+            .add(None, "First".into())
+            .unwrap_or_else(|| panic!("tab"));
+        let second = app
+            .workspace
+            .add(None, "Second".into())
+            .unwrap_or_else(|| panic!("tab"));
+        app.switch_tab_view(first);
+        app.terminal_search_query = "first query".into();
+        app.terminal_search_open = true;
+        app.terminal_search_options.case_sensitive = true;
+        app.pending_paste = Some(super::PendingPaste {
+            session_id: cshell_domain::SessionId::new(),
+            session_title: "First".into(),
+            text: "danger\n".into(),
+        });
+        let revision = app.terminal_search_revision;
+        app.switch_tab_view(second);
+        assert!(app.terminal_search_query.is_empty());
+        assert!(!app.terminal_search_open);
+        assert!(app.pending_paste.is_none());
+        assert!(app.terminal_search_revision > revision);
+        app.terminal_search_query = "second query".into();
+        app.switch_tab_view(first);
+        assert_eq!(app.terminal_search_query, "first query");
+        assert!(app.terminal_search_open);
+        assert!(app.terminal_search_options.case_sensitive);
+        assert!(app.pending_paste.is_none());
+        app.switch_tab_view(second);
+        assert_eq!(app.terminal_search_query, "second query");
+    }
 
     #[test]
     fn paste_shortcuts_require_a_single_pressed_command_chord() {

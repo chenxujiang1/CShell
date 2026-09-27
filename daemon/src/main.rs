@@ -118,6 +118,7 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
                 | features::SSH_PROFILE_ROUTE
                 | features::LOCAL_PROFILE
                 | features::LOCAL_LAUNCH_OPTIONS
+                | features::WORKSPACE_CONTROL
                 | features::SSH_SESSION_STATUS,
         ),
         SessionIpcService::new(Arc::clone(&registry)).with_profiles(profiles),
