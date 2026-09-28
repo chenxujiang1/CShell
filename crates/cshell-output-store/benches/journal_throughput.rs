@@ -10,6 +10,8 @@ const TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const CHUNK_BYTES: usize = 64 * 1024;
 const REQUIRED_MIB_PER_SECOND: f64 = 50.0;
 const MAX_SCALE_RANDOM_PAGE_MS: f64 = 10.0;
+const MAX_SCALE_RANDOM_PAGE_P95_MS: f64 = 100.0;
+const MAX_SCALE_FIRST_SCREEN_MS: f64 = 500.0;
 const MAX_SCALE_REOPEN_MS: f64 = 500.0;
 const MAX_SCALE_RESIDENT_INDEX_BYTES: usize = 250 * 1024 * 1024;
 const BENCH_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
@@ -177,17 +179,23 @@ fn run_scale_probe(directory: &Path, scale_mib: u64) -> Result<(), Box<dyn std::
     let random_started = Instant::now();
     let mut random = 0x9e37_79b9_7f4a_7c15_u64;
     let random_reads = 1_000_u64.min(line_count);
+    let mut random_page_latencies_ms = Vec::with_capacity(usize::try_from(random_reads)?);
     for _ in 0..random_reads {
         random ^= random << 13;
         random ^= random >> 7;
         random ^= random << 17;
         let line_id = random % line_count + 1;
-        let page = index.read_page(Some(line_id), 0, 0)?;
-        if page.rows.len() != 1 || page.rows[0].line_id != line_id {
+        let page_started = Instant::now();
+        let page = index.read_page(Some(line_id), 20, 19)?;
+        random_page_latencies_ms.push(page_started.elapsed().as_secs_f64() * 1_000.0);
+        if !page.rows.iter().any(|row| row.line_id == line_id) {
             return Err(format!("random page did not preserve LineId {line_id}").into());
         }
     }
     let random_elapsed = random_started.elapsed();
+    random_page_latencies_ms.sort_by(f64::total_cmp);
+    let p95_index = (random_page_latencies_ms.len() * 95).div_ceil(100) - 1;
+    let random_page_p95_ms = random_page_latencies_ms[p95_index];
     drop(writer);
 
     let rebuild_cold_index = env::var_os("CSHELL_SCALE_REBUILD").is_some();
@@ -211,6 +219,14 @@ fn run_scale_probe(directory: &Path, scale_mib: u64) -> Result<(), Box<dyn std::
         || reopened_index.integrity_error().is_some()
     {
         return Err("scale checkpoint reopen changed index identity or integrity".into());
+    }
+    let first_screen_started = Instant::now();
+    let first_screen = reopened_index.read_styled_page(None, 39, 0)?;
+    let first_screen_ms = first_screen_started.elapsed().as_secs_f64() * 1_000.0;
+    if first_screen.rows.len() != 40
+        || first_screen.rows.last().map(|row| row.line_id) != Some(line_count)
+    {
+        return Err("reopened journal did not deliver the expected 40-row first screen".into());
     }
     for line_id in [1, line_count / 2, line_count] {
         let page = reopened.line_index().read_page(Some(line_id), 0, 0)?;
@@ -247,6 +263,18 @@ fn run_scale_probe(directory: &Path, scale_mib: u64) -> Result<(), Box<dyn std::
             )
             .into());
         }
+        if random_page_p95_ms > MAX_SCALE_RANDOM_PAGE_P95_MS {
+            return Err(format!(
+                "random 40-row page P95 {random_page_p95_ms:.3} ms exceeded {MAX_SCALE_RANDOM_PAGE_P95_MS:.1} ms"
+            )
+            .into());
+        }
+        if first_screen_ms > MAX_SCALE_FIRST_SCREEN_MS {
+            return Err(format!(
+                "reopened 40-row first screen {first_screen_ms:.3} ms exceeded {MAX_SCALE_FIRST_SCREEN_MS:.1} ms"
+            )
+            .into());
+        }
         if !rebuild_cold_index && reopen_ms > MAX_SCALE_REOPEN_MS {
             return Err(format!(
                 "checkpoint reopen {reopen_ms:.3} ms exceeded {MAX_SCALE_REOPEN_MS:.1} ms"
@@ -261,7 +289,7 @@ fn run_scale_probe(directory: &Path, scale_mib: u64) -> Result<(), Box<dyn std::
         }
     }
     println!(
-        "journal scale: {scale_mib} MiB, {line_count} lines, {} segments, {:.1} MiB/s; checkpoint {} bytes, cold index {} bytes, resident index {} bytes; {random_reads} random pages in {:.3} ms ({:.3} ms/page); {} {:.3} ms",
+        "journal scale: {scale_mib} MiB, {line_count} lines, {} segments, {:.1} MiB/s; checkpoint {} bytes, cold index {} bytes, resident index {} bytes; {random_reads} random 40-row pages in {:.3} ms ({:.3} ms/page, P95 {:.3} ms); first 40-row screen {:.3} ms; {} {:.3} ms",
         reopened.segment_count(),
         write_mib_per_second,
         checkpoint_bytes,
@@ -269,6 +297,8 @@ fn run_scale_probe(directory: &Path, scale_mib: u64) -> Result<(), Box<dyn std::
         resident_bytes,
         random_elapsed.as_secs_f64() * 1_000.0,
         random_ms_per_page,
+        random_page_p95_ms,
+        first_screen_ms,
         if rebuild_cold_index {
             "cold-index rebuild"
         } else {

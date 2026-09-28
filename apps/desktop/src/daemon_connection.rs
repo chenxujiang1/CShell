@@ -1373,10 +1373,29 @@ async fn serve_history_search_if_enabled(
         if *shutdown.borrow() {
             return Ok(());
         }
-        if let Err(error) = result {
-            tracing::warn!(%error, "dedicated history search connection failed; retrying");
-        } else {
-            attempt = 0;
+        match result {
+            Ok(HistorySearchLoopExit::Stopped) => return Ok(()),
+            Ok(HistorySearchLoopExit::Superseded) => {
+                attempt = 0;
+                while requests.borrow_and_update().is_none() {
+                    tokio::select! {
+                        changed = requests.changed() => {
+                            if changed.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "dedicated history search connection failed; retrying");
+            }
         }
         let delay = delays[attempt.min(delays.len() - 1)];
         attempt = attempt.saturating_add(1);
@@ -1391,13 +1410,19 @@ async fn serve_history_search_if_enabled(
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum HistorySearchLoopExit {
+    Stopped,
+    Superseded,
+}
+
 async fn history_search_loop(
     resolved: &ResolvedDesktopEndpoint,
     session_id: SessionId,
     shared: &Arc<Mutex<DesktopDaemonView>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     requests: &mut tokio::sync::watch::Receiver<Option<DesktopHistorySearchRequest>>,
-) -> Result<(), DesktopConnectionError> {
+) -> Result<HistorySearchLoopExit, DesktopConnectionError> {
     #[cfg(windows)]
     let mut stream = transport::connect(&resolved.endpoint)
         .await
@@ -1425,12 +1450,12 @@ async fn history_search_loop(
             tokio::select! {
                 changed = requests.changed() => {
                     if changed.is_err() {
-                        return Ok(());
+                        return Ok(HistorySearchLoopExit::Stopped);
                     }
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        return Ok(());
+                        return Ok(HistorySearchLoopExit::Stopped);
                     }
                 }
             }
@@ -1438,11 +1463,19 @@ async fn history_search_loop(
         write_history_search_request(&mut stream, request_id, session_id, &desired).await?;
         let mut response = tokio::select! {
             response = read_envelope(&mut stream) => response?,
+            changed = requests.changed() => {
+                if changed.is_err() {
+                    return Ok(HistorySearchLoopExit::Stopped);
+                }
+                // A partial read_exact cannot be resumed. Drop this dedicated
+                // connection and reconnect for the latest query or cancellation.
+                return Ok(HistorySearchLoopExit::Superseded);
+            }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    return Ok(());
+                    return Ok(HistorySearchLoopExit::Stopped);
                 }
-                continue;
+                return Ok(HistorySearchLoopExit::Superseded);
             }
         };
         if response.request_id != request_id {
@@ -1458,7 +1491,7 @@ async fn history_search_loop(
         if requests
             .borrow()
             .as_ref()
-            .is_some_and(|current| current.revision == desired.revision)
+            .is_some_and(|current| current == &desired)
         {
             update_history_search(
                 shared,
@@ -1472,12 +1505,12 @@ async fn history_search_loop(
         tokio::select! {
             changed = requests.changed() => {
                 if changed.is_err() {
-                    return Ok(());
+                    return Ok(HistorySearchLoopExit::Stopped);
                 }
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    return Ok(());
+                    return Ok(HistorySearchLoopExit::Stopped);
                 }
             }
         }
@@ -1924,7 +1957,7 @@ mod tests {
         DesktopConnectionConfig, DesktopDaemonConnection, DesktopEndpointSource,
         DesktopHistorySearchRequest, DesktopLogPageRequest, ResolvedDesktopEndpoint,
         convert_log_page, create_saved_profile_session, decode_hex, discover_or_create_session,
-        history_search_loop, log_page_loop, update_terminal_control,
+        log_page_loop, serve_history_search_if_enabled, update_terminal_control,
     };
     use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
     use cshell_ipc::{
@@ -2979,7 +3012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dedicated_history_connection_drops_a_superseded_response() {
+    async fn dedicated_history_connection_supersede_and_cancel_drop_in_flight_reads() {
         let session_id = SessionId::new();
         let token = [0x6b; 32];
         let daemon_instance_id = [0x44; 16];
@@ -3014,14 +3047,15 @@ mod tests {
         };
 
         let (first_received, mut first_observed) = tokio::sync::watch::channel(false);
-        let (release_first, mut first_release) = tokio::sync::watch::channel(false);
+        let (cancel_request_received, mut cancel_request_observed) =
+            tokio::sync::watch::channel(false);
         let server = tokio::spawn(async move {
-            let mut stream = listener
+            let mut old_stream = listener
                 .accept()
                 .await
                 .unwrap_or_else(|error| panic!("history client must connect: {error}"));
             server_handshake(
-                &mut stream,
+                &mut old_stream,
                 &HandshakePolicy::with_instance_id(
                     token,
                     daemon_instance_id,
@@ -3030,48 +3064,84 @@ mod tests {
             )
             .await
             .unwrap_or_else(|error| panic!("history handshake must pass: {error}"));
-            for (query, line_id) in [("old", 10_u64), ("new", 20_u64)] {
-                let request = read_envelope(&mut stream)
-                    .await
-                    .unwrap_or_else(|error| panic!("history request must decode: {error}"));
-                let Some(envelope::Payload::HistorySearchRequest(search)) = request.payload else {
-                    panic!("dedicated connection must carry history search requests");
-                };
-                assert_eq!(search.query, query);
-                if query == "old" {
-                    first_received
-                        .send(true)
-                        .unwrap_or_else(|_| panic!("test observer must remain available"));
-                    first_release
-                        .wait_for(|released| *released)
-                        .await
-                        .unwrap_or_else(|_| panic!("first response release must remain available"));
-                }
-                write_envelope(
-                    &mut stream,
-                    &Envelope {
-                        request_id: request.request_id,
-                        deadline_unix_ms: 0,
-                        payload: Some(envelope::Payload::HistorySearchResult(
-                            HistorySearchResult {
-                                session_id: session_id.as_uuid().as_bytes().to_vec(),
-                                revision: 9,
-                                matches: vec![HistorySearchMatch {
-                                    line_id,
-                                    byte_start: 0,
-                                    byte_end: 3,
-                                }],
-                                scanned_lines: 1,
-                                next_line_id: None,
-                                next_byte_offset: None,
-                                incomplete: false,
-                            },
-                        )),
-                    },
-                )
+            let old_request = read_envelope(&mut old_stream)
                 .await
-                .unwrap_or_else(|error| panic!("history response must encode: {error}"));
-            }
+                .unwrap_or_else(|error| panic!("old history request must decode: {error}"));
+            let Some(envelope::Payload::HistorySearchRequest(old_search)) = old_request.payload
+            else {
+                panic!("dedicated connection must carry a history search request");
+            };
+            assert_eq!(old_search.query, "old");
+            first_received
+                .send(true)
+                .unwrap_or_else(|_| panic!("test observer must remain available"));
+            let mut new_stream = listener
+                .accept()
+                .await
+                .unwrap_or_else(|error| panic!("replacement history client must connect: {error}"));
+            server_handshake(
+                &mut new_stream,
+                &HandshakePolicy::with_instance_id(
+                    token,
+                    daemon_instance_id,
+                    features::HISTORY_SEARCH,
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("replacement history handshake must pass: {error}"));
+            let request = read_envelope(&mut new_stream)
+                .await
+                .unwrap_or_else(|error| panic!("new history request must decode: {error}"));
+            let Some(envelope::Payload::HistorySearchRequest(search)) = request.payload else {
+                panic!("replacement connection must carry a history search request");
+            };
+            assert_eq!(search.query, "new");
+            write_envelope(
+                &mut new_stream,
+                &Envelope {
+                    request_id: request.request_id,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::HistorySearchResult(
+                        HistorySearchResult {
+                            session_id: session_id.as_uuid().as_bytes().to_vec(),
+                            revision: 9,
+                            matches: vec![HistorySearchMatch {
+                                line_id: 20,
+                                byte_start: 0,
+                                byte_end: 3,
+                            }],
+                            scanned_lines: 1,
+                            next_line_id: None,
+                            next_byte_offset: None,
+                            incomplete: false,
+                        },
+                    )),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("new history response must encode: {error}"));
+            let cancel_request = read_envelope(&mut new_stream)
+                .await
+                .unwrap_or_else(|error| panic!("cancelled history request must decode: {error}"));
+            let Some(envelope::Payload::HistorySearchRequest(cancel_search)) =
+                cancel_request.payload
+            else {
+                panic!("dedicated connection must carry the cancellable history request");
+            };
+            assert_eq!(cancel_search.query, "cancel-me");
+            cancel_request_received
+                .send(true)
+                .unwrap_or_else(|_| panic!("cancel request observer must remain available"));
+            let read_result =
+                tokio::time::timeout(Duration::from_secs(2), read_envelope(&mut new_stream))
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("cancellation did not close the active search connection")
+                    });
+            assert!(
+                read_result.is_err(),
+                "cancellation must close the active search connection"
+            );
         });
 
         let request = |revision, query: &str| DesktopHistorySearchRequest {
@@ -3089,7 +3159,8 @@ mod tests {
         let shared = Arc::new(Mutex::new(super::DesktopDaemonView::default()));
         let client_shared = Arc::clone(&shared);
         let client = tokio::spawn(async move {
-            history_search_loop(
+            serve_history_search_if_enabled(
+                true,
                 &resolved,
                 session_id,
                 &client_shared,
@@ -3109,9 +3180,6 @@ mod tests {
         request_sender
             .send(Some(request(2, "new")))
             .unwrap_or_else(|_| panic!("history request receiver must remain open"));
-        release_first
-            .send(true)
-            .unwrap_or_else(|_| panic!("history server must remain available"));
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if shared
@@ -3130,14 +3198,27 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("latest history result was not delivered"));
+        request_sender
+            .send(Some(request(3, "cancel-me")))
+            .unwrap_or_else(|_| panic!("history request receiver must remain open"));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            cancel_request_observed.wait_for(|seen| *seen),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("cancellable history request was not observed"))
+        .unwrap_or_else(|_| panic!("cancel request observer closed"));
+        request_sender
+            .send(None)
+            .unwrap_or_else(|_| panic!("history request receiver must remain open"));
+        server
+            .await
+            .unwrap_or_else(|error| panic!("history server task must join: {error}"));
         let _result = shutdown_sender.send(true);
         client
             .await
             .unwrap_or_else(|error| panic!("history client task must join: {error}"))
             .unwrap_or_else(|error| panic!("history client must stop cleanly: {error}"));
-        server
-            .await
-            .unwrap_or_else(|error| panic!("history server task must join: {error}"));
     }
 
     #[test]
