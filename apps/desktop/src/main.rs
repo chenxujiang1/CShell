@@ -112,6 +112,7 @@ struct DesktopApp {
     terminal_frame_presented: bool,
     secondary_window: bool,
     profile_theme_generation: Option<u64>,
+    saved_profiles_generation: Option<u64>,
     default_terminal_theme: TerminalTheme,
     profile_themes: std::collections::BTreeMap<cshell_domain::ProfileId, TerminalTheme>,
 }
@@ -899,36 +900,39 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if let Some(view) = self.profiles.as_ref().map(DesktopProfileConnection::view) {
             redraw_needed |= self.update_profile_themes(&view);
             redraw_needed |= self.profile_panel.sync(&view);
-            let mut saved_ssh_profiles: Vec<_> =
-                view.catalog.as_ref().map_or_else(Vec::new, |catalog| {
-                    catalog
-                        .ssh_connections
-                        .iter()
-                        .filter_map(|connection| {
-                            let profile = catalog
-                                .profiles
-                                .iter()
-                                .find(|profile| profile.id == connection.profile_id)?;
-                            Some(cshell_ui::SavedSshProfileViewModel {
-                                id: profile.id,
-                                name: profile.name.clone(),
-                                target: format!(
-                                    "{}@{}:{}",
-                                    connection.username, connection.host, connection.port
-                                ),
-                                favorite: profile.favorite,
+            if self.saved_profiles_generation != Some(view.generation) {
+                self.saved_profiles_generation = Some(view.generation);
+                let mut saved_ssh_profiles: Vec<_> =
+                    view.catalog.as_ref().map_or_else(Vec::new, |catalog| {
+                        catalog
+                            .ssh_connections
+                            .iter()
+                            .filter_map(|connection| {
+                                let profile = catalog
+                                    .profiles
+                                    .iter()
+                                    .find(|profile| profile.id == connection.profile_id)?;
+                                Some(cshell_ui::SavedSshProfileViewModel {
+                                    id: profile.id,
+                                    name: profile.name.clone(),
+                                    target: format!(
+                                        "{}@{}:{}",
+                                        connection.username, connection.host, connection.port
+                                    ),
+                                    favorite: profile.favorite,
+                                })
                             })
-                        })
-                        .collect()
+                            .collect()
+                    });
+                saved_ssh_profiles.sort_by(|left, right| {
+                    right
+                        .favorite
+                        .cmp(&left.favorite)
+                        .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
                 });
-            saved_ssh_profiles.sort_by(|left, right| {
-                right
-                    .favorite
-                    .cmp(&left.favorite)
-                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            });
-            redraw_needed |= self.view_model.saved_ssh_profiles != saved_ssh_profiles;
-            self.view_model.saved_ssh_profiles = saved_ssh_profiles;
+                redraw_needed |= self.view_model.saved_ssh_profiles != saved_ssh_profiles;
+                self.view_model.saved_ssh_profiles = saved_ssh_profiles;
+            }
         }
         if let Some(daemon) = &self.daemon
             && (self.current_workspace_tab.is_none()
