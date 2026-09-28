@@ -15,7 +15,7 @@ use cshell_render::{
     EguiFrame, LogDecorations, LogReflowLayout, LogReflowRequest, LogScrollbarState,
     LogSearchMatch, LogSourceId, LogSurfaceError, LogSurfaceModel, MAX_TERMINAL_SEARCH_QUERY_BYTES,
     RenderOutcome, TerminalCellPoint, TerminalDecorations, TerminalSelection,
-    TerminalSelectionMode, TerminalSurfaceModel, TerminalViewport, WindowRenderer,
+    TerminalSelectionMode, TerminalSurfaceModel, TerminalTheme, TerminalViewport, WindowRenderer,
     WindowRendererError, validate_terminal_search_query,
 };
 use cshell_ui::{WorkbenchMenuCommand, WorkbenchViewModel};
@@ -110,11 +110,15 @@ struct DesktopApp {
     transfer_to: Option<(cshell_domain::TabId, cshell_domain::WorkspaceWindowId)>,
     terminal_frame_presented: bool,
     secondary_window: bool,
+    profile_theme_generation: Option<u64>,
+    default_terminal_theme: TerminalTheme,
+    profile_themes: std::collections::BTreeMap<cshell_domain::ProfileId, TerminalTheme>,
 }
 
 #[derive(Default)]
 struct SplitRenderFrame {
     viewport: TerminalViewport,
+    theme: TerminalTheme,
     terminal: Option<cshell_render::TerminalSurfaceFrame>,
     log: Option<cshell_render::LogSurfaceFrame>,
     decorations: TerminalDecorations,
@@ -168,6 +172,50 @@ struct PendingPaste {
 }
 
 impl DesktopApp {
+    fn update_profile_themes(&mut self, view: &profile_connection::DesktopProfileView) -> bool {
+        if self.profile_theme_generation == Some(view.generation) {
+            return false;
+        }
+        self.profile_theme_generation = Some(view.generation);
+        self.profile_themes.clear();
+        self.default_terminal_theme = TerminalTheme::Dark;
+        if let Some(data) = &view.catalog {
+            self.default_terminal_theme = TerminalTheme::from_profile_name(&data.defaults.theme);
+            let snapshot = cshell_application::CatalogSnapshot {
+                revision: data.revision,
+                defaults: data.defaults.clone(),
+                folders: data.folders.clone(),
+                profiles: data.profiles.clone(),
+                ssh_connections: data.ssh_connections.clone(),
+                local_connections: data.local_connections.clone(),
+            };
+            if let Ok(catalog) = cshell_application::ProfileCatalog::from_snapshot(snapshot) {
+                for profile in &data.profiles {
+                    if let Ok(settings) = catalog.resolve(profile.id) {
+                        self.profile_themes.insert(
+                            profile.id,
+                            TerminalTheme::from_profile_name(&settings.theme.value),
+                        );
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn theme_for_tab(&self, tab: Option<cshell_domain::TabId>) -> TerminalTheme {
+        tab.and_then(|tab| {
+            self.workspace
+                .document
+                .bindings
+                .iter()
+                .find(|b| b.tab_id == tab)
+        })
+        .and_then(|binding| binding.profile_id)
+        .and_then(|id| self.profile_themes.get(&id).copied())
+        .unwrap_or(self.default_terminal_theme)
+    }
+
     fn prepare_split_frames(&mut self, scale: f32) -> Option<Vec<SplitRenderFrame>> {
         if self.view_model.pane_views.len() < 2 {
             return None;
@@ -175,6 +223,7 @@ impl DesktopApp {
         let renderer = self.renderer.as_ref()?;
         let mut frames = Vec::new();
         for pane in &self.view_model.pane_views {
+            let theme = self.theme_for_tab(pane.tab_id);
             let viewport = TerminalViewport::from_logical_rect(pane.rect, scale);
             let rows = renderer.viewport_rows(viewport);
             let columns = renderer.viewport_columns(viewport);
@@ -199,6 +248,7 @@ impl DesktopApp {
             } else {
                 frames.push(SplitRenderFrame {
                     viewport,
+                    theme,
                     ..Default::default()
                 });
                 continue;
@@ -210,6 +260,7 @@ impl DesktopApp {
             };
             let mut frame = SplitRenderFrame {
                 viewport,
+                theme,
                 decorations: decorations.clone(),
                 log_decorations: log_decorations.clone(),
                 focused,
@@ -843,8 +894,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
             }
         }
-        if let Some(profiles) = &self.profiles {
-            redraw_needed |= self.profile_panel.sync(&profiles.view());
+        if let Some(view) = self.profiles.as_ref().map(DesktopProfileConnection::view) {
+            redraw_needed |= self.update_profile_themes(&view);
+            redraw_needed |= self.profile_panel.sync(&view);
         }
         if let Some(daemon) = &self.daemon
             && (self.current_workspace_tab.is_none()
@@ -1857,9 +1909,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                 }
                 let split_frames = self.prepare_split_frames(pixels_per_point);
+                let active_theme = self.theme_for_tab(self.current_workspace_tab);
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
+                renderer.set_theme(active_theme);
                 let paint_jobs = self.egui_context.tessellate(shapes, pixels_per_point);
                 let viewport = TerminalViewport::from_logical_rect(terminal_rect, pixels_per_point);
                 let viewport_rows = renderer.viewport_rows(viewport);
@@ -1891,6 +1945,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         .iter()
                         .map(|frame| cshell_render::PaneFrame {
                             viewport: frame.viewport,
+                            theme: frame.theme,
                             content: if frame.log.is_some() {
                                 cshell_render::PaneContent::Log {
                                     frame: frame.log.as_ref(),
@@ -1951,8 +2006,31 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 textures_delta.clear();
                 match render_result {
                     Ok(outcome) => {
-                        self.terminal_frame_presented |=
-                            outcome == RenderOutcome::Presented && renderer.rendered_vertices() > 0;
+                        if outcome == RenderOutcome::Presented && !self.terminal_frame_presented {
+                            let has_terminal_text = split_frames.as_ref().map_or_else(
+                                || {
+                                    self.log_surface.is_none()
+                                        && self.terminal_surface.latest_snapshot().is_some_and(
+                                            |s| {
+                                                s.cells.iter().any(|cell| {
+                                                    cell.character != ' ' && cell.character != '\0'
+                                                })
+                                            },
+                                        )
+                                },
+                                |frames| {
+                                    frames.iter().any(|frame| {
+                                        frame.terminal.as_ref().is_some_and(|f| {
+                                            f.snapshot.cells.iter().any(|cell| {
+                                                cell.character != ' ' && cell.character != '\0'
+                                            })
+                                        })
+                                    })
+                                },
+                            );
+                            self.terminal_frame_presented =
+                                renderer.rendered_vertices() > 0 && has_terminal_text;
+                        }
                         self.renderer_needs_font_upload = false;
                         if outcome == RenderOutcome::Presented
                             && let (Some(e2e), Some(log_surface)) =
@@ -2889,6 +2967,66 @@ mod tests {
         event::ElementState,
         keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    #[test]
+    fn profile_theme_inheritance_updates_existing_tabs_without_changing_layout() {
+        let mut app = super::DesktopApp::default();
+        let folder = cshell_domain::FolderId::new();
+        let profile = cshell_domain::ProfileId::new();
+        let tab = app
+            .workspace
+            .add(Some(profile), "Saved".into())
+            .unwrap_or_else(|| panic!("tab"));
+        let record = cshell_domain::ProfileRecord {
+            id: profile,
+            name: "Saved".into(),
+            kind: cshell_domain::ProfileKind::Local,
+            folder_id: Some(folder),
+            tags: Default::default(),
+            favorite: false,
+            terminal: Default::default(),
+        };
+        let mut view = super::profile_connection::DesktopProfileView {
+            generation: 1,
+            catalog: Some(super::profile_connection::DesktopProfileCatalog {
+                revision: 1,
+                defaults: Default::default(),
+                folders: vec![cshell_domain::ProfileFolder {
+                    id: folder,
+                    name: "Light".into(),
+                    parent_id: None,
+                    terminal: cshell_domain::TerminalOverrides {
+                        theme: Some("light".into()),
+                        ..Default::default()
+                    },
+                }],
+                profiles: vec![record],
+                ssh_connections: vec![],
+                local_connections: vec![],
+            }),
+            ..Default::default()
+        };
+        let original_layout = app.workspace.document.clone();
+        assert!(app.update_profile_themes(&view));
+        assert_eq!(
+            app.theme_for_tab(Some(tab)),
+            cshell_render::TerminalTheme::Light
+        );
+        assert!(!app.update_profile_themes(&view));
+        view.generation += 1;
+        view.catalog
+            .as_mut()
+            .unwrap_or_else(|| panic!("catalog"))
+            .folders[0]
+            .terminal
+            .theme = Some("dark".into());
+        assert!(app.update_profile_themes(&view));
+        assert_eq!(
+            app.theme_for_tab(Some(tab)),
+            cshell_render::TerminalTheme::Dark
+        );
+        assert_eq!(app.workspace.document, original_layout);
+    }
 
     #[test]
     fn pending_clone_keeps_launch_tab_selected_until_new_session_is_bound() {

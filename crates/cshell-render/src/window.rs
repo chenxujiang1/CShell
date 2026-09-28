@@ -790,7 +790,33 @@ pub struct EguiFrame<'a> {
 #[derive(Debug)]
 pub struct PaneFrame<'a> {
     pub viewport: TerminalViewport,
+    pub theme: TerminalTheme,
     pub content: PaneContent<'a>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TerminalTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl TerminalTheme {
+    #[must_use]
+    pub fn from_profile_name(name: &str) -> Self {
+        if name.eq_ignore_ascii_case("light") {
+            Self::Light
+        } else {
+            Self::Dark
+        }
+    }
+
+    fn background(self) -> [f32; 4] {
+        match self {
+            Self::Dark => [0.012, 0.016, 0.024, 1.0],
+            Self::Light => [0.94, 0.95, 0.97, 1.0],
+        }
+    }
 }
 #[derive(Debug)]
 pub enum PaneContent<'a> {
@@ -810,6 +836,7 @@ enum GeometryKey {
     Panes,
     Terminal {
         generation: u64,
+        theme: TerminalTheme,
         decorations_revision: u64,
         cursor_visible: bool,
         surface_width: u32,
@@ -820,6 +847,7 @@ enum GeometryKey {
     },
     Log {
         source_id: u64,
+        theme: TerminalTheme,
         revision: u64,
         decorations_revision: u64,
         surface_width: u32,
@@ -1250,6 +1278,7 @@ pub struct WindowRenderer {
     draw_batches: Vec<(TerminalViewport, std::ops::Range<u32>)>,
     device_lost: Arc<AtomicBool>,
     cpu_adapter: bool,
+    theme: TerminalTheme,
 }
 
 impl std::fmt::Debug for WindowRenderer {
@@ -1482,7 +1511,15 @@ impl WindowRenderer {
             draw_batches: Vec::new(),
             device_lost,
             cpu_adapter,
+            theme: TerminalTheme::Dark,
         })
+    }
+
+    pub fn set_theme(&mut self, theme: TerminalTheme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.geometry_key = None;
+        }
     }
 
     #[must_use]
@@ -1692,11 +1729,14 @@ impl WindowRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.012,
-                            g: 0.016,
-                            b: 0.024,
-                            a: 1.0,
+                        load: wgpu::LoadOp::Clear({
+                            let color = self.theme.background();
+                            wgpu::Color {
+                                r: f64::from(color[0]),
+                                g: f64::from(color[1]),
+                                b: f64::from(color[2]),
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1750,6 +1790,7 @@ impl WindowRenderer {
     ) {
         let key = GeometryKey::Terminal {
             generation: frame.snapshot.generation,
+            theme: self.theme,
             decorations_revision: decorations.revision,
             cursor_visible,
             surface_width: self.config.width,
@@ -1768,7 +1809,7 @@ impl WindowRenderer {
         {
             return;
         }
-        let vertices = build_vertices(
+        let vertices = build_vertices_themed(
             &frame.snapshot,
             &mut self.atlas,
             self.config.width,
@@ -1777,6 +1818,7 @@ impl WindowRenderer {
             frame.plan.visible_rows.clone(),
             decorations,
             cursor_visible,
+            self.theme,
         );
         self.upload_geometry(vertices, key);
         self.geometry_snapshot = Some(Arc::clone(&frame.snapshot));
@@ -1790,6 +1832,7 @@ impl WindowRenderer {
     ) {
         let key = GeometryKey::Log {
             source_id: frame.page.source_id.0,
+            theme: self.theme,
             revision: frame.page.revision,
             decorations_revision: decorations.revision,
             surface_width: self.config.width,
@@ -1804,13 +1847,14 @@ impl WindowRenderer {
         if self.geometry_key == Some(key) {
             return;
         }
-        let vertices = build_log_vertices(
+        let vertices = build_log_vertices_themed(
             frame,
             &mut self.atlas,
             self.config.width,
             self.config.height,
             viewport,
             decorations,
+            self.theme,
         );
         self.upload_geometry(vertices, key);
         self.geometry_snapshot = None;
@@ -1880,12 +1924,21 @@ fn build_pane_geometry(
             continue;
         }
         let start = vertices.len() as u32;
+        push_quad(
+            &mut vertices,
+            [viewport.x as f32, viewport.y as f32],
+            [viewport.width as f32, viewport.height as f32],
+            white_uv(),
+            pane.theme.background(),
+            false,
+            [width, height],
+        );
         let next = match &pane.content {
             PaneContent::Terminal {
                 frame: Some(frame),
                 decorations,
                 cursor_visible,
-            } => build_vertices(
+            } => build_vertices_themed(
                 &frame.snapshot,
                 atlas,
                 width,
@@ -1894,11 +1947,20 @@ fn build_pane_geometry(
                 frame.plan.visible_rows.clone(),
                 decorations,
                 *cursor_visible,
+                pane.theme,
             ),
             PaneContent::Log {
                 frame: Some(frame),
                 decorations,
-            } => build_log_vertices(frame, atlas, width, height, viewport, decorations),
+            } => build_log_vertices_themed(
+                frame,
+                atlas,
+                width,
+                height,
+                viewport,
+                decorations,
+                pane.theme,
+            ),
             _ => Vec::new(),
         };
         vertices.extend(next);
@@ -1923,6 +1985,31 @@ fn build_vertices(
     rows: std::ops::Range<u16>,
     decorations: &TerminalDecorations,
     cursor_visible: bool,
+) -> Vec<Vertex> {
+    build_vertices_themed(
+        snapshot,
+        atlas,
+        width,
+        height,
+        viewport,
+        rows,
+        decorations,
+        cursor_visible,
+        TerminalTheme::Dark,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_vertices_themed(
+    snapshot: &FrameSnapshot,
+    atlas: &mut GlyphAtlas,
+    width: u32,
+    height: u32,
+    viewport: TerminalViewport,
+    rows: std::ops::Range<u16>,
+    decorations: &TerminalDecorations,
+    cursor_visible: bool,
+    theme: TerminalTheme,
 ) -> Vec<Vertex> {
     atlas.begin_frame();
     let first_row = rows.start;
@@ -1971,8 +2058,8 @@ fn build_vertices(
             let cursor_shape =
                 (cursor_visible && is_cursor_cell).then_some(snapshot.cursor_appearance.shape);
             let (mut foreground, mut background) = (
-                resolve_color(cell.style.foreground, true),
-                resolve_color(cell.style.background, false),
+                resolve_color_themed(cell.style.foreground, true, theme),
+                resolve_color_themed(cell.style.background, false, theme),
             );
             if cell.style.inverse {
                 std::mem::swap(&mut foreground, &mut background);
@@ -1981,7 +2068,7 @@ fn build_vertices(
                 let cursor_color = snapshot
                     .cursor_appearance
                     .color
-                    .map_or(foreground, |color| resolve_color(color, true));
+                    .map_or(foreground, |color| resolve_color_themed(color, true, theme));
                 foreground = if background[3] > 0.0 {
                     background
                 } else {
@@ -2082,7 +2169,7 @@ fn build_vertices(
                 let color = snapshot
                     .cursor_appearance
                     .color
-                    .map_or(foreground, |color| resolve_color(color, true));
+                    .map_or(foreground, |color| resolve_color_themed(color, true, theme));
                 push_cursor_decoration(
                     &mut vertices,
                     shape,
@@ -2194,6 +2281,26 @@ fn build_log_vertices(
     viewport: TerminalViewport,
     decorations: &LogDecorations,
 ) -> Vec<Vertex> {
+    build_log_vertices_themed(
+        frame,
+        atlas,
+        width,
+        height,
+        viewport,
+        decorations,
+        TerminalTheme::Dark,
+    )
+}
+
+fn build_log_vertices_themed(
+    frame: &LogSurfaceFrame,
+    atlas: &mut GlyphAtlas,
+    width: u32,
+    height: u32,
+    viewport: TerminalViewport,
+    decorations: &LogDecorations,
+    theme: TerminalTheme,
+) -> Vec<Vertex> {
     atlas.begin_frame();
     let rows = frame.visible_rows.clone();
     let mut vertices = Vec::with_capacity(
@@ -2274,8 +2381,8 @@ fn build_log_vertices(
             if x >= viewport.x.saturating_add(viewport.width) as f32 {
                 break;
             }
-            let mut foreground = resolve_color(style.foreground, true);
-            let mut background = resolve_color(style.background, false);
+            let mut foreground = resolve_color_themed(style.foreground, true, theme);
+            let mut background = resolve_color_themed(style.background, false, theme);
             if style.inverse {
                 std::mem::swap(&mut foreground, &mut background);
             }
@@ -2388,9 +2495,17 @@ fn white_uv() -> [f32; 4] {
     [x, y, x, y]
 }
 
+#[cfg(test)]
 fn resolve_color(color: Color, foreground: bool) -> [f32; 4] {
+    resolve_color_themed(color, foreground, TerminalTheme::Dark)
+}
+
+fn resolve_color_themed(color: Color, foreground: bool, theme: TerminalTheme) -> [f32; 4] {
     let rgb = match color {
-        Color::Default if foreground => [216, 222, 233],
+        Color::Default if foreground => match theme {
+            TerminalTheme::Dark => [216, 222, 233],
+            TerminalTheme::Light => [35, 42, 52],
+        },
         Color::Default => return [0.0, 0.0, 0.0, 0.0],
         Color::Indexed(index) => xterm_color(index),
         Color::Rgb(red, green, blue) => [red, green, blue],
@@ -2480,6 +2595,119 @@ mod tests {
     }
 
     #[test]
+    fn light_theme_changes_default_ink_and_keeps_panes_separate() {
+        let dark = super::TerminalTheme::from_profile_name("default");
+        let light = super::TerminalTheme::from_profile_name("light");
+        assert_eq!(dark, super::TerminalTheme::Dark);
+        assert_eq!(light, super::TerminalTheme::Light);
+        assert_ne!(
+            super::resolve_color_themed(Color::Default, true, dark),
+            super::resolve_color_themed(Color::Default, true, light)
+        );
+        assert_eq!(
+            super::resolve_color_themed(Color::Rgb(24, 48, 72), true, dark),
+            super::resolve_color_themed(Color::Rgb(24, 48, 72), true, light)
+        );
+        let mut atlas = GlyphAtlas::build().unwrap_or_else(|e| panic!("{e}"));
+        let decorations = TerminalDecorations::default();
+        let snapshot = FrameSnapshot {
+            generation: 1,
+            rows: 1,
+            cols: 1,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_appearance: Default::default(),
+            terminal_modes: Default::default(),
+            cells: vec![Cell::new('A', CellWidth::Single, Style::default())],
+        };
+        let glyph_viewport = TerminalViewport {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 60,
+        };
+        let dark_glyph = super::build_vertices_themed(
+            &snapshot,
+            &mut atlas,
+            80,
+            60,
+            glyph_viewport,
+            0..1,
+            &decorations,
+            false,
+            dark,
+        );
+        let light_glyph = super::build_vertices_themed(
+            &snapshot,
+            &mut atlas,
+            80,
+            60,
+            glyph_viewport,
+            0..1,
+            &decorations,
+            false,
+            light,
+        );
+        assert!(!dark_glyph.is_empty());
+        assert!(
+            dark_glyph
+                .iter()
+                .all(|vertex| vertex.color
+                    == super::resolve_color_themed(Color::Default, true, dark))
+        );
+        assert!(
+            light_glyph
+                .iter()
+                .all(|vertex| vertex.color
+                    == super::resolve_color_themed(Color::Default, true, light))
+        );
+        let panes = [
+            super::PaneFrame {
+                viewport: TerminalViewport {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 60,
+                },
+                theme: dark,
+                content: super::PaneContent::Terminal {
+                    frame: None,
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+            super::PaneFrame {
+                viewport: TerminalViewport {
+                    x: 80,
+                    y: 0,
+                    width: 80,
+                    height: 60,
+                },
+                theme: light,
+                content: super::PaneContent::Terminal {
+                    frame: None,
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+        ];
+        let (vertices, batches) = super::build_pane_geometry(&panes, &mut atlas, 160, 60);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].1, 0..6);
+        assert_eq!(batches[1].1, 6..12);
+        assert!(
+            vertices[..6]
+                .iter()
+                .all(|vertex| vertex.color == dark.background())
+        );
+        assert!(
+            vertices[6..]
+                .iter()
+                .all(|vertex| vertex.color == light.background())
+        );
+    }
+
+    #[test]
     fn panes_keep_equal_generation_frames_and_scissors_independent() {
         let mut atlas = GlyphAtlas::build().unwrap_or_else(|e| panic!("{e}"));
         let mut frames = Vec::new();
@@ -2514,6 +2742,7 @@ mod tests {
         };
         let panes = [
             super::PaneFrame {
+                theme: super::TerminalTheme::Dark,
                 viewport: viewport(10),
                 content: super::PaneContent::Terminal {
                     frame: Some(&frames[0]),
@@ -2522,6 +2751,7 @@ mod tests {
                 },
             },
             super::PaneFrame {
+                theme: super::TerminalTheme::Dark,
                 viewport: viewport(110),
                 content: super::PaneContent::Terminal {
                     frame: Some(&frames[1]),
@@ -2530,6 +2760,7 @@ mod tests {
                 },
             },
             super::PaneFrame {
+                theme: super::TerminalTheme::Dark,
                 viewport: viewport(300),
                 content: super::PaneContent::Terminal {
                     frame: Some(&frames[0]),

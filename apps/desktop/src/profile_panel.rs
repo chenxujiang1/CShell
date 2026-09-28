@@ -954,19 +954,24 @@ fn folder_picker(
 
 fn terminal_fields(ui: &mut egui::Ui, terminal: &mut TerminalOverrides) {
     let mut terminal_type = terminal.terminal_type.clone().unwrap_or_default();
-    let mut theme = terminal.theme.clone().unwrap_or_default();
     ui.horizontal(|ui| {
         ui.label("Terminal type");
         if ui.text_edit_singleline(&mut terminal_type).changed() {
             terminal.terminal_type = optional_text(&terminal_type);
         }
     });
-    ui.horizontal(|ui| {
-        ui.label("Theme");
-        if ui.text_edit_singleline(&mut theme).changed() {
-            terminal.theme = optional_text(&theme);
-        }
-    });
+    egui::ComboBox::from_label("Theme")
+        .selected_text(match terminal.theme.as_deref() {
+            None => "Inherit".to_owned(),
+            Some("default" | "dark") => "Dark".to_owned(),
+            Some("light") => "Light".to_owned(),
+            Some(other) => format!("Unknown: {other} (uses Dark)"),
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut terminal.theme, None, "Inherit");
+            ui.selectable_value(&mut terminal.theme, Some("dark".into()), "Dark");
+            ui.selectable_value(&mut terminal.theme, Some("light".into()), "Light");
+        });
     egui::ComboBox::from_label("Logging")
         .selected_text(match terminal.logging {
             None => "Inherit",
