@@ -116,6 +116,12 @@ jobs:
       - name: Run Windows/macOS window recovery
         if: runner.os != 'Linux'
         run: bash .github/scripts/run-with-diagnostics.sh cargo xtask log-window-e2e
+      - name: Run Linux multi-window rendering with a CPU adapter
+        if: runner.os == 'Linux'
+        run: xvfb-run -a bash .github/scripts/run-with-diagnostics.sh cargo xtask workspace-window-e2e
+      - name: Run Windows/macOS multi-window rendering
+        if: runner.os != 'Linux'
+        run: bash .github/scripts/run-with-diagnostics.sh cargo xtask workspace-window-e2e
 
   msrv:
     runs-on: ubuntu-latest

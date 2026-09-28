@@ -2,6 +2,7 @@
 
 use cshell_domain::{
     PaneId, SessionId, SplitAxis, TabGroupId, TabId, WorkspaceDocument, WorkspacePaneContent,
+    WorkspaceWindowId,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,6 +32,8 @@ pub struct WorkbenchViewModel {
     pub tabs: Vec<WorkspaceTabViewModel>,
     pub selected_tab: Option<TabId>,
     pub workspace_document: Option<WorkspaceDocument>,
+    pub workspace_window_id: Option<WorkspaceWindowId>,
+    pub available_windows: Vec<WorkspaceWindowId>,
     pub pane_views: Vec<WorkspacePaneView>,
     pub workspace_status: String,
     pub selected: Option<SessionId>,
@@ -53,6 +56,8 @@ pub enum WorkbenchMenuCommand {
     CloseView,
     TerminateSession(SessionId),
     NewWorkspaceTab,
+    NewWorkspaceWindow,
+    MoveTabToWindow(TabId, WorkspaceWindowId),
     OpenWorkspaceTab(TabId),
     CloseWorkspaceTab(TabId),
     MoveWorkspaceTab(TabId, isize),
@@ -182,6 +187,9 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                         model.menu_command = Some(WorkbenchMenuCommand::SplitWorkspace(axis));
                     }
                 }
+                if ui.button("New window").clicked() {
+                    model.menu_command = Some(WorkbenchMenuCommand::NewWorkspaceWindow);
+                }
                 for tab in &model.tabs {
                     let selected = model.selected_tab == Some(tab.id);
                     let label = if tab.session_id.is_none() {
@@ -205,7 +213,53 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                             ui.close();
                         }
                         if let Some(document) = &model.workspace_document {
-                            for (index, group) in document.tab_groups.iter().enumerate() {
+                            let current = model
+                                .workspace_window_id
+                                .or_else(|| document.windows.first().map(|w| w.id));
+                            for (index, window) in document.windows.iter().enumerate() {
+                                if Some(window.id) != current
+                                    && model.available_windows.contains(&window.id)
+                                    && ui.button(format!("Move to window {}", index + 1)).clicked()
+                                {
+                                    model.menu_command = Some(
+                                        WorkbenchMenuCommand::MoveTabToWindow(tab.id, window.id),
+                                    );
+                                    ui.close();
+                                }
+                            }
+                            let groups = current
+                                .and_then(|id| document.windows.iter().find(|w| w.id == id))
+                                .map(|w| {
+                                    let mut groups = Vec::new();
+                                    let mut pending = vec![w.root];
+                                    while let Some(id) = pending.pop() {
+                                        if let Some(pane) =
+                                            document.panes.iter().find(|p| p.id == id)
+                                        {
+                                            match pane.content {
+                                                WorkspacePaneContent::Tabs { group_id } => {
+                                                    groups.push(group_id)
+                                                }
+                                                WorkspacePaneContent::Split {
+                                                    first,
+                                                    second,
+                                                    ..
+                                                } => {
+                                                    pending.push(second);
+                                                    pending.push(first);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    groups
+                                })
+                                .unwrap_or_default();
+                            for (index, group) in document
+                                .tab_groups
+                                .iter()
+                                .filter(|g| groups.contains(&g.id))
+                                .enumerate()
+                            {
                                 if !group.tabs.contains(&tab.id)
                                     && ui.button(format!("Move to group {}", index + 1)).clicked()
                                 {
@@ -252,8 +306,13 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
         .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
         .show(ui, |ui| {
             let rect = ui.max_rect();
-            if let Some(document) = &document {
-                draw_workspace_pane(ui, document, document.windows[0].root, rect, model);
+            if let Some(document) = &document
+                && let Some(window) = model
+                    .workspace_window_id
+                    .and_then(|id| document.windows.iter().find(|w| w.id == id))
+                    .or_else(|| document.windows.first())
+            {
+                draw_workspace_pane(ui, document, window.root, rect, model);
                 model
                     .pane_views
                     .iter()
@@ -580,6 +639,137 @@ mod tests {
         );
         assert!(
             matches!(model.menu_command, Some(WorkbenchMenuCommand::ResizeSplit(id, ratio)) if id == root && ratio > 500 && ratio <= 900)
+        );
+    }
+
+    #[test]
+    fn second_window_uses_its_own_pane_root_and_exposes_creation() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut doc = split_document();
+        let second_window = cshell_domain::WorkspaceWindowId::new();
+        let second_group = cshell_domain::TabGroupId::new();
+        let second_root = cshell_domain::PaneId::new();
+        let tab = cshell_domain::TabId::new();
+        doc.windows.push(cshell_domain::WorkspaceWindow {
+            id: second_window,
+            root: second_root,
+            focused_group: second_group,
+        });
+        doc.panes.push(cshell_domain::WorkspacePane {
+            id: second_root,
+            content: cshell_domain::WorkspacePaneContent::Tabs {
+                group_id: second_group,
+            },
+        });
+        doc.tab_groups.push(cshell_domain::WorkspaceTabGroup {
+            id: second_group,
+            tabs: vec![tab],
+            active_tab: Some(tab),
+        });
+        doc.bindings.push(cshell_domain::WorkspaceBinding {
+            tab_id: tab,
+            profile_id: None,
+            title: "Other window".into(),
+        });
+        let mut model = WorkbenchViewModel {
+            selected_tab: Some(tab),
+            workspace_window_id: Some(second_window),
+            workspace_document: Some(doc),
+            tabs: vec![super::WorkspaceTabViewModel {
+                id: tab,
+                title: "Other window".into(),
+                session_id: None,
+            }],
+            ..Default::default()
+        };
+        frame(&context, &mut model, vec![]);
+        let update = frame(&context, &mut model, vec![]);
+        assert_eq!(model.pane_views.len(), 1);
+        assert_eq!(model.pane_views[0].group_id, second_group);
+        let create = button_center(&update, "New window");
+        click(&context, &mut model, create);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::NewWorkspaceWindow)
+        );
+    }
+
+    #[test]
+    fn tab_context_menu_moves_to_a_live_other_window() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut doc = split_document();
+        let source = doc.windows[0].id;
+        let target = cshell_domain::WorkspaceWindowId::new();
+        let group = cshell_domain::TabGroupId::new();
+        let root = cshell_domain::PaneId::new();
+        doc.windows.push(cshell_domain::WorkspaceWindow {
+            id: target,
+            root,
+            focused_group: group,
+        });
+        doc.panes.push(cshell_domain::WorkspacePane {
+            id: root,
+            content: cshell_domain::WorkspacePaneContent::Tabs { group_id: group },
+        });
+        doc.tab_groups.push(cshell_domain::WorkspaceTabGroup {
+            id: group,
+            tabs: vec![],
+            active_tab: None,
+        });
+        let tab = doc.tab_groups[0]
+            .active_tab
+            .unwrap_or_else(|| panic!("tab"));
+        let mut model = WorkbenchViewModel {
+            selected_tab: Some(tab),
+            workspace_window_id: Some(source),
+            available_windows: vec![source, target],
+            workspace_document: Some(doc),
+            tabs: vec![super::WorkspaceTabViewModel {
+                id: tab,
+                title: "Left pane".into(),
+                session_id: None,
+            }],
+            ..Default::default()
+        };
+        frame(&context, &mut model, vec![]);
+        let update = frame(&context, &mut model, vec![]);
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Left pane (not started)"))
+            .unwrap_or_else(|| panic!("workspace tab"));
+        let bounds = node.bounds().unwrap_or_else(|| panic!("tab bounds"));
+        let position = egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        frame(
+            &context,
+            &mut model,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Secondary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let menu = frame(&context, &mut model, vec![]);
+        let move_button = button_center(&menu, "Move to window 2");
+        click(&context, &mut model, move_button);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::MoveTabToWindow(tab, target))
         );
     }
 

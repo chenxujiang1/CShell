@@ -107,6 +107,9 @@ struct DesktopApp {
     cursor_blink: CursorBlinkState,
     window_active: bool,
     window_e2e: Option<window_e2e::WindowE2e>,
+    transfer_to: Option<(cshell_domain::TabId, cshell_domain::WorkspaceWindowId)>,
+    terminal_frame_presented: bool,
+    secondary_window: bool,
 }
 
 #[derive(Default)]
@@ -245,6 +248,7 @@ impl DesktopApp {
 
     fn refresh_workspace_tabs(&mut self) {
         self.view_model.workspace_document = Some(self.workspace.document.clone());
+        self.view_model.workspace_window_id = Some(self.workspace.window_id);
         let focused = self.workspace.focused_group();
         self.view_model.tabs = self
             .workspace
@@ -289,6 +293,11 @@ impl DesktopApp {
                 self.pane_daemons.insert(previous, connection);
             }
             self.daemon = self.pane_daemons.remove(&tab);
+        } else if let Some(connection) = self.pane_daemons.remove(&tab) {
+            if let Some(idle) = self.daemon.take() {
+                idle.retire();
+            }
+            self.daemon = Some(connection);
         }
         if self.daemon.is_none()
             && let Some(config) = &self.daemon_config
@@ -330,6 +339,9 @@ impl DesktopApp {
     }
 
     fn activate_workspace_tab(&mut self, tab: cshell_domain::TabId) {
+        if self.workspace.window_of_tab(tab) != Some(self.workspace.window_id) {
+            return;
+        }
         self.workspace.pending_launch = None;
         self.switch_tab_view(tab);
         self.workspace.select(tab);
@@ -694,9 +706,16 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if self.window.is_some() {
             return;
         }
+        let window_number = self
+            .workspace
+            .document
+            .windows
+            .iter()
+            .position(|w| w.id == self.workspace.window_id)
+            .map_or(1, |index| index + 1);
         match event_loop.create_window(
             WindowAttributes::default()
-                .with_title("CShell Phase 0")
+                .with_title(format!("CShell - Window {window_number}"))
                 .with_inner_size(winit::dpi::LogicalSize::new(1200.0, 760.0))
                 .with_visible(false),
         ) {
@@ -727,7 +746,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             }
             Err(error) => {
                 tracing::error!(%error, "cannot create desktop window");
-                event_loop.exit();
+                if !self.secondary_window {
+                    event_loop.exit();
+                }
             }
         }
     }
@@ -1528,7 +1549,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         .workspace
                         .sessions
                         .iter()
-                        .find(|(_, value)| **value == id)
+                        .find(|(tab, value)| {
+                            **value == id
+                                && self.workspace.window_of_tab(**tab)
+                                    == Some(self.workspace.window_id)
+                        })
                         .map(|(tab, _)| *tab);
                     let tab = existing.or_else(|| {
                         let summary = self
@@ -1599,6 +1624,23 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             window.request_redraw();
                         }
                     }
+                    Some(WorkbenchMenuCommand::NewWorkspaceWindow) => {
+                        if self.workspace_loaded
+                            && self.workspace.writable
+                            && self.workspace.new_window().is_some()
+                        {
+                            self.refresh_workspace_tabs();
+                        }
+                    }
+                    Some(WorkbenchMenuCommand::MoveTabToWindow(tab, target)) => {
+                        if self.workspace_loaded
+                            && self.workspace.writable
+                            && self.workspace.move_to_window(tab, target)
+                        {
+                            self.transfer_to = Some((tab, target));
+                            self.refresh_workspace_tabs();
+                        }
+                    }
                     Some(WorkbenchMenuCommand::SplitWorkspace(axis)) => {
                         if self.workspace_loaded
                             && self.workspace.pending_launch.is_none()
@@ -1608,8 +1650,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                     }
                     Some(WorkbenchMenuCommand::MoveTabToGroup(tab, group)) => {
-                        self.workspace.move_to_group(tab, group);
-                        self.activate_workspace_tab(tab);
+                        if self.workspace.pending_launch.is_none() {
+                            self.workspace.move_to_group(tab, group);
+                            self.activate_workspace_tab(tab);
+                        }
                     }
                     Some(WorkbenchMenuCommand::ResizeSplit(pane, ratio)) => {
                         self.workspace.set_ratio(pane, ratio);
@@ -1863,6 +1907,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 textures_delta.clear();
                 match render_result {
                     Ok(outcome) => {
+                        self.terminal_frame_presented |=
+                            outcome == RenderOutcome::Presented && renderer.rendered_vertices() > 0;
                         self.renderer_needs_font_upload = false;
                         if outcome == RenderOutcome::Presented
                             && let (Some(e2e), Some(log_surface)) =
@@ -2381,6 +2427,322 @@ fn initialize_renderer(
     Ok(runtime.block_on(WindowRenderer::new(window))?)
 }
 
+#[derive(Default)]
+struct DesktopWindows {
+    primary: DesktopApp,
+    others: std::collections::BTreeMap<WindowId, DesktopApp>,
+    unavailable_windows: std::collections::BTreeSet<cshell_domain::WorkspaceWindowId>,
+}
+
+impl DesktopWindows {
+    fn absorb(
+        &mut self,
+        document: cshell_domain::WorkspaceDocument,
+        sessions: std::collections::BTreeMap<cshell_domain::TabId, SessionId>,
+    ) {
+        if self.primary.workspace.document != document
+            || self.primary.workspace.sessions != sessions
+        {
+            self.primary.workspace.document.clone_from(&document);
+            self.primary.workspace.sessions.clone_from(&sessions);
+            self.primary.refresh_workspace_tabs();
+            if let Some(window) = &self.primary.window {
+                window.request_redraw();
+            }
+        }
+        for child in self.others.values_mut() {
+            if child.workspace.document != document || child.workspace.sessions != sessions {
+                child.workspace.document.clone_from(&document);
+                child.workspace.sessions.clone_from(&sessions);
+                child.refresh_workspace_tabs();
+                if let Some(window) = &child.window {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn reconcile(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.primary.workspace_loaded {
+            return;
+        }
+        let windows = self.primary.workspace.document.windows.clone();
+        for layout in windows {
+            if layout.id == self.primary.workspace.window_id
+                || self.unavailable_windows.contains(&layout.id)
+                || self
+                    .others
+                    .values()
+                    .any(|child| child.workspace.window_id == layout.id)
+            {
+                continue;
+            }
+            let mut child = DesktopApp {
+                accesskit_proxy: self.primary.accesskit_proxy.clone(),
+                workspace: workspace_model::DesktopWorkspace {
+                    document: self.primary.workspace.document.clone(),
+                    sessions: self.primary.workspace.sessions.clone(),
+                    pending_launch: None,
+                    writable: self.primary.workspace.writable,
+                    window_id: layout.id,
+                },
+                workspace_loaded: true,
+                secondary_window: true,
+                daemon_config: self.primary.daemon_config.clone(),
+                ..DesktopApp::default()
+            };
+            if let Some(config) = &child.daemon_config {
+                child.daemon = DesktopDaemonConnection::start_idle(config.clone()).ok();
+                child.profiles = DesktopProfileConnection::start(config.clone()).ok();
+            }
+            child.terminal_search = TerminalSearchWorker::start().ok();
+            child.log_reflow = LogReflowWorker::start().ok();
+            child.refresh_workspace_tabs();
+            child.resumed(event_loop);
+            if let Some(tab) = child.workspace.active() {
+                child.activate_workspace_tab(tab);
+            }
+            if self
+                .primary
+                .window_e2e
+                .as_ref()
+                .is_some_and(window_e2e::WindowE2e::multi_window)
+            {
+                child
+                    .terminal_surface
+                    .submit_snapshot(Arc::new(visual_corpus::snapshot()));
+                if let Some(window) = &child.window {
+                    window.request_redraw();
+                }
+            }
+            if let Some(id) = child.window.as_ref().map(|w| w.id()) {
+                self.others.insert(id, child);
+            } else {
+                self.unavailable_windows.insert(layout.id);
+                let detail =
+                    format!("Window {layout:?} could not be created; saved layout retained");
+                self.primary.workspace_layout_error = Some(detail.clone());
+                self.primary.view_model.workspace_status = detail.clone();
+                if let Some(e2e) = &mut self.primary.window_e2e {
+                    e2e.fail(detail);
+                }
+                if let Some(window) = &self.primary.window {
+                    window.request_redraw();
+                }
+            }
+        }
+        self.publish_available();
+    }
+
+    fn publish_available(&mut self) {
+        let mut available = Vec::new();
+        if self.primary.window.is_some() {
+            available.push(self.primary.workspace.window_id);
+        }
+        available.extend(self.others.values().map(|child| child.workspace.window_id));
+        for app in std::iter::once(&mut self.primary).chain(self.others.values_mut()) {
+            if app.view_model.available_windows != available {
+                app.view_model.available_windows.clone_from(&available);
+                if let Some(window) = &app.window {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn transfer(
+        &mut self,
+        source_id: WindowId,
+        tab: cshell_domain::TabId,
+        target_id: cshell_domain::WorkspaceWindowId,
+    ) {
+        let source = if self
+            .primary
+            .window
+            .as_ref()
+            .is_some_and(|w| w.id() == source_id)
+        {
+            &mut self.primary
+        } else if let Some(child) = self.others.get_mut(&source_id) {
+            child
+        } else {
+            return;
+        };
+        let (view, connection) = source.take_tab_for_transfer(tab);
+        let next = source.workspace.active();
+        if let Some(next) = next {
+            source.activate_workspace_tab(next);
+        } else {
+            source.refresh_workspace_tabs();
+        }
+        let document = source.workspace.document.clone();
+        let sessions = source.workspace.sessions.clone();
+        self.absorb(document, sessions);
+        let target = if self.primary.workspace.window_id == target_id {
+            Some(&mut self.primary)
+        } else {
+            self.others
+                .values_mut()
+                .find(|child| child.workspace.window_id == target_id)
+        };
+        if let Some(target) = target {
+            target.cached_tab_views.insert(tab, view);
+            if let Some(connection) = connection {
+                target.pane_daemons.insert(tab, connection);
+            }
+            target.activate_workspace_tab(tab);
+            if let Some(window) = &target.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    fn retire_child(mut child: DesktopApp) {
+        if let Some(connection) = child.daemon.take() {
+            connection.retire();
+        }
+        for (_, connection) in std::mem::take(&mut child.pane_daemons) {
+            connection.retire();
+        }
+    }
+}
+
+impl DesktopApp {
+    fn take_tab_for_transfer(
+        &mut self,
+        tab: cshell_domain::TabId,
+    ) -> (CachedTabView, Option<DesktopDaemonConnection>) {
+        if self.current_workspace_tab != Some(tab) {
+            return (
+                self.cached_tab_views.remove(&tab).unwrap_or_default(),
+                self.pane_daemons.remove(&tab),
+            );
+        }
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(false);
+        }
+        self.current_workspace_tab = None;
+        self.pending_tab = None;
+        self.pending_paste = None;
+        self.terminal_selecting = false;
+        self.view_model.selected = None;
+        self.view_model.daemon_connected = false;
+        self.view_model.can_reconnect_ssh = false;
+        let view = CachedTabView {
+            surface: std::mem::take(&mut self.terminal_surface),
+            decorations: std::mem::take(&mut self.terminal_decorations),
+            log_surface: self.log_surface.take(),
+            log_decorations: std::mem::take(&mut self.log_decorations),
+            query: std::mem::take(&mut self.terminal_search_query),
+            options: std::mem::take(&mut self.terminal_search_options),
+            search_open: self.terminal_search_open,
+            last_log_page: self.submitted_log_page.take(),
+        };
+        self.terminal_search_open = false;
+        (view, self.daemon.take())
+    }
+}
+
+impl ApplicationHandler<DesktopEvent> for DesktopWindows {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.primary.resumed(event_loop);
+        self.reconcile(event_loop);
+    }
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: DesktopEvent) {
+        let DesktopEvent::AccessKit(ref access) = event;
+        if self
+            .primary
+            .window
+            .as_ref()
+            .is_some_and(|w| w.id() == access.window_id)
+        {
+            self.primary.user_event(event_loop, event);
+        } else if let Some(child) = self.others.get_mut(&access.window_id) {
+            child.user_event(event_loop, event);
+        }
+    }
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.primary.window.as_ref().is_some_and(|w| w.id() == id) {
+            self.primary.window_event(event_loop, id, event);
+            if let Some((tab, target)) = self.primary.transfer_to.take() {
+                self.transfer(id, tab, target);
+            } else {
+                self.absorb(
+                    self.primary.workspace.document.clone(),
+                    self.primary.workspace.sessions.clone(),
+                );
+            }
+        } else if matches!(event, WindowEvent::CloseRequested) {
+            if let Some(mut child) = self.others.remove(&id) {
+                let window_id = child.workspace.window_id;
+                if child.workspace.close_window(window_id) {
+                    let document = child.workspace.document.clone();
+                    let sessions = child.workspace.sessions.clone();
+                    Self::retire_child(child);
+                    self.absorb(document, sessions);
+                    self.publish_available();
+                } else {
+                    self.others.insert(id, child);
+                }
+            }
+        } else if let Some(child) = self.others.get_mut(&id) {
+            child.window_event(event_loop, id, event);
+            if child.terminal_frame_presented
+                && let Some(e2e) = &mut self.primary.window_e2e
+                && e2e.note_secondary_presented()
+                && let Some(window) = &self.primary.window
+            {
+                window.focus_window();
+                window.request_redraw();
+            }
+            let transfer = child.transfer_to.take();
+            let document = child.workspace.document.clone();
+            let sessions = child.workspace.sessions.clone();
+            if let Some((tab, target)) = transfer {
+                self.transfer(id, tab, target);
+            } else {
+                self.absorb(document, sessions);
+            }
+        }
+        self.reconcile(event_loop);
+    }
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.primary.about_to_wait(event_loop);
+        self.absorb(
+            self.primary.workspace.document.clone(),
+            self.primary.workspace.sessions.clone(),
+        );
+        self.reconcile(event_loop);
+        let ids: Vec<_> = self.others.keys().copied().collect();
+        for id in ids {
+            if let Some(child) = self.others.get_mut(&id) {
+                child.about_to_wait(event_loop);
+                let document = child.workspace.document.clone();
+                let sessions = child.workspace.sessions.clone();
+                self.absorb(document, sessions);
+            }
+        }
+        let now = std::time::Instant::now();
+        let delay = if self.primary.view_model.daemon_connected
+            || self
+                .others
+                .values()
+                .any(|child| child.view_model.daemon_connected)
+        {
+            16
+        } else {
+            100
+        };
+        let mut deadline = now + std::time::Duration::from_millis(delay);
+        for app in std::iter::once(&self.primary).chain(self.others.values()) {
+            if let Some(toggle) = app.cursor_blink.next_toggle() {
+                deadline = deadline.min(toggle);
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -2397,9 +2759,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let show_session_log = arguments
         .iter()
         .any(|argument| argument == SESSION_LOG_ARGUMENT);
-    let run_window_e2e = arguments
+    let multi_window_e2e = arguments
         .iter()
-        .any(|argument| argument == window_e2e::ARGUMENT);
+        .any(|argument| argument == window_e2e::MULTI_ARGUMENT);
+    let run_window_e2e = multi_window_e2e
+        || arguments
+            .iter()
+            .any(|argument| argument == window_e2e::ARGUMENT);
     let daemon_config = if show_visual_corpus || show_log_corpus || run_window_e2e {
         None
     } else {
@@ -2440,16 +2806,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         app.log_reflow = Some(LogReflowWorker::start()?);
     }
     if run_window_e2e {
-        let e2e = window_e2e::WindowE2e::new();
+        let e2e = window_e2e::WindowE2e::new_with_windows(multi_window_e2e);
         let mut log_surface = LogSurfaceModel::default();
         log_surface.submit_page(e2e.initial_page())?;
         app.view_model.daemon_status_detail = "automated log window E2E".to_owned();
         app.log_surface = Some(log_surface);
         app.log_reflow = Some(LogReflowWorker::start()?);
         app.window_e2e = Some(e2e);
+        if multi_window_e2e {
+            app.workspace_loaded = true;
+            app.workspace.writable = true;
+            let _created = app.workspace.new_window();
+            app.refresh_workspace_tabs();
+        }
     }
-    event_loop.run_app(&mut app)?;
-    if let Some(e2e) = &app.window_e2e {
+    let mut windows = DesktopWindows {
+        primary: app,
+        ..DesktopWindows::default()
+    };
+    event_loop.run_app(&mut windows)?;
+    if let Some(e2e) = &windows.primary.window_e2e {
         e2e.finish()?;
     }
     Ok(())
@@ -2535,6 +2911,66 @@ mod tests {
             tab_id: Some(first),
             result: request.execute(),
         }));
+    }
+
+    #[test]
+    fn moved_terminal_view_keeps_snapshot_and_search_but_drops_pending_paste() {
+        let mut source = super::DesktopApp::default();
+        let tab = source
+            .workspace
+            .add(None, "Live".into())
+            .unwrap_or_else(|| panic!("tab"));
+        let session = cshell_domain::SessionId::new();
+        source.workspace.sessions.insert(tab, session);
+        source.switch_tab_view(tab);
+        let snapshot = std::sync::Arc::new(super::visual_corpus::snapshot());
+        source.terminal_surface.submit_snapshot(snapshot.clone());
+        source.terminal_search_query = "needle".into();
+        source.terminal_search_open = true;
+        source.pending_paste = Some(super::PendingPaste {
+            session_id: session,
+            session_title: "Live".into(),
+            text: "unsafe\n".into(),
+        });
+        let target_id = source
+            .workspace
+            .new_window()
+            .unwrap_or_else(|| panic!("window"));
+        assert!(source.workspace.move_to_window(tab, target_id));
+        let (view, connection) = source.take_tab_for_transfer(tab);
+        assert!(connection.is_none());
+        assert!(source.pending_paste.is_none());
+        assert!(source.current_workspace_tab.is_none());
+        let mut target = super::DesktopApp {
+            workspace: workspace_for_window(&source.workspace, target_id),
+            ..super::DesktopApp::default()
+        };
+        target.cached_tab_views.insert(tab, view);
+        target.activate_workspace_tab(tab);
+        assert_eq!(target.current_workspace_tab, Some(tab));
+        assert_eq!(target.view_model.selected, Some(session));
+        assert_eq!(target.terminal_search_query, "needle");
+        assert!(target.terminal_search_open);
+        assert!(std::sync::Arc::ptr_eq(
+            target
+                .terminal_surface
+                .latest_snapshot()
+                .unwrap_or_else(|| panic!("snapshot")),
+            &snapshot
+        ));
+    }
+
+    fn workspace_for_window(
+        source: &super::workspace_model::DesktopWorkspace,
+        id: cshell_domain::WorkspaceWindowId,
+    ) -> super::workspace_model::DesktopWorkspace {
+        super::workspace_model::DesktopWorkspace {
+            document: source.document.clone(),
+            sessions: source.sessions.clone(),
+            pending_launch: None,
+            writable: true,
+            window_id: id,
+        }
     }
 
     #[test]

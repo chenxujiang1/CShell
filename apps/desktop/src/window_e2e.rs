@@ -6,6 +6,7 @@ use std::{
 use winit::{dpi::PhysicalSize, window::Window};
 
 pub const ARGUMENT: &str = "--log-window-e2e";
+pub const MULTI_ARGUMENT: &str = "--workspace-window-e2e";
 const SOURCE: LogSourceId = LogSourceId(0x4353_4845_4c4c);
 const TOTAL: u64 = 20_000;
 const PAGE_ROWS: u64 = 2_048;
@@ -24,10 +25,12 @@ pub struct WindowE2e {
     software_recoveries: u64,
     require_software_recovery: bool,
     failure: Option<String>,
+    multi_window: bool,
+    secondary_presented: bool,
 }
 
 impl WindowE2e {
-    pub fn new() -> Self {
+    pub fn new_with_windows(multi_window: bool) -> Self {
         Self {
             started: Instant::now(),
             revision: 1,
@@ -42,9 +45,19 @@ impl WindowE2e {
             require_software_recovery: std::env::var_os("CSHELL_REQUIRE_SOFTWARE_RECOVERY")
                 .is_some(),
             failure: None,
+            multi_window,
+            secondary_presented: false,
         }
     }
 
+    pub fn multi_window(&self) -> bool {
+        self.multi_window
+    }
+    pub fn note_secondary_presented(&mut self) -> bool {
+        let first = !self.secondary_presented;
+        self.secondary_presented = true;
+        first
+    }
     pub fn initial_page(&self) -> Arc<LogPage> {
         page_around(TOTAL, self.revision)
     }
@@ -122,27 +135,38 @@ impl WindowE2e {
         }
     }
 
-    pub fn should_exit(&mut self) -> bool {
-        if self.failure.is_some() {
-            return true;
-        }
-        let done = self.presents >= 120
+    fn complete(&self) -> bool {
+        self.presents >= 120
             && self.pages >= 4
             && self.reflows >= 4
             && self.requested_resizes >= 5
             && self.observed_resizes >= 4
             && self.renderer_recoveries >= 1
-            && (!self.require_software_recovery || self.software_recoveries >= 1);
-        if self.started.elapsed() >= Duration::from_secs(30) && !done {
+            && (!self.require_software_recovery || self.software_recoveries >= 1)
+            && (!self.multi_window || self.secondary_presented)
+    }
+
+    pub fn should_exit(&mut self) -> bool {
+        if self.failure.is_some() {
+            return true;
+        }
+        let done = self.complete();
+        let timeout = if self.multi_window {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(30)
+        };
+        if self.started.elapsed() >= timeout && !done {
             self.fail(format!(
-                "window E2E timeout: presents={}, pages={}, reflows={}, resize={}/{}, device recoveries={}, software recoveries={}",
+                "window E2E timeout: presents={}, pages={}, reflows={}, resize={}/{}, device recoveries={}, software recoveries={}, secondary_presented={}",
                 self.presents,
                 self.pages,
                 self.reflows,
                 self.observed_resizes,
                 self.requested_resizes,
                 self.renderer_recoveries,
-                self.software_recoveries
+                self.software_recoveries,
+                self.secondary_presented
             ));
             return true;
         }
@@ -153,15 +177,21 @@ impl WindowE2e {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
         }
+        if !self.complete() {
+            return Err(
+                "window E2E ended before every rendering and recovery assertion completed".into(),
+            );
+        }
         println!(
-            "log window E2E passed: {} presents, {} pages, {} reflows, {}/{} resizes, {} device recoveries ({} software)",
+            "log window E2E passed: {} presents, {} pages, {} reflows, {}/{} resizes, {} device recoveries ({} software), secondary_presented={}",
             self.presents,
             self.pages,
             self.reflows,
             self.observed_resizes,
             self.requested_resizes,
             self.renderer_recoveries,
-            self.software_recoveries
+            self.software_recoveries,
+            self.secondary_presented
         );
         Ok(())
     }
@@ -198,6 +228,12 @@ fn page_around(anchor: u64, revision: u64) -> Arc<LogPage> {
 #[cfg(test)]
 mod tests {
     use super::{PAGE_ROWS, TOTAL, page_around};
+
+    #[test]
+    fn premature_window_exit_cannot_report_a_passing_native_gate() {
+        assert!(super::WindowE2e::new_with_windows(false).finish().is_err());
+        assert!(super::WindowE2e::new_with_windows(true).finish().is_err());
+    }
 
     #[test]
     fn pages_are_bounded_and_contain_edge_anchors() {

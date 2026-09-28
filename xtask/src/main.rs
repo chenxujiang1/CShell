@@ -17,6 +17,7 @@ fn main() -> ExitCode {
         "visual-corpus" => visual_corpus(),
         "log-corpus" => log_corpus(),
         "log-window-e2e" => log_window_e2e(),
+        "workspace-window-e2e" => workspace_window_e2e(),
         "session-log" => session_log(),
         "help" | "--help" | "-h" => {
             print_help();
@@ -263,6 +264,20 @@ fn log_window_e2e() -> Result<(), String> {
     )
 }
 
+fn workspace_window_e2e() -> Result<(), String> {
+    run(
+        "cargo",
+        &[
+            "run",
+            "--release",
+            "--package",
+            "cshell-gui",
+            "--",
+            "--workspace-window-e2e",
+        ],
+    )
+}
+
 fn session_log() -> Result<(), String> {
     run(
         "cargo",
@@ -303,5 +318,6 @@ fn print_help() {
     println!("  cargo xtask visual-corpus launch the terminal Unicode/color visual corpus");
     println!("  cargo xtask log-corpus    launch the GPU LogSurface visual corpus");
     println!("  cargo xtask log-window-e2e run automated scroll/resize/window-present gate");
+    println!("  cargo xtask workspace-window-e2e run native two-window rendering gate");
     println!("  cargo xtask session-log   launch the live daemon-backed session log");
 }
