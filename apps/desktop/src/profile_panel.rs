@@ -178,6 +178,7 @@ pub struct ProfilePanel {
     status: String,
     search: String,
     selected: Option<Selected>,
+    pending_ssh_entry: bool,
     folder_draft: Option<ProfileFolder>,
     profile_draft: Option<ProfileDraft>,
     import_path: String,
@@ -199,6 +200,7 @@ impl Default for ProfilePanel {
             status: String::new(),
             search: String::new(),
             selected: None,
+            pending_ssh_entry: false,
             folder_draft: None,
             profile_draft: None,
             import_path: String::new(),
@@ -208,6 +210,45 @@ impl Default for ProfilePanel {
 }
 
 impl ProfilePanel {
+    pub fn open_ssh_connections(&mut self) {
+        self.open = true;
+        if self.catalog.is_none() {
+            self.pending_ssh_entry = true;
+        } else {
+            self.select_ssh_entry();
+        }
+    }
+
+    fn select_ssh_entry(&mut self) {
+        self.pending_ssh_entry = false;
+        let saved = self.catalog.as_ref().and_then(|catalog| {
+            catalog.ssh_connections.iter().find_map(|connection| {
+                catalog
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == connection.profile_id)
+                    .cloned()
+            })
+        });
+        if let Some(profile) = saved {
+            self.select_profile(profile);
+        } else {
+            self.new_ssh_profile();
+        }
+    }
+
+    fn new_ssh_profile(&mut self) {
+        self.select_profile(ProfileRecord {
+            id: ProfileId::new(),
+            name: String::new(),
+            kind: ProfileKind::Ssh,
+            folder_id: None,
+            tags: BTreeSet::new(),
+            favorite: false,
+            terminal: TerminalOverrides::default(),
+        });
+    }
+
     pub fn set_launch_error(&mut self, error: Option<String>) -> bool {
         if self.launch_error == error {
             return false;
@@ -221,9 +262,11 @@ impl ProfilePanel {
             return false;
         }
         self.seen_generation = view.generation;
-        if self.catalog.as_ref().map(|catalog| catalog.revision)
+        let previous_selection = self.selected;
+        let catalog_changed = self.catalog.as_ref().map(|catalog| catalog.revision)
             != view.catalog.as_ref().map(|catalog| catalog.revision)
-        {
+            || self.catalog.is_some() != view.catalog.is_some();
+        if catalog_changed {
             self.selected = None;
             self.folder_draft = None;
             self.profile_draft = None;
@@ -236,6 +279,35 @@ impl ProfilePanel {
         self.host_key_preview = view.host_key_preview.clone();
         self.error = view.error.clone();
         self.status = view.status.clone();
+        if self.pending_ssh_entry && self.catalog.is_some() {
+            self.select_ssh_entry();
+        } else if catalog_changed {
+            match previous_selection {
+                Some(Selected::Profile(id)) => {
+                    if let Some(profile) = self.catalog.as_ref().and_then(|catalog| {
+                        catalog
+                            .profiles
+                            .iter()
+                            .find(|profile| profile.id == id)
+                            .cloned()
+                    }) {
+                        self.select_profile(profile);
+                    }
+                }
+                Some(Selected::Folder(id)) => {
+                    if let Some(folder) = self.catalog.as_ref().and_then(|catalog| {
+                        catalog
+                            .folders
+                            .iter()
+                            .find(|folder| folder.id == id)
+                            .cloned()
+                    }) {
+                        self.select_folder(folder);
+                    }
+                }
+                None => {}
+            }
+        }
         true
     }
 
@@ -249,12 +321,14 @@ impl ProfilePanel {
         let catalog = self.catalog.clone();
         let host_key_preview = self.host_key_preview.clone();
         let local_shells = self.local_shells.clone();
-        egui::Window::new("Profiles and folders")
+        egui::Window::new("SSH 连接与 Profiles")
             .open(&mut open)
             .default_size([760.0, 580.0])
             .resizable(true)
             .show(context, |ui| {
                 ui.label(&self.status);
+                ui.label("1. 新建或选择 SSH 配置，填写名称、主机、用户和认证方式；右侧表单可滚动，保存按钮在底部。");
+                ui.label("2. 密码或私钥口令需单独保存；首次连接先核对并导入主机密钥，然后点击「连接所选 SSH」。");
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
@@ -265,17 +339,28 @@ impl ProfilePanel {
                     if ui.button("Refresh").clicked() {
                         command = Some(ProfileClientCommand::Refresh);
                     }
-                    if ui.button("New Profile").clicked() {
-                        let record = ProfileRecord {
-                            id: ProfileId::new(),
-                            name: String::new(),
-                            kind: ProfileKind::Ssh,
-                            folder_id: None,
-                            tags: BTreeSet::new(),
-                            favorite: false,
-                            terminal: TerminalOverrides::default(),
-                        };
-                        self.select_profile(record);
+                    if ui.button("新建 SSH 配置").clicked() {
+                        self.new_ssh_profile();
+                    }
+                    let selected_saved_ssh = self.selected.and_then(|selected| match selected {
+                        Selected::Profile(id) => catalog.as_ref().and_then(|catalog| {
+                            catalog
+                                .ssh_connections
+                                .iter()
+                                .any(|connection| connection.profile_id == id)
+                                .then_some(id)
+                        }),
+                        Selected::Folder(_) => None,
+                    });
+                    if ui
+                        .add_enabled(
+                            selected_saved_ssh.is_some(),
+                            egui::Button::new("连接所选 SSH"),
+                        )
+                        .clicked()
+                        && let Some(id) = selected_saved_ssh
+                    {
+                        command = Some(ProfileClientCommand::OpenProfile(id));
                     }
                     if ui.button("New folder").clicked() {
                         self.select_folder(ProfileFolder {
@@ -296,7 +381,10 @@ impl ProfilePanel {
                         catalog.defaults.theme
                     ));
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("profile_editor")
+                            .max_height(300.0)
+                            .show(ui, |ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.search)
                                     .hint_text("Search names or tags"),
@@ -1105,5 +1193,129 @@ fn draw_environment_rows(ui: &mut egui::Ui, env: &mut Vec<(String, String)>) {
         .clicked()
     {
         env.push((String::new(), String::new()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProfilePanel, Selected};
+    use crate::profile_connection::{
+        DesktopProfileCatalog, DesktopProfileView, ProfileClientCommand,
+    };
+    use cshell_domain::{
+        ProfileKind, SshAgentBackend, SshAuthMethod, SshConnectionRecord, SshRoute,
+    };
+
+    #[test]
+    fn ssh_entry_opens_a_new_draft_then_keeps_the_saved_profile_selected() {
+        let mut panel = ProfilePanel::default();
+        panel.open_ssh_connections();
+        assert!(panel.open);
+        assert!(panel.pending_ssh_entry);
+
+        let mut view = DesktopProfileView {
+            generation: 1,
+            catalog: Some(DesktopProfileCatalog {
+                revision: 1,
+                defaults: Default::default(),
+                folders: vec![],
+                profiles: vec![],
+                ssh_connections: vec![],
+                local_connections: vec![],
+            }),
+            ..DesktopProfileView::default()
+        };
+        assert!(panel.sync(&view));
+        let draft = panel
+            .profile_draft
+            .as_ref()
+            .unwrap_or_else(|| panic!("SSH entry must create a draft"));
+        assert_eq!(draft.record.kind, ProfileKind::Ssh);
+        let profile = draft.record.clone();
+        assert_eq!(panel.selected, Some(Selected::Profile(profile.id)));
+
+        let catalog = view.catalog.as_mut().unwrap_or_else(|| panic!("catalog"));
+        catalog.revision = 2;
+        catalog.profiles.push(profile.clone());
+        catalog.ssh_connections.push(SshConnectionRecord {
+            profile_id: profile.id,
+            host: "example.test".into(),
+            port: 22,
+            username: "alice".into(),
+            auth_method: SshAuthMethod::Password,
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: SshAgentBackend::Auto,
+            agent_identity: None,
+            route: SshRoute::Direct,
+        });
+        view.generation = 2;
+        assert!(panel.sync(&view));
+        assert_eq!(panel.selected, Some(Selected::Profile(profile.id)));
+        assert_eq!(
+            panel
+                .profile_draft
+                .as_ref()
+                .map(|draft| draft.ssh_host.as_str()),
+            Some("example.test")
+        );
+        panel.open_ssh_connections();
+        assert_eq!(panel.selected, Some(Selected::Profile(profile.id)));
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut draw = |events| {
+            let mut command = None;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_200.0, 760.0),
+                    )),
+                    events,
+                    ..egui::RawInput::default()
+                },
+                |ui| command = panel.draw(ui.ctx()),
+            );
+            output.textures_delta.clear();
+            let update = output
+                .platform_output
+                .accesskit_update
+                .unwrap_or_else(|| panic!("Profile window should be accessible"));
+            (command, update)
+        };
+        let _first = draw(vec![]);
+        let (_, update) = draw(vec![]);
+        let button = update
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button && node.label() == Some("连接所选 SSH")
+            })
+            .map(|(_, node)| node)
+            .unwrap_or_else(|| panic!("saved SSH connect button should be visible"));
+        let bounds = button
+            .bounds()
+            .unwrap_or_else(|| panic!("saved SSH connect button should have bounds"));
+        let position = egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        let (command, _) = draw(vec![
+            egui::Event::PointerMoved(position),
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert!(matches!(command, Some(ProfileClientCommand::OpenProfile(id)) if id == profile.id));
     }
 }

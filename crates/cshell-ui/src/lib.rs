@@ -52,6 +52,7 @@ pub struct WorkbenchViewModel {
 pub enum WorkbenchMenuCommand {
     SearchTerminal,
     Profiles,
+    SshConnections,
     ReconnectNewShell,
     CloseView,
     TerminateSession(SessionId),
@@ -95,6 +96,9 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             });
             ui.separator();
             ui.heading("CShell");
+            if ui.button("SSH 连接").clicked() {
+                model.menu_command = Some(WorkbenchMenuCommand::SshConnections);
+            }
             if ui
                 .add_enabled(
                     model.can_reconnect_ssh,
@@ -933,6 +937,20 @@ mod tests {
         assert_eq!(
             model.menu_command,
             Some(WorkbenchMenuCommand::SearchTerminal)
+        );
+    }
+
+    #[test]
+    fn ssh_connection_entry_is_visible_without_opening_a_menu() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut model = WorkbenchViewModel::default();
+        let first = frame(&context, &mut model, Vec::new());
+        let position = button_center(&first, "SSH 连接");
+        click(&context, &mut model, position);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::SshConnections)
         );
     }
 

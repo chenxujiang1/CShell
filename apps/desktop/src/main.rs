@@ -1654,6 +1654,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                         window.request_redraw();
                     }
+                    Some(WorkbenchMenuCommand::SshConnections) => {
+                        self.profile_panel.open_ssh_connections();
+                        if let Some(profiles) = &self.profiles {
+                            profiles.request(profile_connection::ProfileClientCommand::Refresh);
+                        }
+                        window.request_redraw();
+                    }
                     Some(WorkbenchMenuCommand::Quit) => event_loop.exit(),
                     Some(WorkbenchMenuCommand::ReconnectNewShell) => {
                         if let Some(daemon) = &self.daemon
