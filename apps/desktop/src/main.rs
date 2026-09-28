@@ -4,6 +4,7 @@ mod profile_connection;
 mod profile_panel;
 mod terminal_accessibility;
 mod terminal_search;
+mod ui_fonts;
 mod visual_corpus;
 mod window_e2e;
 mod workspace_connection;
@@ -780,6 +781,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let window = Arc::new(window);
                 self.window_active = true;
                 info!(window_id = ?window.id(), "desktop shell created");
+                ui_fonts::install(&self.egui_context);
                 let mut egui_state = egui_winit::State::new(
                     self.egui_context.clone(),
                     egui::ViewportId::ROOT,
