@@ -179,6 +179,7 @@ pub struct ProfilePanel {
     search: String,
     selected: Option<Selected>,
     pending_ssh_entry: bool,
+    pending_new_ssh: bool,
     folder_draft: Option<ProfileFolder>,
     profile_draft: Option<ProfileDraft>,
     import_path: String,
@@ -201,6 +202,7 @@ impl Default for ProfilePanel {
             search: String::new(),
             selected: None,
             pending_ssh_entry: false,
+            pending_new_ssh: false,
             folder_draft: None,
             profile_draft: None,
             import_path: String::new(),
@@ -210,8 +212,33 @@ impl Default for ProfilePanel {
 }
 
 impl ProfilePanel {
+    pub fn open_new_ssh_profile(&mut self) {
+        self.open = true;
+        self.pending_ssh_entry = false;
+        self.pending_new_ssh = self.catalog.is_none();
+        if !self.pending_new_ssh {
+            self.new_ssh_profile();
+        }
+    }
+
+    pub fn open_profile_editor(&mut self, id: ProfileId) -> bool {
+        let Some(profile) = self.catalog.as_ref().and_then(|catalog| {
+            catalog
+                .profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .cloned()
+        }) else {
+            return false;
+        };
+        self.open = true;
+        self.select_profile(profile);
+        true
+    }
+
     pub fn open_ssh_connections(&mut self) {
         self.open = true;
+        self.pending_new_ssh = false;
         if self.catalog.is_none() {
             self.pending_ssh_entry = true;
         } else {
@@ -279,7 +306,10 @@ impl ProfilePanel {
         self.host_key_preview = view.host_key_preview.clone();
         self.error = view.error.clone();
         self.status = view.status.clone();
-        if self.pending_ssh_entry && self.catalog.is_some() {
+        if self.pending_new_ssh && self.catalog.is_some() {
+            self.pending_new_ssh = false;
+            self.new_ssh_profile();
+        } else if self.pending_ssh_entry && self.catalog.is_some() {
             self.select_ssh_entry();
         } else if catalog_changed {
             match previous_selection {
@@ -321,22 +351,21 @@ impl ProfilePanel {
         let catalog = self.catalog.clone();
         let host_key_preview = self.host_key_preview.clone();
         let local_shells = self.local_shells.clone();
-        egui::Window::new("SSH 连接与 Profiles")
+        egui::Window::new("连接管理")
             .open(&mut open)
             .default_size([760.0, 580.0])
             .resizable(true)
             .show(context, |ui| {
                 ui.label(&self.status);
-                ui.label("1. 新建或选择 SSH 配置，填写名称、主机、用户和认证方式；右侧表单可滚动，保存按钮在底部。");
-                ui.label("2. 密码或私钥口令需单独保存；首次连接先核对并导入主机密钥，然后点击「连接所选 SSH」。");
+                ui.label("填写连接信息并保存；首次连接前需核对服务器指纹。");
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
                 if let Some(error) = &self.launch_error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("Profile launch: {error}"));
+                    ui.colored_label(egui::Color32::LIGHT_RED, format!("连接失败：{error}"));
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Refresh").clicked() {
+                    if ui.button("刷新").clicked() {
                         command = Some(ProfileClientCommand::Refresh);
                     }
                     if ui.button("新建 SSH 配置").clicked() {
@@ -362,7 +391,7 @@ impl ProfilePanel {
                     {
                         command = Some(ProfileClientCommand::OpenProfile(id));
                     }
-                    if ui.button("New folder").clicked() {
+                    if ui.button("新建文件夹").clicked() {
                         self.select_folder(ProfileFolder {
                             id: FolderId::new(),
                             name: String::new(),
@@ -373,26 +402,16 @@ impl ProfilePanel {
                 });
                 ui.separator();
                 if let Some(catalog) = &catalog {
-                    ui.label(format!(
-                        "Catalog revision {} · {} folders · {} Profiles · default theme {}",
-                        catalog.revision,
-                        catalog.folders.len(),
-                        catalog.profiles.len(),
-                        catalog.defaults.theme
-                    ));
                     ui.horizontal(|ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("profile_editor")
-                            .max_height(300.0)
-                            .show(ui, |ui| {
+                        ui.vertical(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.search)
-                                    .hint_text("Search names or tags"),
+                                    .hint_text("搜索名称或标签"),
                             );
                             egui::ScrollArea::vertical()
                                 .max_height(250.0)
                                 .show(ui, |ui| {
-                                    ui.heading("Folders");
+                                    ui.heading("文件夹");
                                     for folder in &catalog.folders {
                                         if !matches_search(&folder.name, &self.search) {
                                             continue;
@@ -407,7 +426,7 @@ impl ProfilePanel {
                                             self.select_folder(folder.clone());
                                         }
                                     }
-                                    ui.heading("Profiles");
+                                    ui.heading("连接配置");
                                     for profile in &catalog.profiles {
                                         if !matches_search(&profile.name, &self.search)
                                             && !profile
@@ -436,15 +455,18 @@ impl ProfilePanel {
                                 });
                         });
                         ui.separator();
-                        ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("profile_editor")
+                            .max_height(420.0)
+                            .show(ui, |ui| {
                             if let Some(draft) = &mut self.profile_draft {
-                                ui.heading("Profile editor");
+                                ui.heading("编辑连接配置");
                                 ui.horizontal(|ui| {
-                                    ui.label("Name");
+                                    ui.label("名称");
                                     ui.text_edit_singleline(&mut draft.record.name);
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label("Kind");
+                                    ui.label("类型");
                                     ui.selectable_value(
                                         &mut draft.record.kind,
                                         ProfileKind::Ssh,
@@ -453,34 +475,36 @@ impl ProfilePanel {
                                     ui.selectable_value(
                                         &mut draft.record.kind,
                                         ProfileKind::Local,
-                                        "Local",
+                                        "本地",
                                     );
                                 });
-                                folder_picker(
-                                    ui,
-                                    "Folder",
-                                    &mut draft.record.folder_id,
-                                    &catalog.folders,
-                                    None,
-                                );
-                                ui.checkbox(&mut draft.record.favorite, "Favorite");
-                                ui.horizontal(|ui| {
-                                    ui.label("Tags");
-                                    ui.text_edit_singleline(&mut draft.tags);
+                                ui.collapsing("分类与终端设置", |ui| {
+                                    folder_picker(
+                                        ui,
+                                        "文件夹",
+                                        &mut draft.record.folder_id,
+                                        &catalog.folders,
+                                        None,
+                                    );
+                                    ui.checkbox(&mut draft.record.favorite, "收藏");
+                                    ui.horizontal(|ui| {
+                                        ui.label("标签");
+                                        ui.text_edit_singleline(&mut draft.tags);
+                                    });
+                                    terminal_fields(ui, &mut draft.record.terminal);
                                 });
-                                terminal_fields(ui, &mut draft.record.terminal);
                                 if draft.record.kind == ProfileKind::Ssh {
                                     ui.horizontal(|ui| {
-                                        ui.label("Host");
+                                        ui.label("主机");
                                         ui.text_edit_singleline(&mut draft.ssh_host);
                                     });
                                     ui.horizontal(|ui| {
-                                        ui.label("Port");
+                                        ui.label("端口");
                                         ui.add(
                                             egui::DragValue::new(&mut draft.ssh_port)
                                                 .range(1..=65535),
                                         );
-                                        ui.label("User");
+                                        ui.label("用户名");
                                         ui.text_edit_singleline(&mut draft.ssh_username);
                                     });
                                     let saved_target = catalog.profiles.iter().any(|item| item.id == draft.record.id)
@@ -1205,6 +1229,34 @@ mod tests {
     use cshell_domain::{
         ProfileKind, SshAgentBackend, SshAuthMethod, SshConnectionRecord, SshRoute,
     };
+
+    #[test]
+    fn new_ssh_entry_survives_catalog_loading() {
+        let mut panel = ProfilePanel::default();
+        panel.open_new_ssh_profile();
+        assert!(panel.open);
+        assert!(panel.pending_new_ssh);
+        assert!(panel.profile_draft.is_none());
+
+        let view = DesktopProfileView {
+            generation: 1,
+            catalog: Some(DesktopProfileCatalog {
+                revision: 1,
+                defaults: Default::default(),
+                folders: vec![],
+                profiles: vec![],
+                ssh_connections: vec![],
+                local_connections: vec![],
+            }),
+            ..DesktopProfileView::default()
+        };
+        assert!(panel.sync(&view));
+        assert!(!panel.pending_new_ssh);
+        assert_eq!(
+            panel.profile_draft.as_ref().map(|draft| draft.record.kind),
+            Some(ProfileKind::Ssh)
+        );
+    }
 
     #[test]
     fn ssh_entry_opens_a_new_draft_then_keeps_the_saved_profile_selected() {

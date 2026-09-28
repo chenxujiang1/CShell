@@ -899,6 +899,36 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if let Some(view) = self.profiles.as_ref().map(DesktopProfileConnection::view) {
             redraw_needed |= self.update_profile_themes(&view);
             redraw_needed |= self.profile_panel.sync(&view);
+            let mut saved_ssh_profiles: Vec<_> =
+                view.catalog.as_ref().map_or_else(Vec::new, |catalog| {
+                    catalog
+                        .ssh_connections
+                        .iter()
+                        .filter_map(|connection| {
+                            let profile = catalog
+                                .profiles
+                                .iter()
+                                .find(|profile| profile.id == connection.profile_id)?;
+                            Some(cshell_ui::SavedSshProfileViewModel {
+                                id: profile.id,
+                                name: profile.name.clone(),
+                                target: format!(
+                                    "{}@{}:{}",
+                                    connection.username, connection.host, connection.port
+                                ),
+                                favorite: profile.favorite,
+                            })
+                        })
+                        .collect()
+                });
+            saved_ssh_profiles.sort_by(|left, right| {
+                right
+                    .favorite
+                    .cmp(&left.favorite)
+                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            });
+            redraw_needed |= self.view_model.saved_ssh_profiles != saved_ssh_profiles;
+            self.view_model.saved_ssh_profiles = saved_ssh_profiles;
         }
         if let Some(daemon) = &self.daemon
             && (self.current_workspace_tab.is_none()
@@ -1662,6 +1692,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             profiles.request(profile_connection::ProfileClientCommand::Refresh);
                         }
                         window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::NewSshProfile) => {
+                        self.profile_panel.open_new_ssh_profile();
+                        if let Some(profiles) = &self.profiles {
+                            profiles.request(profile_connection::ProfileClientCommand::Refresh);
+                        }
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::OpenSavedProfile(id)) => {
+                        profile_command =
+                            Some(profile_connection::ProfileClientCommand::OpenProfile(id));
+                    }
+                    Some(WorkbenchMenuCommand::EditSavedProfile(id)) => {
+                        if self.profile_panel.open_profile_editor(id) {
+                            window.request_redraw();
+                        }
                     }
                     Some(WorkbenchMenuCommand::Quit) => event_loop.exit(),
                     Some(WorkbenchMenuCommand::ReconnectNewShell) => {

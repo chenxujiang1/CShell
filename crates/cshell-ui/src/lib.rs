@@ -1,8 +1,8 @@
 //! Egui workbench controls. Terminal cells are never represented as egui widgets.
 
 use cshell_domain::{
-    PaneId, SessionId, SplitAxis, TabGroupId, TabId, WorkspaceDocument, WorkspacePaneContent,
-    WorkspaceWindowId,
+    PaneId, ProfileId, SessionId, SplitAxis, TabGroupId, TabId, WorkspaceDocument,
+    WorkspacePaneContent, WorkspaceWindowId,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10,6 +10,14 @@ pub struct SessionTabViewModel {
     pub id: SessionId,
     pub title: String,
     pub connected: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavedSshProfileViewModel {
+    pub id: ProfileId,
+    pub name: String,
+    pub target: String,
+    pub favorite: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +37,8 @@ pub struct WorkspacePaneView {
 #[derive(Debug, Default)]
 pub struct WorkbenchViewModel {
     pub sessions: Vec<SessionTabViewModel>,
+    pub saved_ssh_profiles: Vec<SavedSshProfileViewModel>,
+    pub profile_search: String,
     pub tabs: Vec<WorkspaceTabViewModel>,
     pub selected_tab: Option<TabId>,
     pub workspace_document: Option<WorkspaceDocument>,
@@ -53,6 +63,9 @@ pub enum WorkbenchMenuCommand {
     SearchTerminal,
     Profiles,
     SshConnections,
+    NewSshProfile,
+    OpenSavedProfile(ProfileId),
+    EditSavedProfile(ProfileId),
     ReconnectNewShell,
     CloseView,
     TerminateSession(SessionId),
@@ -80,7 +93,7 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                     model.menu_command = Some(WorkbenchMenuCommand::SearchTerminal);
                     ui.close();
                 }
-                if ui.button("管理 Profiles").clicked() {
+                if ui.button("管理连接配置").clicked() {
                     model.menu_command = Some(WorkbenchMenuCommand::Profiles);
                     ui.close();
                 }
@@ -99,43 +112,45 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             if ui.button("SSH 连接").clicked() {
                 model.menu_command = Some(WorkbenchMenuCommand::SshConnections);
             }
-            if ui
-                .add_enabled(
-                    model.can_reconnect_ssh,
-                    egui::Button::new("Reconnect · New Shell"),
-                )
-                .clicked()
-            {
-                model.menu_command = Some(WorkbenchMenuCommand::ReconnectNewShell);
-            }
-            let status = if model.daemon_connected {
-                "terminal connected"
-            } else {
-                "terminal disconnected"
-            };
-            ui.label(status);
-            if ui
-                .add_enabled(model.daemon_connected, egui::Button::new("Close view"))
-                .clicked()
-            {
-                model.menu_command = Some(WorkbenchMenuCommand::CloseView);
-            }
-            if ui
-                .add_enabled(
-                    model.daemon_connected,
-                    egui::Button::new("Terminate process"),
-                )
-                .clicked()
-            {
-                model.terminate_target = model.selected;
-                model.confirm_terminate = model.terminate_target.is_some();
-            }
-            if !model.daemon_status_detail.is_empty() {
-                ui.label(&model.daemon_status_detail);
-            }
-            if let Some(warning) = &model.input_warning {
-                ui.colored_label(egui::Color32::LIGHT_RED, warning);
-            }
+            ui.menu_button("会话", |ui| {
+                if ui
+                    .add_enabled(
+                        model.can_reconnect_ssh,
+                        egui::Button::new("重新连接并打开新 Shell"),
+                    )
+                    .clicked()
+                {
+                    model.menu_command = Some(WorkbenchMenuCommand::ReconnectNewShell);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(model.daemon_connected, egui::Button::new("关闭当前视图"))
+                    .clicked()
+                {
+                    model.menu_command = Some(WorkbenchMenuCommand::CloseView);
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(model.daemon_connected, egui::Button::new("终止会话进程"))
+                    .clicked()
+                {
+                    model.terminate_target = model.selected;
+                    model.confirm_terminate = model.terminate_target.is_some();
+                    ui.close();
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let status = if model.daemon_connected {
+                    "● 终端就绪"
+                } else {
+                    "○ 终端未连接"
+                };
+                ui.label(status).on_hover_text(&model.daemon_status_detail);
+                if let Some(warning) = &model.input_warning {
+                    ui.colored_label(egui::Color32::LIGHT_RED, warning);
+                }
+            });
         });
     });
 
@@ -163,19 +178,68 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
 
     egui::Panel::left("session_list")
         .resizable(true)
-        .default_size(220.0)
+        .default_size(248.0)
         .show(ui, |ui| {
-            ui.heading("Sessions");
-            for session in &model.sessions {
-                let selected = model.selected == Some(session.id);
-                let state = if session.connected { "[+]" } else { "[-]" };
-                if ui
-                    .selectable_label(selected, format!("{state} {}", session.title))
-                    .clicked()
-                {
-                    model.selected = Some(session.id);
-                }
+            ui.heading("连接");
+            if ui.button("＋ 新建 SSH").clicked() {
+                model.menu_command = Some(WorkbenchMenuCommand::NewSshProfile);
             }
+            ui.add(
+                egui::TextEdit::singleline(&mut model.profile_search).hint_text("搜索已保存连接"),
+            );
+            ui.separator();
+            ui.label("已保存的 SSH 连接");
+            let search = model.profile_search.trim().to_lowercase();
+            let mut visible = 0;
+            egui::ScrollArea::vertical()
+                .id_salt("saved_ssh_profiles")
+                .show(ui, |ui| {
+                    for profile in &model.saved_ssh_profiles {
+                        if !search.is_empty()
+                            && !profile.name.to_lowercase().contains(&search)
+                            && !profile.target.to_lowercase().contains(&search)
+                        {
+                            continue;
+                        }
+                        visible += 1;
+                        let name = if profile.favorite {
+                            format!("★ {}", profile.name)
+                        } else {
+                            profile.name.clone()
+                        };
+                        ui.horizontal(|ui| {
+                            if ui.button("连接").on_hover_text(&profile.target).clicked() {
+                                model.menu_command =
+                                    Some(WorkbenchMenuCommand::OpenSavedProfile(profile.id));
+                            }
+                            ui.label(name);
+                            if ui.small_button("编辑").clicked() {
+                                model.menu_command =
+                                    Some(WorkbenchMenuCommand::EditSavedProfile(profile.id));
+                            }
+                        });
+                        ui.small(&profile.target);
+                    }
+                    if visible == 0 {
+                        ui.weak(if search.is_empty() {
+                            "还没有保存的 SSH 连接"
+                        } else {
+                            "没有匹配的连接"
+                        });
+                    }
+                    ui.separator();
+                    ui.label("当前会话");
+                    for session in &model.sessions {
+                        let selected = model.selected == Some(session.id);
+                        let state = if session.connected { "●" } else { "○" };
+                        if ui
+                            .selectable_label(selected, format!("{state} {}", session.title))
+                            .clicked()
+                        {
+                            model.selected = Some(session.id);
+                        }
+                    }
+                });
         });
 
     egui::Panel::top("workspace_tabs").show(ui, |ui| {
@@ -355,7 +419,7 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
     if model.about_open {
         let modal = egui::Modal::new(egui::Id::new("cshell-about-dialog")).show(ui.ctx(), |ui| {
             ui.heading("关于 CShell");
-            ui.label("跨平台 SSH/SFTP 终端 · Phase 0 工程原型");
+            ui.label("SSH 终端与会话管理");
             ui.label(format!("版本 {}", env!("CARGO_PKG_VERSION")));
             ui.add_space(8.0);
             if ui.button("关闭").clicked() {
@@ -951,6 +1015,47 @@ mod tests {
         assert_eq!(
             model.menu_command,
             Some(WorkbenchMenuCommand::SshConnections)
+        );
+    }
+
+    #[test]
+    fn saved_ssh_connections_can_be_opened_from_the_workbench() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let id = cshell_domain::ProfileId::new();
+        let mut model = WorkbenchViewModel {
+            saved_ssh_profiles: vec![super::SavedSshProfileViewModel {
+                id,
+                name: "Production".into(),
+                target: "alice@example.test:22".into(),
+                favorite: false,
+            }],
+            ..WorkbenchViewModel::default()
+        };
+        let first = frame(&context, &mut model, Vec::new());
+        let position = button_center(&first, "连接");
+        click(&context, &mut model, position);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::OpenSavedProfile(id))
+        );
+
+        model.menu_command = None;
+        let update = frame(&context, &mut model, Vec::new());
+        let position = button_center(&update, "编辑");
+        click(&context, &mut model, position);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::EditSavedProfile(id))
+        );
+
+        model.menu_command = None;
+        let update = frame(&context, &mut model, Vec::new());
+        let position = button_center(&update, "＋ 新建 SSH");
+        click(&context, &mut model, position);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::NewSshProfile)
         );
     }
 
