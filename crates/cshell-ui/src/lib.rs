@@ -56,6 +56,7 @@ pub enum WorkbenchMenuCommand {
     CloseView,
     TerminateSession(SessionId),
     NewWorkspaceTab,
+    CloneWorkspaceSession(TabId),
     NewWorkspaceWindow,
     MoveTabToWindow(TabId, WorkspaceWindowId),
     OpenWorkspaceTab(TabId),
@@ -179,6 +180,17 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                 if ui.button("+ New tab").clicked() {
                     model.menu_command = Some(WorkbenchMenuCommand::NewWorkspaceTab);
                 }
+                if let Some(tab) = model
+                    .tabs
+                    .iter()
+                    .find(|tab| Some(tab.id) == model.selected_tab)
+                    && ui
+                        .add_enabled(tab.session_id.is_some(), egui::Button::new("Clone session"))
+                        .on_hover_text("Start a new process from this tab's saved Profile")
+                        .clicked()
+                {
+                    model.menu_command = Some(WorkbenchMenuCommand::CloneWorkspaceSession(tab.id));
+                }
                 for (label, axis) in [
                     ("Split right", SplitAxis::Horizontal),
                     ("Split down", SplitAxis::Vertical),
@@ -202,6 +214,18 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                         model.selected_tab = Some(tab.id);
                     }
                     response.context_menu(|ui| {
+                        if ui
+                            .add_enabled(
+                                tab.session_id.is_some(),
+                                egui::Button::new("Clone session"),
+                            )
+                            .on_hover_text("Start a new process from this tab's saved Profile")
+                            .clicked()
+                        {
+                            model.menu_command =
+                                Some(WorkbenchMenuCommand::CloneWorkspaceSession(tab.id));
+                            ui.close();
+                        }
                         if ui.button("Move left").clicked() {
                             model.menu_command =
                                 Some(WorkbenchMenuCommand::MoveWorkspaceTab(tab.id, -1));
@@ -770,6 +794,38 @@ mod tests {
         assert_eq!(
             model.menu_command,
             Some(WorkbenchMenuCommand::MoveTabToWindow(tab, target))
+        );
+    }
+
+    #[test]
+    fn clone_button_requires_running_tab_and_emits_explicit_command() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let tab = cshell_domain::TabId::new();
+        let mut model = WorkbenchViewModel {
+            selected_tab: Some(tab),
+            tabs: vec![super::WorkspaceTabViewModel {
+                id: tab,
+                title: "Saved".into(),
+                session_id: None,
+            }],
+            ..Default::default()
+        };
+        let _ = frame(&context, &mut model, vec![]);
+        let update = frame(&context, &mut model, vec![]);
+        assert!(
+            update
+                .nodes
+                .iter()
+                .any(|(_, node)| { node.label() == Some("Clone session") && node.is_disabled() })
+        );
+        model.tabs[0].session_id = Some(cshell_domain::SessionId::new());
+        let update = frame(&context, &mut model, vec![]);
+        let clone = button_center(&update, "Clone session");
+        click(&context, &mut model, clone);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::CloneWorkspaceSession(tab))
         );
     }
 

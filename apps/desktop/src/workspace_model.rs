@@ -235,6 +235,36 @@ impl DesktopWorkspace {
         self.select(id);
         Some(id)
     }
+    /// Create an unbound tab next to a running source. The caller must launch a
+    /// fresh process from the copied Profile before binding a SessionId.
+    pub fn clone_session_tab(&mut self, source: TabId) -> Option<TabId> {
+        if self.pending_launch.is_some()
+            || !self.sessions.contains_key(&source)
+            || self.window_of_tab(source) != Some(self.window_id)
+            || self.document.bindings.len() >= cshell_application::MAX_WORKSPACE_TABS
+        {
+            return None;
+        }
+        let binding = self.document.bindings.iter().find(|b| b.tab_id == source)?;
+        let profile_id = binding.profile_id;
+        let title = binding.title.clone();
+        let group = self
+            .document
+            .tab_groups
+            .iter_mut()
+            .find(|g| g.tabs.contains(&source))?;
+        let index = group.tabs.iter().position(|id| *id == source)?;
+        let id = TabId::new();
+        group.tabs.insert(index + 1, id);
+        group.active_tab = Some(id);
+        self.document.bindings.push(WorkspaceBinding {
+            tab_id: id,
+            profile_id,
+            title,
+        });
+        self.select(id);
+        Some(id)
+    }
     pub fn observe(
         &mut self,
         session: SessionId,
@@ -470,6 +500,44 @@ impl DesktopWorkspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clone_copies_profile_into_adjacent_tab_without_reusing_runtime_session() {
+        let mut workspace = DesktopWorkspace::default();
+        let profile = ProfileId::new();
+        let source = workspace
+            .add(Some(profile), "Saved SSH".into())
+            .unwrap_or_else(|| panic!("source"));
+        let other = workspace
+            .add(None, "Other".into())
+            .unwrap_or_else(|| panic!("other"));
+        let running = SessionId::new();
+        workspace.sessions.insert(source, running);
+        let clone = workspace
+            .clone_session_tab(source)
+            .unwrap_or_else(|| panic!("clone"));
+        assert_ne!(clone, source);
+        assert_eq!(workspace.sessions.get(&source), Some(&running));
+        assert!(!workspace.sessions.contains_key(&clone));
+        assert_eq!(workspace.active(), Some(clone));
+        let group = &workspace.document.tab_groups[0];
+        assert_eq!(group.tabs, vec![source, clone, other]);
+        let binding = workspace
+            .document
+            .bindings
+            .iter()
+            .find(|b| b.tab_id == clone)
+            .unwrap_or_else(|| panic!("binding"));
+        assert_eq!(binding.profile_id, Some(profile));
+        assert_eq!(binding.title, "Saved SSH");
+        assert!(cshell_application::validate_workspace(&workspace.document).is_ok());
+        workspace.pending_launch = Some(clone);
+        assert!(workspace.clone_session_tab(source).is_none());
+        workspace.pending_launch = None;
+        assert!(workspace.clone_session_tab(other).is_none());
+        let restored =
+            DesktopWorkspace::restore(workspace.document.clone()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(restored.sessions.is_empty());
+    }
     #[test]
     fn windows_move_live_bindings_without_persisting_runtime_sessions() {
         let mut workspace = DesktopWorkspace::default();

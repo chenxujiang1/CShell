@@ -339,10 +339,13 @@ impl DesktopApp {
     }
 
     fn activate_workspace_tab(&mut self, tab: cshell_domain::TabId) {
+        if self.workspace.pending_launch.is_some() {
+            self.view_model.selected_tab = self.workspace.active();
+            return;
+        }
         if self.workspace.window_of_tab(tab) != Some(self.workspace.window_id) {
             return;
         }
-        self.workspace.pending_launch = None;
         self.switch_tab_view(tab);
         self.workspace.select(tab);
         self.view_model.selected = self.workspace.sessions.get(&tab).copied();
@@ -443,6 +446,9 @@ impl DesktopApp {
     }
 
     fn close_workspace_tab(&mut self, tab: cshell_domain::TabId) {
+        if self.workspace.pending_launch.is_some() {
+            return;
+        }
         if let Some(id) = self.workspace.sessions.get(&tab).copied() {
             if self
                 .daemon
@@ -1545,35 +1551,39 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 } else if self.view_model.selected != selected_before_draw
                     && let Some(id) = self.view_model.selected
                 {
-                    let existing = self
-                        .workspace
-                        .sessions
-                        .iter()
-                        .find(|(tab, value)| {
-                            **value == id
-                                && self.workspace.window_of_tab(**tab)
-                                    == Some(self.workspace.window_id)
-                        })
-                        .map(|(tab, _)| *tab);
-                    let tab = existing.or_else(|| {
-                        let summary = self
-                            .daemon
-                            .as_ref()?
-                            .view()
-                            .sessions?
-                            .into_iter()
-                            .find(|s| s.session_id == id.as_uuid().as_bytes())?;
-                        let profile = summary
-                            .profile_id
-                            .as_deref()
-                            .and_then(|b| <[u8; 16]>::try_from(b).ok())
-                            .map(cshell_domain::ProfileId::from_bytes);
-                        let tab = self.workspace.add(profile, summary.title)?;
-                        self.workspace.sessions.insert(tab, id);
-                        Some(tab)
-                    });
-                    if let Some(tab) = tab {
-                        self.activate_workspace_tab(tab);
+                    if self.workspace.pending_launch.is_some() {
+                        self.view_model.selected = selected_before_draw;
+                    } else {
+                        let existing = self
+                            .workspace
+                            .sessions
+                            .iter()
+                            .find(|(tab, value)| {
+                                **value == id
+                                    && self.workspace.window_of_tab(**tab)
+                                        == Some(self.workspace.window_id)
+                            })
+                            .map(|(tab, _)| *tab);
+                        let tab = existing.or_else(|| {
+                            let summary = self
+                                .daemon
+                                .as_ref()?
+                                .view()
+                                .sessions?
+                                .into_iter()
+                                .find(|s| s.session_id == id.as_uuid().as_bytes())?;
+                            let profile = summary
+                                .profile_id
+                                .as_deref()
+                                .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                                .map(cshell_domain::ProfileId::from_bytes);
+                            let tab = self.workspace.add(profile, summary.title)?;
+                            self.workspace.sessions.insert(tab, id);
+                            Some(tab)
+                        });
+                        if let Some(tab) = tab {
+                            self.activate_workspace_tab(tab);
+                        }
                     }
                 }
                 if self.view_model.about_open {
@@ -1677,6 +1687,37 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             self.refresh_workspace_tabs();
                         }
                     }
+                    Some(WorkbenchMenuCommand::CloneWorkspaceSession(source)) => {
+                        if self.workspace_loaded
+                            && self.workspace.writable
+                            && self.workspace.pending_launch.is_none()
+                            && let Some(tab) = self.workspace.clone_session_tab(source)
+                        {
+                            let profile = self
+                                .workspace
+                                .document
+                                .bindings
+                                .iter()
+                                .find(|binding| binding.tab_id == tab)
+                                .and_then(|binding| binding.profile_id);
+                            self.switch_tab_view(tab);
+                            self.view_model.selected = None;
+                            self.pending_tab = None;
+                            self.workspace.pending_launch = Some(tab);
+                            let accepted = self.daemon.as_ref().is_some_and(|daemon| {
+                                profile.map_or_else(
+                                    || daemon.new_default_shell(),
+                                    |id| daemon.open_profile(id),
+                                )
+                            });
+                            if !accepted {
+                                self.workspace.pending_launch = None;
+                                self.view_model.workspace_status =
+                                    "Could not start cloned session; open this tab to retry".into();
+                            }
+                            self.refresh_workspace_tabs();
+                        }
+                    }
                     Some(WorkbenchMenuCommand::OpenWorkspaceTab(tab)) => {
                         if self.workspace.pending_launch.is_none()
                             && let Some(binding) = self
@@ -1702,10 +1743,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     Some(WorkbenchMenuCommand::CloseWorkspaceTab(tab)) => {
                         self.close_workspace_tab(tab);
                     }
-                    Some(WorkbenchMenuCommand::MoveWorkspaceTab(tab, delta)) => {
+                    Some(WorkbenchMenuCommand::MoveWorkspaceTab(tab, delta))
+                        if self.workspace.pending_launch.is_none() =>
+                    {
                         self.workspace.move_tab(tab, delta);
                         self.refresh_workspace_tabs();
                     }
+                    Some(WorkbenchMenuCommand::MoveWorkspaceTab(_, _)) => {}
                     None => {}
                 }
                 if let Some(command) = profile_command {
@@ -2845,6 +2889,39 @@ mod tests {
         event::ElementState,
         keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    #[test]
+    fn pending_clone_keeps_launch_tab_selected_until_new_session_is_bound() {
+        let mut app = super::DesktopApp::default();
+        let source = app
+            .workspace
+            .add(None, "Source".into())
+            .unwrap_or_else(|| panic!("source"));
+        app.workspace
+            .sessions
+            .insert(source, cshell_domain::SessionId::new());
+        app.switch_tab_view(source);
+        let clone = app
+            .workspace
+            .clone_session_tab(source)
+            .unwrap_or_else(|| panic!("clone"));
+        app.switch_tab_view(clone);
+        app.workspace.pending_launch = Some(clone);
+        app.view_model.selected_tab = Some(source);
+        app.activate_workspace_tab(source);
+        assert_eq!(app.current_workspace_tab, Some(clone));
+        assert_eq!(app.workspace.active(), Some(clone));
+        assert_eq!(app.view_model.selected_tab, Some(clone));
+        app.close_workspace_tab(clone);
+        assert!(
+            app.workspace
+                .document
+                .bindings
+                .iter()
+                .any(|b| b.tab_id == clone)
+        );
+        assert_eq!(app.workspace.pending_launch, Some(clone));
+    }
 
     #[test]
     fn hidden_tab_receives_its_pending_log_reflow_and_closed_tab_cache_is_discarded() {
