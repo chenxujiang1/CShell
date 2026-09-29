@@ -177,7 +177,7 @@ pub fn search_terminal_snapshot(
         let Some(cells) = snapshot.row(row) else {
             continue;
         };
-        let (text, byte_columns) = searchable_row(cells);
+        let (text, byte_start_columns, byte_end_columns) = searchable_row(cells);
         for matched in matcher.find_iter(&text) {
             if matched.is_empty() {
                 return Err(TerminalInteractionError::EmptySearchRegexMatch);
@@ -187,10 +187,10 @@ pub fn search_terminal_snapshot(
             if options.whole_word && !is_whole_word(&text, byte_start, byte_end) {
                 continue;
             }
-            let Some(&start_column) = byte_columns.get(byte_start) else {
+            let Some(&start_column) = byte_start_columns.get(byte_start) else {
                 continue;
             };
-            let Some(&end_column) = byte_columns.get(byte_end.saturating_sub(1)) else {
+            let Some(&end_column) = byte_end_columns.get(byte_end.saturating_sub(1)) else {
                 continue;
             };
             if matches.len() == MAX_TERMINAL_SEARCH_MATCHES {
@@ -286,29 +286,27 @@ fn snap_wide_point(snapshot: &FrameSnapshot, point: TerminalCellPoint) -> Termin
     }
 }
 
-fn searchable_row(cells: &[Cell]) -> (String, Vec<u16>) {
+fn searchable_row(cells: &[Cell]) -> (String, Vec<u16>, Vec<u16>) {
     let mut text = String::new();
-    let mut byte_columns = Vec::new();
+    let mut byte_start_columns = Vec::new();
+    let mut byte_end_columns = Vec::new();
     for (column, cell) in cells.iter().enumerate() {
         if is_spacer(cell) {
             continue;
         }
         let source: String = cell.characters().collect();
+        let start_column = column.min(usize::from(u16::MAX)) as u16;
         let end_column = if cell.width == CellWidth::Wide {
             column.saturating_add(1)
         } else {
             column
         }
         .min(usize::from(u16::MAX)) as u16;
-        byte_columns.extend(std::iter::repeat_n(end_column, source.len()));
-        if let Some(first) = byte_columns.len().checked_sub(source.len())
-            && !source.is_empty()
-        {
-            byte_columns[first] = column.min(usize::from(u16::MAX)) as u16;
-        }
+        byte_start_columns.extend(std::iter::repeat_n(start_column, source.len()));
+        byte_end_columns.extend(std::iter::repeat_n(end_column, source.len()));
         text.push_str(&source);
     }
-    (text, byte_columns)
+    (text, byte_start_columns, byte_end_columns)
 }
 
 fn is_whole_word(text: &str, start: usize, end: usize) -> bool {
@@ -445,6 +443,14 @@ mod tests {
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].start.column, 1);
         assert_eq!(result.matches[0].end.column, 3);
+
+        // A match inside a wide cell must cover the visible glyph and spacer.
+        let combining =
+            search_terminal_snapshot(&frame, "\u{fe0f}", TerminalSearchOptions::default())
+                .unwrap_or_else(|error| panic!("combining search must be valid: {error}"));
+        assert_eq!(combining.matches.len(), 1);
+        assert_eq!(combining.matches[0].start.column, 1);
+        assert_eq!(combining.matches[0].end.column, 2);
     }
 
     #[test]
