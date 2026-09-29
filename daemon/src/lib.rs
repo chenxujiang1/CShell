@@ -8,6 +8,7 @@ mod ipc_server;
 mod local_session;
 mod session_ipc;
 mod session_registry;
+mod sftp_ipc;
 mod ssh_route;
 mod ssh_session;
 

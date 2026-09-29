@@ -63,6 +63,7 @@ pub enum WorkbenchMenuCommand {
     SearchTerminal,
     Profiles,
     SshConnections,
+    SftpFiles,
     NewSshProfile,
     OpenSavedProfile(ProfileId),
     EditSavedProfile(ProfileId),
@@ -111,6 +112,12 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
             ui.heading("CShell");
             if ui.button("SSH 连接").clicked() {
                 model.menu_command = Some(WorkbenchMenuCommand::SshConnections);
+            }
+            if ui
+                .add_enabled(model.selected.is_some(), egui::Button::new("SFTP 文件"))
+                .clicked()
+            {
+                model.menu_command = Some(WorkbenchMenuCommand::SftpFiles);
             }
             ui.menu_button("会话", |ui| {
                 if ui

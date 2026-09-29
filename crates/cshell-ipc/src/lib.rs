@@ -6,6 +6,7 @@ mod handshake;
 mod message;
 mod profile;
 mod replica;
+mod sftp;
 mod subscription;
 mod workspace;
 pub use workspace::*;
@@ -39,6 +40,10 @@ pub use message::{
 };
 pub use replica::{
     ApplyResult, ReplicaError, ReplicaState, TerminalReplicaError, TerminalReplicaState,
+};
+pub use sftp::{
+    MAX_SFTP_DIRECTORY_ENTRIES, MAX_SFTP_PATH_BYTES, SftpDirectoryEntry, SftpOperation,
+    SftpRequest, SftpResponse, SftpStatus, SftpTransfer, SftpTransferState,
 };
 pub use subscription::{ClientFrameUpdate, SubscriptionClientError, TerminalSubscriptionReplica};
 

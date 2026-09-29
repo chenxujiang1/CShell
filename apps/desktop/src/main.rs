@@ -2,6 +2,8 @@ mod cursor_blink;
 mod daemon_connection;
 mod profile_connection;
 mod profile_panel;
+mod sftp_connection;
+mod sftp_panel;
 mod terminal_accessibility;
 mod terminal_search;
 mod ui_fonts;
@@ -27,6 +29,8 @@ use daemon_connection::{
 };
 use profile_connection::DesktopProfileConnection;
 use profile_panel::ProfilePanel;
+use sftp_connection::DesktopSftpConnection;
+use sftp_panel::SftpPanel;
 use std::error::Error;
 use std::sync::Arc;
 use terminal_search::{TerminalSearchRequest, TerminalSearchWorker};
@@ -70,6 +74,9 @@ struct DesktopApp {
     daemon: Option<DesktopDaemonConnection>,
     profiles: Option<DesktopProfileConnection>,
     profile_panel: ProfilePanel,
+    sftp: Option<DesktopSftpConnection>,
+    sftp_panel: SftpPanel,
+    last_sftp_generation: Option<u64>,
     pending_tab: Option<SessionId>,
     workspace: workspace_model::DesktopWorkspace,
     workspace_connection: Option<workspace_connection::WorkspaceConnection>,
@@ -853,6 +860,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = std::time::Instant::now();
         let mut redraw_needed = self.sync_workspace();
+        if self.sftp_panel.open {
+            let generation = self.sftp.as_ref().map(DesktopSftpConnection::generation);
+            if self.last_sftp_generation != generation {
+                self.last_sftp_generation = generation;
+                redraw_needed = true;
+            }
+        }
         while let Some(completed) = self
             .log_reflow
             .as_ref()
@@ -1501,11 +1515,17 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let mut confirm_paste = false;
                 let mut cancel_paste = false;
                 let mut profile_command = None;
+                let mut sftp_command = None;
+                let sftp_view = self.sftp.as_ref().map(DesktopSftpConnection::view);
+                let sftp_session = self.active_terminal_session_id();
                 let selected_before_draw = self.view_model.selected;
                 let tab_before_draw = self.view_model.selected_tab;
                 let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
                     profile_command = self.profile_panel.draw(ui.ctx());
+                    sftp_command = self
+                        .sftp_panel
+                        .draw(ui.ctx(), sftp_session, sftp_view.as_ref());
                     if let Some(state) = scrollbar_state {
                         scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
                     }
@@ -1687,6 +1707,15 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         self.profile_panel.open = true;
                         if let Some(profiles) = &self.profiles {
                             profiles.request(profile_connection::ProfileClientCommand::Refresh);
+                        }
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::SftpFiles) => {
+                        self.sftp_panel.open = true;
+                        if let (Some(sftp), Some(session_id)) =
+                            (&self.sftp, self.active_terminal_session_id())
+                        {
+                            sftp.request(sftp_connection::SftpClientCommand::Recover(session_id));
                         }
                         window.request_redraw();
                     }
@@ -1893,6 +1922,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             }
                         }
                     }
+                }
+                if let Some(command) = sftp_command
+                    && let Some(sftp) = &self.sftp
+                    && !sftp.request(command)
+                {
+                    self.view_model.input_warning = Some("SFTP 请求队列已满".into());
                 }
                 if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
                     match action {
@@ -2675,6 +2710,7 @@ impl DesktopWindows {
             if let Some(config) = &child.daemon_config {
                 child.daemon = DesktopDaemonConnection::start_idle(config.clone()).ok();
                 child.profiles = DesktopProfileConnection::start(config.clone()).ok();
+                child.sftp = DesktopSftpConnection::start(config.clone()).ok();
             }
             child.terminal_search = TerminalSearchWorker::start().ok();
             child.log_reflow = LogReflowWorker::start().ok();
@@ -2956,6 +2992,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .map(DesktopProfileConnection::start)
         .transpose()?;
+    let sftp = daemon_config
+        .clone()
+        .map(DesktopSftpConnection::start)
+        .transpose()?;
     let workspace_connection = daemon_config
         .clone()
         .map(workspace_connection::WorkspaceConnection::start)
@@ -2966,6 +3006,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         workspace_config,
         workspace_connection,
         profiles,
+        sftp,
         terminal_search: Some(TerminalSearchWorker::start()?),
         ..DesktopApp::default()
     };

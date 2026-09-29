@@ -287,6 +287,13 @@ impl SshSession {
                 .clone(),
         }
     }
+    pub async fn open_sftp(&self) -> Result<cshell_sftp::SftpClient, SshSessionError> {
+        if !self.running() {
+            return Err(SshSessionError::Closed);
+        }
+        Ok(self.client.open_sftp().await?)
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -473,14 +480,18 @@ mod tests {
     use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey};
     use russh::server::{Auth, Msg, Session};
     use russh::{Channel, ChannelId};
+    use russh_sftp::protocol::{
+        Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
+    };
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     #[derive(Default)]
     struct EchoServer {
         channels: HashMap<ChannelId, Channel<Msg>>,
         accepted_public_key: Option<PublicKey>,
+        sftp_state: Arc<Mutex<SftpFixtureState>>,
     }
     impl russh::server::Handler for EchoServer {
         type Error = russh::Error;
@@ -512,6 +523,31 @@ mod tests {
         ) -> Result<(), Self::Error> {
             self.channels.insert(channel.id(), channel);
             reply.accept().await;
+            Ok(())
+        }
+        async fn subsystem_request(
+            &mut self,
+            channel: ChannelId,
+            name: &str,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            if name != "sftp" {
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
+            let Some(channel_stream) = self.channels.remove(&channel) else {
+                session.channel_failure(channel)?;
+                return Ok(());
+            };
+            session.channel_success(channel)?;
+            russh_sftp::server::run(
+                channel_stream.into_stream(),
+                SftpFixture {
+                    listed: false,
+                    state: Arc::clone(&self.sftp_state),
+                },
+            )
+            .await;
             Ok(())
         }
         async fn pty_request(
@@ -563,6 +599,298 @@ mod tests {
             });
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct SftpFixtureState {
+        files: HashMap<String, Vec<u8>>,
+        handles: HashMap<String, String>,
+    }
+
+    struct SftpFixture {
+        listed: bool,
+        state: Arc<Mutex<SftpFixtureState>>,
+    }
+
+    impl SftpFixture {
+        fn status(id: u32) -> Status {
+            Status {
+                id,
+                status_code: StatusCode::Ok,
+                error_message: String::new(),
+                language_tag: String::new(),
+            }
+        }
+    }
+
+    impl russh_sftp::server::Handler for SftpFixture {
+        type Error = StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            StatusCode::OpUnsupported
+        }
+
+        async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+            if path != "/" {
+                return Err(StatusCode::NoSuchFile);
+            }
+            Ok(Handle {
+                id,
+                handle: "directory".into(),
+            })
+        }
+
+        async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
+            if handle != "directory" {
+                return Err(StatusCode::Failure);
+            }
+            if self.listed {
+                return Err(StatusCode::Eof);
+            }
+            self.listed = true;
+            Ok(Name {
+                id,
+                files: vec![File::new(
+                    "hello.txt",
+                    FileAttributes {
+                        size: Some(5),
+                        permissions: Some(0o100644),
+                        ..FileAttributes::default()
+                    },
+                )],
+            })
+        }
+
+        async fn open(
+            &mut self,
+            id: u32,
+            filename: String,
+            flags: OpenFlags,
+            _attrs: FileAttributes,
+        ) -> Result<Handle, Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            if flags.contains(OpenFlags::EXCLUDE) && state.files.contains_key(&filename) {
+                return Err(StatusCode::Failure);
+            }
+            if flags.contains(OpenFlags::CREATE) {
+                state.files.entry(filename.clone()).or_default();
+            }
+            if !state.files.contains_key(&filename) {
+                return Err(StatusCode::NoSuchFile);
+            }
+            let handle = format!("file-{id}");
+            state.handles.insert(handle.clone(), filename);
+            Ok(Handle { id, handle })
+        }
+
+        async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
+            self.state.lock().unwrap().handles.remove(&handle);
+            Ok(Self::status(id))
+        }
+
+        async fn read(
+            &mut self,
+            id: u32,
+            handle: String,
+            offset: u64,
+            len: u32,
+        ) -> Result<Data, Self::Error> {
+            let state = self.state.lock().unwrap();
+            let path = state.handles.get(&handle).ok_or(StatusCode::Failure)?;
+            let bytes = state.files.get(path).ok_or(StatusCode::NoSuchFile)?;
+            let start = usize::try_from(offset).map_err(|_| StatusCode::Failure)?;
+            if start >= bytes.len() {
+                return Err(StatusCode::Eof);
+            }
+            let end = start.saturating_add(len as usize).min(bytes.len());
+            Ok(Data {
+                id,
+                data: bytes[start..end].to_vec(),
+            })
+        }
+
+        async fn write(
+            &mut self,
+            id: u32,
+            handle: String,
+            offset: u64,
+            data: Vec<u8>,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            let path = state
+                .handles
+                .get(&handle)
+                .ok_or(StatusCode::Failure)?
+                .clone();
+            let bytes = state.files.get_mut(&path).ok_or(StatusCode::NoSuchFile)?;
+            let start = usize::try_from(offset).map_err(|_| StatusCode::Failure)?;
+            let end = start.checked_add(data.len()).ok_or(StatusCode::Failure)?;
+            bytes.resize(end, 0);
+            bytes[start..end].copy_from_slice(&data);
+            Ok(Self::status(id))
+        }
+
+        async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            let state = self.state.lock().unwrap();
+            let bytes = state.files.get(&path).ok_or(StatusCode::NoSuchFile)?;
+            Ok(Attrs {
+                id,
+                attrs: FileAttributes {
+                    size: Some(bytes.len() as u64),
+                    permissions: Some(0o100644),
+                    ..FileAttributes::default()
+                },
+            })
+        }
+
+        async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            self.stat(id, path).await
+        }
+
+        async fn remove(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+            if self.state.lock().unwrap().files.remove(&path).is_none() {
+                return Err(StatusCode::NoSuchFile);
+            }
+            Ok(Self::status(id))
+        }
+
+        async fn rename(
+            &mut self,
+            id: u32,
+            oldpath: String,
+            newpath: String,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            if state.files.contains_key(&newpath) {
+                return Err(StatusCode::Failure);
+            }
+            let bytes = state.files.remove(&oldpath).ok_or(StatusCode::NoSuchFile)?;
+            state.files.insert(newpath, bytes);
+            Ok(Self::status(id))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_ssh_session_lists_sftp_directory() {
+        use crate::sftp_ipc::SftpIpcService;
+        use cshell_ipc::{SftpOperation, SftpRequest, SftpStatus, SftpTransferState};
+        let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let public = key.public_key().to_openssh().unwrap();
+        let mut config = russh::server::Config::default();
+        config.keys.push(key);
+        config.auth_rejection_time = std::time::Duration::from_millis(1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let running =
+                russh::server::run_stream(Arc::new(config), stream, EchoServer::default())
+                    .await
+                    .unwrap();
+            let _ = running.await;
+        });
+        let verifier = KnownHostsVerifier::parse(
+            &format!("[127.0.0.1]:{} {public}\n", address.port()),
+            "127.0.0.1",
+            address.port(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let session = SshSession::connect(
+            id,
+            "sftp".into(),
+            SshConnect {
+                username: "cshell".into(),
+                verifier,
+                authentication: super::SshAuthentication::Password("phase1".into()),
+            },
+            TerminalSize::cells(24, 80),
+            &directory.path().join("sftp.csjr"),
+            16,
+        )
+        .await
+        .unwrap();
+        let registry = super::SshSessionRegistry::default();
+        registry.insert(session);
+        let sftp = SftpIpcService::default();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            sftp.handle(
+                SftpRequest {
+                    operation: SftpOperation::List as i32,
+                    session_id: id.as_uuid().as_bytes().to_vec(),
+                    remote_path: "/".into(),
+                    max_entries: 16,
+                    ..Default::default()
+                },
+                &registry,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, SftpStatus::Ok as i32);
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].path, "/hello.txt");
+
+        let source = directory.path().join("source.bin");
+        let destination = directory.path().join("downloaded.bin");
+        let bytes = vec![0x5a_u8; cshell_sftp::SFTP_TRANSFER_CHUNK_BYTES * 2 + 17];
+        tokio::fs::write(&source, &bytes).await.unwrap();
+        for (operation, remote_path, local_path) in [
+            (SftpOperation::Upload, "/uploaded.bin", source.as_path()),
+            (
+                SftpOperation::Download,
+                "/uploaded.bin",
+                destination.as_path(),
+            ),
+        ] {
+            let started = sftp
+                .handle(
+                    SftpRequest {
+                        operation: operation as i32,
+                        session_id: id.as_uuid().as_bytes().to_vec(),
+                        remote_path: remote_path.into(),
+                        local_path: local_path.to_string_lossy().into_owned(),
+                        ..Default::default()
+                    },
+                    &registry,
+                )
+                .await;
+            assert_eq!(started.status, SftpStatus::Ok as i32);
+            let transfer_id = started.transfer.unwrap().transfer_id;
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let status = sftp
+                        .handle(
+                            SftpRequest {
+                                operation: SftpOperation::TransferStatus as i32,
+                                session_id: id.as_uuid().as_bytes().to_vec(),
+                                transfer_id: transfer_id.clone(),
+                                ..Default::default()
+                            },
+                            &registry,
+                        )
+                        .await;
+                    let transfer = status.transfer.unwrap();
+                    match SftpTransferState::try_from(transfer.state).unwrap() {
+                        SftpTransferState::Running => {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        SftpTransferState::Succeeded => {
+                            assert_eq!(transfer.bytes_transferred, bytes.len() as u64);
+                            break;
+                        }
+                        other => panic!("transfer {other:?}: {}", transfer.detail),
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(tokio::fs::read(destination).await.unwrap(), bytes);
+        registry.get(id).unwrap().close().await.unwrap();
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -761,6 +1089,7 @@ mod tests {
                 EchoServer {
                     channels: HashMap::new(),
                     accepted_public_key: Some(accepted_public_key),
+                    sftp_state: Arc::default(),
                 },
             )
             .await
@@ -824,6 +1153,7 @@ mod tests {
                 EchoServer {
                     channels: HashMap::new(),
                     accepted_public_key: Some(accepted_public_key),
+                    sftp_state: Arc::default(),
                 },
             )
             .await

@@ -428,6 +428,8 @@ steps:
 - 远程文件临时下载到受控目录，外部编辑器保存后检测变化并回传。
 - 大目录分页/增量加载；不在 UI 线程递归遍历。
 
+P1-070 基础版先接入已验证 SSH 会话的 SFTP 子通道：目录最多返回 512 项并显式标记截断，单文件上传/下载按 32 KiB 分块，daemon 持有传输任务与取消状态，GUI 重连可按会话找回最近任务。只允许本地绝对路径；已有目标在提交前检查并拒绝，远端 rename 的并发覆盖语义由服务端决定。此阶段只校验上传后的大小，不承诺哈希验证、断点续传或大目录分页；见 [ADR-0006](adr/0006-phase1-basic-sftp-control.md)。
+
 ### 9.2 安全文件分发
 
 对多主机上传默认采用两阶段流程：
@@ -606,7 +608,8 @@ CLI 调用和 UI 操作走同一 application service，不允许另写一套 SSH
 ```text
 session.create / session.connect / session.resize / session.close
 task.validate / task.start / task.cancel / task.retry_failed
-sftp.list / sftp.enqueue / sftp.pause / sftp.cancel
+sftp.list / sftp.upload / sftp.download / sftp.status / sftp.cancel (P1-070)
+sftp.enqueue / sftp.pause / sftp.resume (later phases)
 vault.unlock / vault.lock
 ```
 
@@ -871,6 +874,16 @@ CShell/
 - 20 个并发交互会话稳定工作，终端输入、复制、搜索、分屏正常。
 - 50 MB/s 输出、10 GB 日志视口和滚动锚点达到 Phase 0 指标。
 - SFTP 基础上传下载不整文件入内存。
+
+### 对外体验门槛
+
+v0.1/v0.5 构建、原生 CI 通过和内部技术预览仅表示研发进度，不作为邀请用户测试或建议推广体验的依据。对外体验需同时满足：
+
+- 计划范围内的 SSH、SFTP、本地终端及工作区功能达到对应版本验收标准。
+- 主工作台、会话导航、连接编辑、标签/分屏、文件面板、状态与错误反馈形成完整 UI；按 Xshell 参考工作流完成任务级对照，并通过视觉与交互回归。
+- 在目标系统上完成真实 SSH/SFTP、中文输入法、复制粘贴、缩放与高 DPI 的人工检查；关键问题修复后再复核。
+
+达到这些条件并记录验收结果后，才向用户提示可以推广体验。
 
 ### v0.5 多主机预览
 

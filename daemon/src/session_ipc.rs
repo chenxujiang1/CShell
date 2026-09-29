@@ -45,6 +45,7 @@ pub struct SessionIpcService {
     registry: Arc<LocalSessionRegistry>,
     profiles: Option<Arc<ProfileIpcService>>,
     ssh_sessions: Arc<SshSessionRegistry>,
+    sftp: crate::sftp_ipc::SftpIpcService,
     known_hosts_path: Option<std::path::PathBuf>,
 }
 
@@ -84,6 +85,7 @@ impl SessionIpcService {
             registry,
             profiles: None,
             ssh_sessions: Arc::new(SshSessionRegistry::default()),
+            sftp: crate::sftp_ipc::SftpIpcService::default(),
             known_hosts_path: None,
         }
     }
@@ -213,6 +215,26 @@ impl SessionIpcService {
         mut request: Envelope,
         negotiated_features: u64,
     ) -> Result<DispatchResult, SessionIpcError> {
+        if let Some(envelope::Payload::SftpRequest(sftp_request)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::SFTP_CONTROL == 0 {
+                cshell_ipc::SftpResponse::with_status(
+                    cshell_ipc::SftpStatus::Unsupported,
+                    "SFTP control was not negotiated",
+                )
+            } else {
+                self.sftp
+                    .handle(sftp_request.clone(), &self.ssh_sessions)
+                    .await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::SftpResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
         if let Some(envelope::Payload::WorkspaceRequest(workspace)) = request.payload.as_ref() {
             let response = if negotiated_features & cshell_ipc::features::WORKSPACE_CONTROL == 0 {
                 cshell_ipc::WorkspaceResponse {
@@ -1119,6 +1141,46 @@ mod tests {
             cwd_policy: WorkingDirectoryPolicy::Inherit,
             env_overrides: BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn sftp_requests_require_negotiated_feature() {
+        use cshell_ipc::{SftpOperation, SftpRequest, SftpStatus, features};
+        let temp = tempfile::tempdir().unwrap();
+        let registry =
+            Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16).unwrap());
+        let service = SessionIpcService::new(registry);
+        let request = Envelope {
+            request_id: 42,
+            payload: Some(envelope::Payload::SftpRequest(SftpRequest {
+                operation: SftpOperation::List as i32,
+                session_id: cshell_domain::SessionId::new()
+                    .as_uuid()
+                    .as_bytes()
+                    .to_vec(),
+                remote_path: "/".into(),
+                max_entries: 16,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let denied = service
+            .dispatch_with_features(request.clone(), 0)
+            .await
+            .unwrap();
+        let Some(envelope::Payload::SftpResponse(denied)) = denied.response.payload else {
+            panic!("expected SFTP response");
+        };
+        assert_eq!(denied.status, SftpStatus::Unsupported as i32);
+        let accepted = service
+            .dispatch_with_features(request, features::SFTP_CONTROL)
+            .await
+            .unwrap();
+        assert_eq!(accepted.response.request_id, 42);
+        let Some(envelope::Payload::SftpResponse(accepted)) = accepted.response.payload else {
+            panic!("expected SFTP response");
+        };
+        assert_eq!(accepted.status, SftpStatus::Unavailable as i32);
     }
 
     #[tokio::test]
