@@ -185,3 +185,45 @@ jobs:
           "CSHELL_PAGEANT_EXE=$(Join-Path $puttyRoot 'pageant.exe')" >> $env:GITHUB_ENV
       - shell: pwsh
         run: .github/scripts/pageant-interop.ps1
+
+  trial-windows-package:
+    needs:
+      - quality
+      - platform-test
+      - native-resource-gates
+      - window-recovery-gates
+      - windows-openssh-interop
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Build portable trial binaries with a static C runtime
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p cshell-gui -p cshelld
+      - name: Package the desktop and companion daemon
+        shell: pwsh
+        run: .github/scripts/package-trial-windows.ps1 -BinaryDirectory target/x86_64-pc-windows-msvc/release
+      - name: Verify the archive extracts with both executables
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -LiteralPath artifacts/trial -Filter '*.zip' | Select-Object -First 1
+          if ($null -eq $archive) { throw 'Trial archive was not produced' }
+          $destination = Join-Path $env:RUNNER_TEMP 'cshell-trial-package-check'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
+          foreach ($file in @('CShell.exe', 'cshelld.exe', 'README-first-run.txt')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $destination $file) -PathType Leaf)) {
+              throw "Missing file in extracted trial archive: $file"
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cshell-trial-windows-x64
+          path: |
+            artifacts/trial/*.zip
+            artifacts/trial/*.sha256
+          if-no-files-found: error
+          retention-days: 14
