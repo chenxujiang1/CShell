@@ -19,16 +19,31 @@ pub enum HostKeyCheck {
     Revoked,
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum KnownHostsError {
-    #[error("cannot read known_hosts: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("cannot read known_hosts ({:?})", .0.kind())]
+    Io(std::io::Error),
     #[error("known_hosts exceeds the 8 MiB limit")]
     TooLarge,
     #[error("invalid known_hosts entry at line {line}")]
     InvalidEntry { line: usize },
     #[error("invalid SSH port 0")]
     InvalidPort,
+}
+
+impl std::fmt::Debug for KnownHostsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KnownHostsError")
+            .field("category", &self.to_string())
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<std::io::Error> for KnownHostsError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 #[derive(Clone, Debug)]

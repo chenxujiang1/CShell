@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use zeroize::Zeroize;
 
 pub(crate) enum SavedSessionPlan {
     Ssh(Box<crate::ssh_route::SshConnectionPlan>),
@@ -36,7 +37,6 @@ pub struct ProfileIpcService {
     pending_host_keys: Mutex<HashMap<[u8; 16], PendingHostKey>>,
 }
 
-#[derive(Debug)]
 struct PendingHostKey {
     target: SshConnectionRecord,
     revision: u64,
@@ -44,6 +44,22 @@ struct PendingHostKey {
     fingerprint: String,
     token: [u8; 32],
     expires: Instant,
+}
+
+impl std::fmt::Debug for PendingHostKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingHostKey")
+            .field("revision", &self.revision)
+            .field("expires", &self.expires)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PendingHostKey {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
 }
 
 impl ProfileIpcService {

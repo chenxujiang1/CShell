@@ -8,6 +8,7 @@ use cshell_domain::{
 use prost::{Enumeration, Message};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 pub const MAX_PROFILE_CONTROL_CHANGES: usize = 2048;
 
@@ -49,8 +50,8 @@ impl std::fmt::Debug for ProfileRequest {
 
 impl Drop for ProfileRequest {
     fn drop(&mut self) {
-        self.credential_secret.fill(0);
-        self.host_key_token.fill(0);
+        self.credential_secret.zeroize();
+        self.host_key_token.zeroize();
     }
 }
 
@@ -79,6 +80,7 @@ pub enum ProfileImportPolicy {
 }
 
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct ProfileResponse {
     #[prost(enumeration = "ProfileStatus", tag = "1")]
     pub status: i32,
@@ -96,7 +98,23 @@ pub struct ProfileResponse {
     pub local_shells: Vec<LocalShellData>,
 }
 
+impl std::fmt::Debug for ProfileResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfileResponse")
+            .field("status", &self.status)
+            .field("revision", &self.revision)
+            .field("has_catalog", &self.catalog.is_some())
+            .field("has_import_preview", &self.preview.is_some())
+            .field("host_key_preview", &self.host_key_preview)
+            .field("local_shell_count", &self.local_shells.len())
+            .field("detail", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct HostKeyPreviewData {
     #[prost(bytes = "vec", tag = "1")]
     pub profile_id: Vec<u8>,
@@ -114,6 +132,23 @@ pub struct HostKeyPreviewData {
     pub token: Vec<u8>,
     #[prost(uint64, tag = "8")]
     pub expires_unix_seconds: u64,
+}
+
+impl std::fmt::Debug for HostKeyPreviewData {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostKeyPreviewData")
+            .field("port", &self.port)
+            .field("expires_unix_seconds", &self.expires_unix_seconds)
+            .field("token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for HostKeyPreviewData {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]

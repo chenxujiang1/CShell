@@ -309,7 +309,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let (sender, mut receiver) = tokio::sync::oneshot::channel();
-    let result = tokio::time::timeout(
+    let _result = tokio::time::timeout(
         SSH_CONNECT_TIMEOUT,
         russh::client::connect_stream(
             Arc::new(verified_config()),
@@ -323,12 +323,7 @@ where
     .map_err(|_| "SSH host-key scan timed out".to_owned())?;
     match receiver.try_recv() {
         Ok(key) => key,
-        Err(_) => Err(format!(
-            "SSH host-key scan failed before receiving a key: {}",
-            result
-                .err()
-                .map_or_else(|| "connection closed".to_owned(), |error| error.to_string())
-        )),
+        Err(_) => Err("SSH host-key scan failed before receiving a key".into()),
     }
 }
 
@@ -387,31 +382,31 @@ impl russh::client::Handler for VerifiedClient {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum SshError {
     #[error("proxy route failed: {0}")]
     ProxyRejected(&'static str),
     #[error("SSH host key rejected: {0:?}")]
     HostKeyRejected(HostKeyCheck),
-    #[error(transparent)]
-    Protocol(#[from] russh::Error),
+    #[error("SSH protocol operation failed")]
+    Protocol(russh::Error),
     #[error("SSH authentication was rejected")]
     AuthenticationRejected,
     #[error("SSH authentication was cancelled")]
     AuthenticationCancelled,
     #[error("SSH authentication round timed out")]
     AuthenticationTimeout,
-    #[error("SSH private key could not be decoded: {0}")]
-    PrivateKey(#[source] russh::keys::Error),
-    #[error("OpenSSH certificate could not be decoded: {0}")]
-    Certificate(#[source] russh::keys::ssh_key::Error),
+    #[error("SSH private key could not be decoded")]
+    PrivateKey(russh::keys::Error),
+    #[error("OpenSSH certificate could not be decoded")]
+    Certificate(russh::keys::ssh_key::Error),
     #[error("a host certificate cannot be used for user authentication")]
     HostCertificateForUserAuthentication,
     #[error("OpenSSH certificate does not match the selected private key")]
     CertificateKeyMismatch,
-    #[error("SSH agent operation failed: {0}")]
-    Agent(#[source] russh::keys::Error),
-    #[error("SSH agent signing authentication failed: {0}")]
+    #[error("SSH agent operation failed")]
+    Agent(russh::keys::Error),
+    #[error("SSH agent signing authentication failed")]
     AgentAuthentication(String),
     #[error("SSH agent returned {actual} identities; maximum is {maximum}")]
     AgentIdentityLimit { actual: usize, maximum: usize },
@@ -419,7 +414,7 @@ pub enum SshError {
     AgentIdentityUnavailable,
     #[error("SSH agent backend {backend:?} is not supported on this platform")]
     AgentBackendUnsupported { backend: AgentBackend },
-    #[error("no Windows SSH agent backend was available: {0}")]
+    #[error("no Windows SSH agent backend was available")]
     AgentBackendsUnavailable(String),
     #[error("server only advertised legacy RSA/SHA-1 user authentication")]
     LegacyRsaSignatureRejected,
@@ -429,24 +424,50 @@ pub enum SshError {
     KeyboardInteractiveResponseCount { expected: usize, actual: usize },
     #[error("SSH connection attempt timed out")]
     ConnectionTimeout,
-    #[error(transparent)]
-    KnownHosts(#[from] KnownHostsError),
+    #[error("SSH known_hosts validation failed: {0}")]
+    KnownHosts(KnownHostsError),
     #[error("SSH command channel closed without an exit status")]
     MissingExitStatus,
     #[error("SSH server rejected the {0} channel request")]
     ChannelRequestRejected(&'static str),
     #[error("SSH channel closed while waiting for the {0} request acknowledgement")]
     ChannelClosedDuringRequest(&'static str),
-    #[error("SFTP subsystem failed: {0}")]
-    Sftp(#[from] cshell_sftp::SftpError),
-    #[error("SSH forwarding I/O failed: {0}")]
-    ForwardIo(#[source] std::io::Error),
-    #[error("SSH forwarding configuration is invalid: {0}")]
+    #[error("SFTP subsystem failed")]
+    Sftp(cshell_sftp::SftpError),
+    #[error("SSH forwarding I/O failed ({:?})", .0.kind())]
+    ForwardIo(std::io::Error),
+    #[error("SSH forwarding configuration is invalid")]
     InvalidForwardConfig(String),
-    #[error("SOCKS5 handshake failed: {0}")]
+    #[error("SOCKS5 handshake failed")]
     Socks5(String),
-    #[error("SSH forwarding task failed: {0}")]
+    #[error("SSH forwarding task failed")]
     ForwardTask(String),
+}
+
+impl std::fmt::Debug for SshError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshError")
+            .field("category", &self.to_string())
+            .finish_non_exhaustive()
+    }
+}
+
+// Keep typed conversions without attaching raw backend errors as diagnostic sources.
+impl From<russh::Error> for SshError {
+    fn from(error: russh::Error) -> Self {
+        Self::Protocol(error)
+    }
+}
+impl From<KnownHostsError> for SshError {
+    fn from(error: KnownHostsError) -> Self {
+        Self::KnownHosts(error)
+    }
+}
+impl From<cshell_sftp::SftpError> for SshError {
+    fn from(error: cshell_sftp::SftpError) -> Self {
+        Self::Sftp(error)
+    }
 }
 
 impl SshError {
@@ -474,7 +495,7 @@ pub enum TerminalDataStream {
     Extended(u32),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TerminalEvent {
     Data {
@@ -494,6 +515,34 @@ pub enum TerminalEvent {
     Closed,
     RequestSucceeded,
     RequestFailed,
+}
+
+impl std::fmt::Debug for TerminalEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Data { stream, data } => formatter
+                .debug_struct("Data")
+                .field("stream", stream)
+                .field("byte_count", &data.len())
+                .finish_non_exhaustive(),
+            Self::ExitSignal { core_dumped, .. } => formatter
+                .debug_struct("ExitSignal")
+                .field("core_dumped", core_dumped)
+                .finish_non_exhaustive(),
+            Self::ExitStatus(code) => formatter.debug_tuple("ExitStatus").field(code).finish(),
+            Self::FlowControl(enabled) => {
+                formatter.debug_tuple("FlowControl").field(enabled).finish()
+            }
+            Self::WindowAdjusted(bytes) => formatter
+                .debug_tuple("WindowAdjusted")
+                .field(bytes)
+                .finish(),
+            Self::Eof => formatter.write_str("Eof"),
+            Self::Closed => formatter.write_str("Closed"),
+            Self::RequestSucceeded => formatter.write_str("RequestSucceeded"),
+            Self::RequestFailed => formatter.write_str("RequestFailed"),
+        }
+    }
 }
 
 pub struct SshTerminalReader {
@@ -1472,6 +1521,9 @@ where
         Err(SshError::AuthenticationRejected)
     }
 }
+
+#[cfg(test)]
+mod diagnostics_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

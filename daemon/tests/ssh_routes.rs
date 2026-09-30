@@ -408,7 +408,7 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
             "{}",
             preview.detail
         );
-        let preview = preview.host_key_preview.unwrap();
+        let mut preview = preview.host_key_preview.unwrap();
         assert_eq!(preview.host, TARGET);
         let confirmed = exchange(
             &service,
@@ -416,8 +416,8 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
             operation: ProfileOperation::ConfirmHostKey as i32,
             expected_revision: 1,
             credential_profile_id: target_id.as_uuid().as_bytes().to_vec(),
-            host_key_token: preview.token,
-            host_key_fingerprint: preview.fingerprint
+            host_key_token: std::mem::take(&mut preview.token),
+            host_key_fingerprint: std::mem::take(&mut preview.fingerprint)
             }),
         )
         .await;

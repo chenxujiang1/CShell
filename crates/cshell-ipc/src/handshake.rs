@@ -4,6 +4,7 @@ use crate::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use zeroize::Zeroize;
 
 const INSTANCE_ID_LENGTH: usize = 16;
 const TOKEN_LENGTH: usize = 32;
@@ -17,7 +18,7 @@ pub struct HandshakePolicy {
 
 impl Drop for HandshakePolicy {
     fn drop(&mut self) {
-        self.expected_token.fill(0);
+        self.expected_token.zeroize();
     }
 }
 

@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const DISCOVERY_SCHEMA_VERSION: u32 = 1;
 const MAX_DISCOVERY_BYTES: u64 = 4 * 1024;
@@ -91,13 +92,30 @@ impl RuntimePaths {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DiscoveryRecord {
     pub endpoint: OsString,
     pub daemon_instance_id: [u8; 16],
     pub instance_token: [u8; 32],
     pub daemon_pid: u32,
     pub started_unix_ms: u64,
+}
+
+impl std::fmt::Debug for DiscoveryRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DiscoveryRecord")
+            .field("daemon_pid", &self.daemon_pid)
+            .field("started_unix_ms", &self.started_unix_ms)
+            .field("instance_token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for DiscoveryRecord {
+    fn drop(&mut self) {
+        self.instance_token.zeroize();
+    }
 }
 
 impl DiscoveryRecord {
@@ -129,10 +147,10 @@ impl DiscoveryRecord {
         if metadata.len() > MAX_DISCOVERY_BYTES {
             return Err(DiscoveryError::Oversized(metadata.len()));
         }
-        let mut encoded = Vec::with_capacity(metadata.len() as usize);
-        File::open(&path)
-            .and_then(|mut file| file.read_to_end(&mut encoded))
-            .map_err(DiscoveryError::Read)?;
+        let encoded = read_discovery_bytes(&path).map_err(DiscoveryError::Read)?;
+        if encoded.len() as u64 > MAX_DISCOVERY_BYTES {
+            return Err(DiscoveryError::Oversized(encoded.len() as u64));
+        }
         let stored =
             StoredDiscovery::decode(encoded.as_slice()).map_err(DiscoveryError::MalformedRecord)?;
         let record = Self::try_from(stored)?;
@@ -203,7 +221,7 @@ impl DiscoveryPublication {
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
         configure_private_create(&mut options);
-        let encoded = record.stored().encode_to_vec();
+        let encoded = Zeroizing::new(record.stored().encode_to_vec());
         let mut file = options.open(&temporary).map_err(DiscoveryError::Publish)?;
         #[cfg(windows)]
         crate::windows_security::secure_path(&temporary, false).map_err(DiscoveryError::Publish)?;
@@ -229,7 +247,7 @@ impl DiscoveryPublication {
 
 impl Drop for DiscoveryPublication {
     fn drop(&mut self) {
-        let should_remove = std::fs::read(&self.path)
+        let should_remove = read_discovery_bytes(&self.path)
             .ok()
             .and_then(|encoded| StoredDiscovery::decode(encoded.as_slice()).ok())
             .is_some_and(|stored| stored.daemon_instance_id == self.daemon_instance_id);
@@ -237,6 +255,14 @@ impl Drop for DiscoveryPublication {
             let _result = std::fs::remove_file(&self.path);
         }
     }
+}
+
+fn read_discovery_bytes(path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut encoded = Zeroizing::new(Vec::with_capacity((MAX_DISCOVERY_BYTES + 1) as usize));
+    File::open(path)?
+        .take(MAX_DISCOVERY_BYTES + 1)
+        .read_to_end(&mut encoded)?;
+    Ok(encoded)
 }
 
 #[derive(Debug, Error)]
@@ -273,6 +299,7 @@ pub enum DiscoveryError {
 }
 
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 struct StoredDiscovery {
     #[prost(uint32, tag = "1")]
     schema_version: u32,
@@ -292,10 +319,26 @@ struct StoredDiscovery {
     started_unix_ms: u64,
 }
 
+impl std::fmt::Debug for StoredDiscovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredDiscovery")
+            .field("schema_version", &self.schema_version)
+            .field("daemon_pid", &self.daemon_pid)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for StoredDiscovery {
+    fn drop(&mut self) {
+        self.instance_token.zeroize();
+    }
+}
+
 impl TryFrom<StoredDiscovery> for DiscoveryRecord {
     type Error = DiscoveryError;
 
-    fn try_from(stored: StoredDiscovery) -> Result<Self, Self::Error> {
+    fn try_from(mut stored: StoredDiscovery) -> Result<Self, Self::Error> {
         if stored.schema_version != DISCOVERY_SCHEMA_VERSION {
             return Err(DiscoveryError::UnsupportedSchema(stored.schema_version));
         }
@@ -304,16 +347,18 @@ impl TryFrom<StoredDiscovery> for DiscoveryRecord {
         }
         let daemon_instance_id = stored
             .daemon_instance_id
+            .as_slice()
             .try_into()
             .map_err(|_| DiscoveryError::InvalidField("daemon instance ID"))?;
         let instance_token = stored
             .instance_token
+            .as_slice()
             .try_into()
             .map_err(|_| DiscoveryError::InvalidField("instance token"))?;
         if stored.daemon_pid == 0 {
             return Err(DiscoveryError::InvalidField("daemon PID"));
         }
-        let endpoint = endpoint_from_bytes(stored.endpoint)?;
+        let endpoint = endpoint_from_bytes(std::mem::take(&mut stored.endpoint))?;
         validate_endpoint(&endpoint)?;
         Ok(Self {
             endpoint,
@@ -461,6 +506,27 @@ mod tests {
     use super::{
         DiscoveryError, DiscoveryPublication, DiscoveryRecord, RuntimePaths, SingleInstanceGuard,
     };
+
+    #[test]
+    fn discovery_debug_hides_instance_token_in_memory_and_stored_forms() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::prepare(directory.path().join("runtime")).unwrap();
+        let mut record = DiscoveryRecord::generate(&paths);
+        record.instance_token = [90; 32];
+        for diagnostic in [
+            format!("{record:?}"),
+            format!("{:?}", record.stored()),
+            format!("{:?}", Some(record.clone())),
+        ] {
+            assert!(!diagnostic.contains("90, 90"));
+            assert!(!diagnostic.contains("ZZZZ"));
+            assert!(diagnostic.contains("daemon_pid"));
+        }
+        let publication = DiscoveryPublication::publish(&paths, &record).unwrap();
+        assert_eq!(DiscoveryRecord::load(&paths).unwrap(), record);
+        drop(publication);
+        assert!(!paths.discovery_file().exists());
+    }
 
     #[test]
     fn publication_round_trip_and_cleanup_preserve_credentials() {

@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::Envelope;
 
@@ -13,7 +13,7 @@ struct WipeFrame(BytesMut);
 
 impl Drop for WipeFrame {
     fn drop(&mut self) {
-        self.0.as_mut().fill(0);
+        self.0.as_mut().zeroize();
     }
 }
 
@@ -79,7 +79,7 @@ impl FrameCodec {
         input.advance(LENGTH_PREFIX_SIZE);
         let mut payload = input.split_to(frame_len);
         let decoded = Envelope::decode(payload.as_ref());
-        payload.as_mut().fill(0);
+        payload.as_mut().zeroize();
         Ok(Some(decoded?))
     }
 }

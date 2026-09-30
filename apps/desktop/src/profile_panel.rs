@@ -164,7 +164,6 @@ impl Drop for ProfileDraft {
     }
 }
 
-#[derive(Debug)]
 pub struct ProfilePanel {
     pub open: bool,
     seen_generation: u64,
@@ -184,6 +183,19 @@ pub struct ProfilePanel {
     profile_draft: Option<ProfileDraft>,
     import_path: String,
     import_policy: ProfileImportPolicy,
+}
+
+impl std::fmt::Debug for ProfilePanel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfilePanel")
+            .field("open", &self.open)
+            .field("seen_generation", &self.seen_generation)
+            .field("selected", &self.selected)
+            .field("has_error", &self.error.is_some())
+            .field("has_launch_error", &self.launch_error.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ProfilePanel {
@@ -541,7 +553,7 @@ impl ProfilePanel {
                                             command = Some(ProfileClientCommand::ConfirmHostKey {
                                                 profile_id: draft.record.id,
                                                 expected_revision: catalog.revision,
-                                                token: preview.token.clone(),
+                                                token: Zeroizing::new(preview.token.clone()),
                                                 fingerprint: std::mem::take(&mut draft.host_key_confirmation),
                                             });
                                         }
@@ -1222,6 +1234,20 @@ fn draw_environment_rows(ui: &mut egui::Ui, env: &mut Vec<(String, String)>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panel_debug_hides_user_text_and_error_payloads() {
+        let marker = "SECRET-PANEL-MARKER";
+        let panel = super::ProfilePanel {
+            error: Some(marker.into()),
+            launch_error: Some(marker.into()),
+            status: marker.into(),
+            search: marker.into(),
+            import_path: marker.into(),
+            ..Default::default()
+        };
+        assert!(!format!("{panel:?}").contains(marker));
+        assert!(format!("{panel:?}").contains("has_error: true"));
+    }
     use super::{ProfilePanel, Selected};
     use crate::profile_connection::{
         DesktopProfileCatalog, DesktopProfileView, ProfileClientCommand,

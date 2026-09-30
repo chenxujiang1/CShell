@@ -9,6 +9,7 @@ use prost::{Enumeration, Message};
 use std::collections::HashSet;
 use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
+use zeroize::Zeroize;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
 pub const PROTOCOL_MINOR: u32 = 14;
@@ -63,7 +64,7 @@ pub struct Handshake {
 
 impl Drop for Handshake {
     fn drop(&mut self) {
-        self.instance_token.fill(0);
+        self.instance_token.zeroize();
     }
 }
 
@@ -1720,6 +1721,47 @@ mod tests {
         let handshake_debug = format!("{handshake:?}");
         assert!(handshake_debug.contains("[REDACTED]"));
         assert!(!handshake_debug.contains("instance-token-unique-marker"));
+    }
+
+    #[test]
+    fn host_key_preview_debug_redacts_token_and_peer_text_through_nested_envelopes() {
+        let marker = "SECRET-PREVIEW-MARKER";
+        let preview = crate::HostKeyPreviewData {
+            token: marker.as_bytes().to_vec(),
+            host: marker.into(),
+            algorithm: marker.into(),
+            fingerprint: marker.into(),
+            public_key_line: marker.into(),
+            port: 22,
+            profile_id: vec![],
+            expires_unix_seconds: 0,
+        };
+        let response = Envelope {
+            request_id: 42,
+            payload: Some(envelope::Payload::ProfileResponse(crate::ProfileResponse {
+                detail: marker.into(),
+                catalog: Some(crate::ProfileCatalogData {
+                    local_connections: vec![crate::LocalConnectionData {
+                        program: marker.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                host_key_preview: Some(Box::new(preview)),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let diagnostic = format!("{response:?}");
+        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(!diagnostic.contains(marker));
+        assert!(!diagnostic.contains("83, 69, 67"));
+        let decoded = Envelope::decode(response.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded, response);
+        let Some(envelope::Payload::ProfileResponse(response)) = decoded.payload else {
+            panic!("expected Profile response");
+        };
+        assert_eq!(response.host_key_preview.unwrap().token, marker.as_bytes());
     }
 
     #[test]

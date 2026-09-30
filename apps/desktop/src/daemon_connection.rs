@@ -256,7 +256,7 @@ impl DesktopConnectionConfig {
                     #[cfg(windows)]
                     endpoint: record.endpoint.to_string_lossy().into_owned(),
                     #[cfg(unix)]
-                    endpoint: PathBuf::from(record.endpoint),
+                    endpoint: PathBuf::from(record.endpoint.clone()),
                     instance_token: record.instance_token,
                     daemon_instance_id: record.daemon_instance_id,
                 })

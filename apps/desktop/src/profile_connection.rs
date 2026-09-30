@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 const MAX_IMPORT_FILE_BYTES: u64 = 1024 * 1024;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct DesktopProfileView {
     pub generation: u64,
     pub catalog: Option<DesktopProfileCatalog>,
@@ -27,7 +27,7 @@ pub struct DesktopProfileView {
     pub status: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DesktopProfileCatalog {
     pub revision: u64,
     pub defaults: TerminalDefaults,
@@ -35,6 +35,33 @@ pub struct DesktopProfileCatalog {
     pub profiles: Vec<ProfileRecord>,
     pub ssh_connections: Vec<SshConnectionRecord>,
     pub local_connections: Vec<LocalConnectionRecord>,
+}
+
+impl std::fmt::Debug for DesktopProfileView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DesktopProfileView")
+            .field("generation", &self.generation)
+            .field("catalog", &self.catalog)
+            .field("has_preview", &self.preview.is_some())
+            .field("host_key_preview", &self.host_key_preview)
+            .field("has_error", &self.error.is_some())
+            .field("local_shell_count", &self.local_shells.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for DesktopProfileCatalog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DesktopProfileCatalog")
+            .field("revision", &self.revision)
+            .field("profile_count", &self.profiles.len())
+            .field("folder_count", &self.folders.len())
+            .field("ssh_connection_count", &self.ssh_connections.len())
+            .field("local_connection_count", &self.local_connections.len())
+            .finish_non_exhaustive()
+    }
 }
 
 pub enum ProfileClientCommand {
@@ -78,7 +105,7 @@ pub enum ProfileClientCommand {
     ConfirmHostKey {
         profile_id: ProfileId,
         expected_revision: u64,
-        token: Vec<u8>,
+        token: Zeroizing<Vec<u8>>,
         fingerprint: String,
     },
 }
@@ -290,11 +317,11 @@ async fn profile_worker(
                             }
                         });
                     }
-                    ProfileClientCommand::ConfirmHostKey { profile_id, expected_revision, token, fingerprint } => {
+                    ProfileClientCommand::ConfirmHostKey { profile_id, expected_revision, mut token, fingerprint } => {
                         let mut outgoing = request(ProfileOperation::ConfirmHostKey);
                         outgoing.expected_revision = expected_revision;
                         outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
-                        outgoing.host_key_token = token;
+                        outgoing.host_key_token = std::mem::take(&mut *token);
                         outgoing.host_key_fingerprint = fingerprint;
                         let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
                         update(&shared, |view| match result {
@@ -560,4 +587,58 @@ fn update(shared: &Arc<Mutex<DesktopProfileView>>, change: impl FnOnce(&mut Desk
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     change(&mut view);
     view.generation = view.generation.wrapping_add(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_profile_diagnostics_hide_tokens_environment_and_error_text() {
+        let marker = "SECRET-DESKTOP-MARKER";
+        let view = DesktopProfileView {
+            generation: 7,
+            catalog: Some(DesktopProfileCatalog {
+                revision: 3,
+                defaults: Default::default(),
+                folders: vec![],
+                profiles: vec![],
+                ssh_connections: vec![],
+                local_connections: vec![LocalConnectionRecord {
+                    profile_id: ProfileId::new(),
+                    program: marker.into(),
+                    args: vec![marker.into()],
+                    cwd: cshell_domain::LocalWorkingDirectory::Home,
+                    close_policy: Default::default(),
+                    env_overrides: [("API_TOKEN".into(), marker.into())].into(),
+                }],
+            }),
+            error: Some(marker.into()),
+            status: marker.into(),
+            preview_source: Some((marker.into(), ProfileImportPolicy::Fail)),
+            host_key_preview: Some(HostKeyPreviewData {
+                token: marker.as_bytes().to_vec(),
+                profile_id: vec![],
+                host: String::new(),
+                port: 22,
+                algorithm: String::new(),
+                fingerprint: String::new(),
+                public_key_line: String::new(),
+                expires_unix_seconds: 0,
+            }),
+            ..Default::default()
+        };
+        let diagnostic = format!("{view:?}");
+        assert!(diagnostic.contains("generation: 7"));
+        assert!(diagnostic.contains("revision: 3"));
+        assert!(!diagnostic.contains(marker));
+        assert!(!diagnostic.contains("83, 69, 67"));
+        let command = ProfileClientCommand::ConfirmHostKey {
+            profile_id: ProfileId::new(),
+            expected_revision: 3,
+            token: Zeroizing::new(marker.as_bytes().to_vec()),
+            fingerprint: marker.into(),
+        };
+        assert!(!format!("{command:?}").contains(marker));
+    }
 }

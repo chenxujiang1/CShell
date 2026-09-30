@@ -226,11 +226,11 @@ async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocke
     assert_eq!(changed.status, ProfileStatus::Conflict as i32);
     assert!(!known_hosts.exists());
     rotate.store(false, Ordering::SeqCst);
-    let new_preview = exchange(&service, preview_request.clone())
+    let mut new_preview = exchange(&service, preview_request.clone())
         .await?
         .host_key_preview
         .ok_or("missing refreshed host-key preview")?;
-    confirm.host_key_token = new_preview.token;
+    confirm.host_key_token = std::mem::take(&mut new_preview.token);
     let imported = exchange(&service, confirm.clone()).await?;
     assert_eq!(
         imported.status,
