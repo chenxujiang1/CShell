@@ -62,6 +62,7 @@ pub struct SshSession {
     pipeline: Mutex<Option<TerminalPipeline>>,
     ingress: Mutex<Option<PipelineIngress>>,
     snapshots: LatestSnapshot,
+    clipboard: crate::clipboard::ClipboardInbox,
     line_index: JournalLineIndex,
     commands: tokio::sync::mpsc::Sender<Command>,
     closed: Arc<AtomicBool>,
@@ -146,7 +147,13 @@ impl SshSession {
             .await?;
         let (mut reader, writer) = terminal.split();
         let writer = Arc::new(writer);
-        let pipeline = TerminalPipeline::spawn(journal_path, size, ingress_capacity)?;
+        let clipboard = crate::clipboard::ClipboardInbox::default();
+        let pipeline = TerminalPipeline::spawn_with_clipboard(
+            journal_path,
+            size,
+            ingress_capacity,
+            clipboard.clone(),
+        )?;
         let ingress = pipeline.ingress().ok_or(SshSessionError::Closed)?;
         let snapshots = pipeline.snapshots();
         let line_index = pipeline.line_index();
@@ -159,6 +166,7 @@ impl SshSession {
         let reader_closed = Arc::clone(&closed);
         let reader_client = Arc::clone(&client);
         let reader_jump = jump.clone();
+        let reader_clipboard = clipboard.clone();
         let reader_task = tokio::spawn(async move {
             while let Some(event) = reader.next_event().await {
                 match event {
@@ -193,6 +201,7 @@ impl SshSession {
                 "SSH disconnected without an exit status; remote process outcome is unknown".into(),
             );
             reader_closed.store(true, Ordering::Release);
+            reader_clipboard.handle(cshell_ipc::ClipboardOperation::Poll, &[], false);
             let _ = reader_client.disconnect().await;
             if let Some(jump) = reader_jump {
                 jump.disconnect().await;
@@ -202,13 +211,19 @@ impl SshSession {
         let command_closed = Arc::clone(&closed);
         let command_detail = Arc::clone(&terminal_detail);
         let command_client = Arc::clone(&client);
+        let command_clipboard = clipboard.clone();
         let writer_task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut clipboard_cleanup = std::time::Instant::now();
             loop {
                 tokio::select! {
                     biased;
                     _ = tick.tick() => {
+                        if clipboard_cleanup.elapsed() >= std::time::Duration::from_secs(1) {
+                            command_clipboard.expire_pending();
+                            clipboard_cleanup = std::time::Instant::now();
+                        }
                         if command_closed.load(Ordering::Acquire) { return; }
                         for bytes in responses.drain() {
                             if command_writer.send_input(bytes).await.is_err() {
@@ -257,6 +272,7 @@ impl SshSession {
             pipeline: Mutex::new(Some(pipeline)),
             ingress: Mutex::new(Some(ingress)),
             snapshots,
+            clipboard,
             line_index,
             commands,
             closed,
@@ -267,6 +283,17 @@ impl SshSession {
 
     pub fn id(&self) -> SessionId {
         self.id
+    }
+    pub(crate) fn clipboard_request(
+        &self,
+        operation: cshell_ipc::ClipboardOperation,
+        token: &[u8],
+    ) -> cshell_ipc::ClipboardResponse {
+        let response = self.clipboard.handle(operation, token, self.running());
+        if operation != cshell_ipc::ClipboardOperation::Poll {
+            tracing::info!(session_id = %self.id, operation = ?operation, status = response.status, "remote clipboard request decided");
+        }
+        response
     }
     #[must_use]
     pub fn with_profile_id(mut self, id: ProfileId) -> Self {
@@ -348,6 +375,8 @@ impl SshSession {
     pub async fn close(&self) -> Result<(), SshSessionError> {
         set_terminal_detail(&self.terminal_detail, "SSH session closed by user".into());
         self.closed.store(true, Ordering::Release);
+        self.clipboard
+            .handle(cshell_ipc::ClipboardOperation::Poll, &[], false);
         let reader = self
             .reader_task
             .lock()
@@ -472,7 +501,7 @@ impl SshSessionRegistry {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use super::{SshConnect, SshSession};
     use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
     use cshell_ssh::KnownHostsVerifier;
@@ -488,7 +517,7 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     #[derive(Default)]
-    struct EchoServer {
+    pub(crate) struct EchoServer {
         channels: HashMap<ChannelId, Channel<Msg>>,
         accepted_public_key: Option<PublicKey>,
         sftp_state: Arc<Mutex<SftpFixtureState>>,

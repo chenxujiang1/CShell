@@ -1284,6 +1284,7 @@ dependencies = [
 name = "cshelld"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "cshell-application",
  "cshell-domain",
  "cshell-ipc",

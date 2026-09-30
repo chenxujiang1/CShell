@@ -1,3 +1,4 @@
+mod clipboard_connection;
 mod cursor_blink;
 mod daemon_connection;
 mod profile_connection;
@@ -77,6 +78,8 @@ struct DesktopApp {
     sftp: Option<DesktopSftpConnection>,
     sftp_panel: SftpPanel,
     last_sftp_generation: Option<u64>,
+    clipboard: Option<clipboard_connection::DesktopClipboardConnection>,
+    last_clipboard_generation: Option<u64>,
     pending_tab: Option<SessionId>,
     workspace: workspace_model::DesktopWorkspace,
     workspace_connection: Option<workspace_connection::WorkspaceConnection>,
@@ -860,6 +863,23 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = std::time::Instant::now();
         let mut redraw_needed = self.sync_workspace();
+        if let Some(clipboard) = &self.clipboard {
+            let selected = self.active_terminal_session_id();
+            clipboard.select(selected);
+            let generation = clipboard.generation();
+            if self.last_clipboard_generation != Some(generation) {
+                self.last_clipboard_generation = Some(generation);
+                redraw_needed = true;
+            }
+            if let Some(error) = clipboard.take_error() {
+                self.view_model.input_warning = Some(error);
+            }
+            if let Some(text) = clipboard.take_approved(selected, self.window_active)
+                && let Some(state) = &mut self.egui_state
+            {
+                state.set_clipboard_text(text.to_string());
+            }
+        }
         if self.sftp_panel.open {
             let generation = self.sftp.as_ref().map(DesktopSftpConnection::generation);
             if self.last_sftp_generation != generation {
@@ -1516,6 +1536,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let mut cancel_paste = false;
                 let mut profile_command = None;
                 let mut sftp_command = None;
+                let mut clipboard_command = None;
                 let sftp_view = self.sftp.as_ref().map(DesktopSftpConnection::view);
                 let sftp_session = self.active_terminal_session_id();
                 let selected_before_draw = self.view_model.selected;
@@ -1523,6 +1544,17 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
                     profile_command = self.profile_panel.draw(ui.ctx());
+                    if let Some(clipboard) = &self.clipboard {
+                        let title = self
+                            .view_model
+                            .sessions
+                            .iter()
+                            .find(|session| Some(session.id) == sftp_session)
+                            .map(|session| session.title.as_str())
+                            .unwrap_or("SSH");
+                        clipboard_command =
+                            clipboard.draw(ui.ctx(), sftp_session, self.window_active, title);
+                    }
                     sftp_command = self
                         .sftp_panel
                         .draw(ui.ctx(), sftp_session, sftp_view.as_ref());
@@ -1928,6 +1960,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     && !sftp.request(command)
                 {
                     self.view_model.input_warning = Some("SFTP 请求队列已满".into());
+                }
+                if let Some(command) = clipboard_command
+                    && let Some(clipboard) = &self.clipboard
+                    && !clipboard.decide(command)
+                {
+                    self.view_model.input_warning = Some("剪贴板确认队列已满；请重新确认。".into());
                 }
                 if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
                     match action {
@@ -2711,6 +2749,8 @@ impl DesktopWindows {
                 child.daemon = DesktopDaemonConnection::start_idle(config.clone()).ok();
                 child.profiles = DesktopProfileConnection::start(config.clone()).ok();
                 child.sftp = DesktopSftpConnection::start(config.clone()).ok();
+                child.clipboard =
+                    clipboard_connection::DesktopClipboardConnection::start(config.clone()).ok();
             }
             child.terminal_search = TerminalSearchWorker::start().ok();
             child.log_reflow = LogReflowWorker::start().ok();
@@ -2996,6 +3036,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .map(DesktopSftpConnection::start)
         .transpose()?;
+    let clipboard = daemon_config
+        .clone()
+        .map(clipboard_connection::DesktopClipboardConnection::start)
+        .transpose()?;
     let workspace_connection = daemon_config
         .clone()
         .map(workspace_connection::WorkspaceConnection::start)
@@ -3007,6 +3051,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         workspace_connection,
         profiles,
         sftp,
+        clipboard,
         terminal_search: Some(TerminalSearchWorker::start()?),
         ..DesktopApp::default()
     };

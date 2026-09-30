@@ -215,6 +215,33 @@ impl SessionIpcService {
         mut request: Envelope,
         negotiated_features: u64,
     ) -> Result<DispatchResult, SessionIpcError> {
+        if let Some(envelope::Payload::ClipboardRequest(clipboard)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::CLIPBOARD_CONTROL == 0 {
+                cshell_ipc::ClipboardResponse::with_status(cshell_ipc::ClipboardStatus::Unsupported)
+            } else if let (Ok(session_id), Ok(operation)) = (
+                cshell_ipc::decode_id(&clipboard.session_id).map(SessionId::from_bytes),
+                cshell_ipc::ClipboardOperation::try_from(clipboard.operation),
+            ) {
+                match self.ssh_sessions.get(session_id) {
+                    Ok(session) => session.clipboard_request(operation, &clipboard.token),
+                    Err(_) => cshell_ipc::ClipboardResponse::with_status(
+                        cshell_ipc::ClipboardStatus::Unavailable,
+                    ),
+                }
+            } else {
+                cshell_ipc::ClipboardResponse::with_status(
+                    cshell_ipc::ClipboardStatus::InvalidRequest,
+                )
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::ClipboardResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
         if let Some(envelope::Payload::SftpRequest(sftp_request)) = request.payload.as_ref() {
             let response = if negotiated_features & cshell_ipc::features::SFTP_CONTROL == 0 {
                 cshell_ipc::SftpResponse::with_status(
@@ -1181,6 +1208,207 @@ mod tests {
             panic!("expected SFTP response");
         };
         assert_eq!(accepted.status, SftpStatus::Unavailable as i32);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_ssh_clipboard_consent_over_authenticated_ipc_is_one_shot() {
+        use crate::SshSession;
+        use crate::ssh_session::{SshAuthentication, SshConnect, tests::EchoServer};
+        use cshell_domain::{InputAction, SessionId, TerminalSize};
+        use cshell_ipc::{
+            ClipboardOperation, ClipboardRequest, ClipboardResponse, ClipboardStatus, Handshake,
+            HandshakePolicy, client_handshake, features, read_envelope, server_handshake,
+            write_envelope,
+        };
+        use cshell_ssh::KnownHostsVerifier;
+        use russh::keys::ssh_key::{Algorithm, PrivateKey};
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let public = key.public_key().to_openssh().unwrap();
+        let mut config = russh::server::Config::default();
+        config.keys.push(key);
+        config.auth_rejection_time = std::time::Duration::from_millis(1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let ssh_server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let server = russh::server::run_stream(Arc::new(config), stream, EchoServer::default())
+                .await
+                .unwrap();
+            let _ = server.await;
+        });
+        let verifier = KnownHostsVerifier::parse(
+            &format!("[127.0.0.1]:{} {public}\n", address.port()),
+            "127.0.0.1",
+            address.port(),
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let session = SshSession::connect(
+            id,
+            "clipboard test".into(),
+            SshConnect {
+                username: "cshell".into(),
+                verifier,
+                authentication: SshAuthentication::Password("phase1".into()),
+            },
+            TerminalSize::cells(24, 80),
+            &temp.path().join("clipboard.csjr"),
+            16,
+        )
+        .await
+        .unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(temp.path().join("local"), 16).unwrap());
+        let service = SessionIpcService::new(registry);
+        let session = service.ssh_sessions.insert(session);
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let ipc_server = tokio::spawn(async move {
+            let policy =
+                HandshakePolicy::with_instance_id([2; 32], [1; 16], features::CLIPBOARD_CONTROL);
+            let negotiated = server_handshake(&mut server, &policy).await.unwrap();
+            service
+                .serve_connection_with_features(server, negotiated.feature_bits)
+                .await
+                .unwrap();
+        });
+        let mut handshake = Handshake::new(vec![1; 16], vec![2; 32]);
+        handshake.feature_bits = features::CLIPBOARD_CONTROL;
+        client_handshake(&mut client, 1, handshake).await.unwrap();
+        async fn control(
+            client: &mut tokio::io::DuplexStream,
+            id: SessionId,
+            operation: ClipboardOperation,
+            token: &[u8],
+        ) -> ClipboardResponse {
+            write_envelope(
+                client,
+                &Envelope {
+                    request_id: 42,
+                    payload: Some(envelope::Payload::ClipboardRequest(ClipboardRequest {
+                        session_id: id.as_uuid().as_bytes().to_vec(),
+                        operation: operation as i32,
+                        token: token.to_vec(),
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let response = read_envelope(client).await.unwrap();
+            assert_eq!(response.request_id, 42);
+            let Some(envelope::Payload::ClipboardResponse(response)) = response.payload else {
+                panic!("expected clipboard response");
+            };
+            response
+        }
+        session
+            .send_input(&InputAction::Text("\x1b]52;c;?\x07QUERY-DONE\n".into()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if session.generation() > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .token
+                .is_empty()
+        );
+        session
+            .send_input(&InputAction::Text("\x1b]52;c;aGVsbG8=\x1b\\\n".into()))
+            .unwrap();
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let response = control(&mut client, id, ClipboardOperation::Poll, &[]).await;
+                if !response.token.is_empty() {
+                    break response;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(pending.text.is_empty());
+        assert_eq!(pending.byte_count, 5);
+        assert_eq!(
+            control(
+                &mut client,
+                SessionId::new(),
+                ClipboardOperation::Approve,
+                &pending.token
+            )
+            .await
+            .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &[0; 16])
+                .await
+                .status,
+            ClipboardStatus::Stale as i32
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .text,
+            "hello"
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Stale as i32
+        );
+        session.close().await.unwrap();
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(5), ipc_server)
+            .await
+            .unwrap()
+            .unwrap();
+        ssh_server.abort();
+    }
+
+    #[tokio::test]
+    async fn clipboard_control_requires_capability_and_valid_session() {
+        use cshell_ipc::{ClipboardRequest, ClipboardStatus, features};
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(temp.path(), 8).unwrap());
+        let service = SessionIpcService::new(registry);
+        let request = Envelope {
+            request_id: 8,
+            payload: Some(envelope::Payload::ClipboardRequest(ClipboardRequest {
+                session_id: vec![],
+                operation: 0,
+                token: vec![],
+            })),
+            ..Default::default()
+        };
+        for (features, expected) in [
+            (0, ClipboardStatus::Unsupported),
+            (features::CLIPBOARD_CONTROL, ClipboardStatus::InvalidRequest),
+        ] {
+            let response = service
+                .dispatch_with_features(request.clone(), features)
+                .await
+                .unwrap()
+                .response;
+            let Some(envelope::Payload::ClipboardResponse(response)) = response.payload else {
+                panic!("expected clipboard response");
+            };
+            assert_eq!(response.status, expected as i32);
+        }
     }
 
     #[tokio::test]

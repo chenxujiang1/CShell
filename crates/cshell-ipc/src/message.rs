@@ -11,7 +11,7 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 12;
+pub const PROTOCOL_MINOR: u32 = 13;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -40,6 +40,7 @@ pub mod features {
     pub const LOCAL_LAUNCH_OPTIONS: u64 = 1 << 14;
     pub const WORKSPACE_CONTROL: u64 = 1 << 15;
     pub const SFTP_CONTROL: u64 = 1 << 16;
+    pub const CLIPBOARD_CONTROL: u64 = 1 << 17;
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1594,7 +1595,7 @@ pub struct Envelope {
     pub deadline_unix_ms: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1665,6 +1666,10 @@ pub mod envelope {
         SftpRequest(crate::SftpRequest),
         #[prost(message, tag = "36")]
         SftpResponse(crate::SftpResponse),
+        #[prost(message, tag = "37")]
+        ClipboardRequest(crate::ClipboardRequest),
+        #[prost(message, tag = "38")]
+        ClipboardResponse(crate::ClipboardResponse),
     }
 }
 

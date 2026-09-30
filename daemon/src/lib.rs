@@ -1,5 +1,6 @@
 //! Daemon-owned ordered terminal pipeline used by the Phase 0 vertical slice.
 
+mod clipboard;
 mod profile_ipc;
 
 mod exit_monitor;
@@ -383,6 +384,29 @@ impl TerminalPipeline {
         terminal_size: TerminalSize,
         ingress_capacity: usize,
     ) -> Result<Self, PipelineError> {
+        Self::spawn_inner(journal_path, terminal_size, ingress_capacity, None)
+    }
+
+    pub(crate) fn spawn_with_clipboard(
+        journal_path: impl AsRef<Path>,
+        terminal_size: TerminalSize,
+        ingress_capacity: usize,
+        clipboard: clipboard::ClipboardInbox,
+    ) -> Result<Self, PipelineError> {
+        Self::spawn_inner(
+            journal_path,
+            terminal_size,
+            ingress_capacity,
+            Some(clipboard),
+        )
+    }
+
+    fn spawn_inner(
+        journal_path: impl AsRef<Path>,
+        terminal_size: TerminalSize,
+        ingress_capacity: usize,
+        clipboard: Option<clipboard::ClipboardInbox>,
+    ) -> Result<Self, PipelineError> {
         let mut journal = SegmentedJournalWriter::create(
             journal_path,
             Durability::SessionLog,
@@ -402,11 +426,17 @@ impl TerminalPipeline {
         let worker = thread::Builder::new()
             .name("cshell-terminal-parser".to_owned())
             .spawn(move || {
+                let mut observer = clipboard
+                    .as_ref()
+                    .map(|_| clipboard::ClipboardObserver::default());
                 while let Ok(message) = receiver.recv() {
                     match message {
                         PipelineMessage::Output(bytes) => {
                             let byte_count = bytes.len();
                             journal.append(&bytes)?;
+                            if let (Some(inbox), Some(observer)) = (&clipboard, &mut observer) {
+                                observer.feed(&bytes, inbox);
+                            }
                             let delta = terminal.feed(&bytes);
                             worker_responses.publish(delta.terminal_responses)?;
                             worker_latest.publish(terminal.snapshot());
@@ -551,6 +581,33 @@ mod tests {
             .unwrap();
         assert_eq!(responses.drain(), vec![b"\x1b[1;4R".to_vec()]);
         assert!(responses.is_empty());
+        pipeline.shutdown().unwrap();
+    }
+
+    #[test]
+    fn clipboard_observation_never_replies_to_remote_reads() {
+        use cshell_ipc::ClipboardOperation;
+        let directory = tempfile::tempdir().unwrap();
+        let inbox = crate::clipboard::ClipboardInbox::default();
+        let pipeline = TerminalPipeline::spawn_with_clipboard(
+            directory.path().join("clipboard.csjr"),
+            TerminalSize::cells(2, 20),
+            8,
+            inbox.clone(),
+        )
+        .unwrap();
+        let snapshots = pipeline.snapshots();
+        pipeline
+            .try_submit(b"\x1b]52;c;?\x07\x1b]52;c;aGVsbG8=\x07visible".to_vec())
+            .unwrap();
+        let snapshot = snapshots
+            .wait_for_generation(1, Duration::from_secs(2))
+            .unwrap();
+        assert!(pipeline.responses().is_empty());
+        assert_eq!(snapshot.row(0).unwrap()[0].character, 'v');
+        let poll = inbox.handle(ClipboardOperation::Poll, &[], true);
+        assert_eq!(poll.byte_count, 5);
+        assert!(poll.text.is_empty());
         pipeline.shutdown().unwrap();
     }
 

@@ -180,9 +180,9 @@ impl AlacrittyTerminalEngine {
         let dimensions = TerminalDimensions::from(size);
         let config = Config {
             kitty_keyboard: true,
-            // OSC 52 remains disabled until a per-session consent path is available.
-            // Upstream currently defaults to OnlyCopy; relying on that would still
-            // decode remote clipboard payloads before our event sink discards them.
+            // Clipboard consent is handled by the daemon's bounded OSC52 observer.
+            // The adapter must never decode clipboard payloads or answer reads;
+            // upstream's OnlyCopy default would bypass that resource boundary.
             osc52: Osc52::Disabled,
             ..Config::default()
         };

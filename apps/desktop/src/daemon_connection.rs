@@ -32,7 +32,7 @@ enum DesktopEndpointSource {
     Discovery(RuntimePaths),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ResolvedDesktopEndpoint {
     #[cfg(windows)]
     pub(crate) endpoint: String,
@@ -40,6 +40,15 @@ pub(crate) struct ResolvedDesktopEndpoint {
     pub(crate) endpoint: PathBuf,
     pub(crate) instance_token: [u8; 32],
     pub(crate) daemon_instance_id: [u8; 16],
+}
+impl std::fmt::Debug for ResolvedDesktopEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedDesktopEndpoint")
+            .field("daemon_instance_id", &self.daemon_instance_id)
+            .field("instance_token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1974,6 +1983,23 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn clipboard_connection_configuration_debug_hides_instance_token() {
+        let resolved = ResolvedDesktopEndpoint {
+            endpoint: "test-endpoint".into(),
+            instance_token: [173; 32],
+            daemon_instance_id: [1; 16],
+        };
+        let config = DesktopConnectionConfig {
+            source: DesktopEndpointSource::Explicit(resolved),
+            session_id: None,
+            request_log_pages: false,
+        };
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("173"));
+    }
 
     fn interactive_profile() -> LocalProfile {
         #[cfg(windows)]
