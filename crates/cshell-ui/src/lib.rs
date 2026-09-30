@@ -64,6 +64,7 @@ pub enum WorkbenchMenuCommand {
     Profiles,
     SshConnections,
     SftpFiles,
+    ClipboardPolicy,
     NewSshProfile,
     OpenSavedProfile(ProfileId),
     EditSavedProfile(ProfileId),
@@ -100,6 +101,10 @@ pub fn draw_workbench(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) -> egui
                 }
                 if ui.button("关于 CShell").clicked() {
                     model.about_open = true;
+                    ui.close();
+                }
+                if ui.button("剪贴板安全策略").clicked() {
+                    model.menu_command = Some(WorkbenchMenuCommand::ClipboardPolicy);
                     ui.close();
                 }
                 ui.separator();

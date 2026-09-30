@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde_json.workspace = true
 base64 = "=0.22.1"
 cshell-application = { path = "../crates/cshell-application" }
 cshell-domain = { path = "../crates/cshell-domain" }
@@ -30,7 +31,6 @@ cshell-render = { path = "../crates/cshell-render" }
 rand.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true
-serde_json.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
 

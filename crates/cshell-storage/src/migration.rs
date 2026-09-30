@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
-pub(crate) const SCHEMA_VERSION: i64 = 7;
+pub(crate) const SCHEMA_VERSION: i64 = 8;
+const CREATE_CLIPBOARD_TABLE_SQL: &str = "CREATE TABLE clipboard_policy_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)";
 
 const CREATE_SSH_TABLE_SQL: &str = "CREATE TABLE profile_ssh_connections (
             profile_id TEXT PRIMARY KEY REFERENCES profile_records(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
@@ -50,27 +51,31 @@ pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
         }
         1 => {
             create_backup(&pool, path).await?;
-            migrate_v1_to_v7(&pool).await?;
+            migrate_v1_to_v8(&pool).await?;
         }
         2 => {
             create_backup(&pool, path).await?;
-            migrate_v2_to_v7(&pool).await?;
+            migrate_v2_to_v8(&pool).await?;
         }
         3 => {
             create_backup(&pool, path).await?;
-            migrate_v3_to_v7(&pool).await?;
+            migrate_v3_to_v8(&pool).await?;
         }
         4 => {
             create_backup(&pool, path).await?;
-            migrate_v4_to_v7(&pool).await?;
+            migrate_v4_to_v8(&pool).await?;
         }
         5 => {
             create_backup(&pool, path).await?;
-            migrate_v5_to_v7(&pool).await?;
+            migrate_v5_to_v8(&pool).await?;
         }
         6 => {
             create_backup(&pool, path).await?;
-            migrate_v6_to_v7(&pool).await?;
+            migrate_v6_to_v8(&pool).await?;
+        }
+        7 => {
+            create_backup(&pool, path).await?;
+            migrate_v7_to_v8(&pool).await?;
         }
         SCHEMA_VERSION => {}
         other => return Err(StorageError::UnsupportedSchema(other)),
@@ -140,22 +145,24 @@ async fn migrate_new_database(pool: &SqlitePool) -> Result<(), StorageError> {
     query(CREATE_SSH_TABLE_SQL).execute(&mut *tx).await?;
     query(CREATE_LOCAL_TABLE_SQL).execute(&mut *tx).await?;
     query("CREATE TABLE workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)").execute(&mut *tx).await?;
-    query("PRAGMA user_version = 7").execute(&mut *tx).await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_v1_to_v7(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v1_to_v8(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     query(CREATE_SSH_TABLE_SQL).execute(&mut *tx).await?;
     query(CREATE_LOCAL_TABLE_SQL).execute(&mut *tx).await?;
     query("CREATE TABLE workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)").execute(&mut *tx).await?;
-    query("PRAGMA user_version = 7").execute(&mut *tx).await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_v2_to_v7(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v2_to_v8(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     for statement in [
         "ALTER TABLE profile_ssh_connections ADD COLUMN auth_method INTEGER NOT NULL DEFAULT 0 CHECK (auth_method BETWEEN 0 AND 3)",
@@ -169,45 +176,58 @@ async fn migrate_v2_to_v7(pool: &SqlitePool) -> Result<(), StorageError> {
     }
     query(CREATE_LOCAL_TABLE_SQL).execute(&mut *tx).await?;
     query("CREATE TABLE workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)").execute(&mut *tx).await?;
-    query("PRAGMA user_version = 7").execute(&mut *tx).await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_v3_to_v7(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v3_to_v8(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     query("ALTER TABLE profile_ssh_connections ADD COLUMN route_json TEXT NOT NULL DEFAULT '{\"kind\":\"direct\"}'")
         .execute(&mut *tx).await?;
     query(CREATE_LOCAL_TABLE_SQL).execute(&mut *tx).await?;
     query("CREATE TABLE workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)").execute(&mut *tx).await?;
-    query("PRAGMA user_version = 7").execute(&mut *tx).await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_v4_to_v7(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v4_to_v8(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     query(CREATE_LOCAL_TABLE_SQL).execute(&mut *tx).await?;
     query("CREATE TABLE workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)").execute(&mut *tx).await?;
-    query("PRAGMA user_version = 7").execute(&mut *tx).await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
 // v5 local configuration gains close_policy; v7 also adds workspace_state.
 // Legacy records keep their default without rewriting the catalog revision.
-async fn migrate_v5_to_v7(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v5_to_v8(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     query("CREATE TABLE workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)").execute(&mut *tx).await?;
-    query("PRAGMA user_version = 7").execute(&mut *tx).await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn migrate_v6_to_v7(pool: &SqlitePool) -> Result<(), StorageError> {
+async fn migrate_v6_to_v8(pool: &SqlitePool) -> Result<(), StorageError> {
     let mut tx = pool.begin().await?;
     query("CREATE TABLE workspace_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL CHECK (revision > 0), document_json TEXT NOT NULL)").execute(&mut *tx).await?;
-    query("PRAGMA user_version = 7").execute(&mut *tx).await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn migrate_v7_to_v8(pool: &SqlitePool) -> Result<(), StorageError> {
+    let mut tx = pool.begin().await?;
+    query(CREATE_CLIPBOARD_TABLE_SQL).execute(&mut *tx).await?;
+    query("PRAGMA user_version = 8").execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }

@@ -1,6 +1,8 @@
 //! Stable domain types shared by CShell use cases and adapters.
 
+mod clipboard;
 mod error;
+pub use clipboard::ClipboardHost;
 mod id;
 mod input;
 mod profile;

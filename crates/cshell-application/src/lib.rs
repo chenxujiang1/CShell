@@ -1,6 +1,8 @@
 //! Use-case ports. Infrastructure crates implement these interfaces.
 
+mod clipboard;
 mod profile_import;
+pub use clipboard::*;
 mod profiles;
 mod workspace;
 pub use workspace::*;

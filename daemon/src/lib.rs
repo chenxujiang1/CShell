@@ -1,6 +1,7 @@
 //! Daemon-owned ordered terminal pipeline used by the Phase 0 vertical slice.
 
 mod clipboard;
+mod clipboard_policy;
 mod profile_ipc;
 
 mod exit_monitor;

@@ -489,6 +489,71 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
         })
         .await
         .unwrap();
+        // Editing the Profile must not retarget a running session's host restriction.
+        let mut edited = target.clone();
+        edited.host = "edited.example.invalid".into();
+        edited.port = 2200;
+        let applied = exchange(&service, envelope::Payload::ProfileRequest(profile_request! {
+            operation: ProfileOperation::ApplyChanges as i32,
+            expected_revision: 1,
+            changes: vec![cshell_ipc::ProfileChange {
+                change: Some(cshell_ipc::profile_change::Change::UpsertSshConnection(cshell_ipc::SshConnectionData::from(&edited))),
+            }]
+        })).await;
+        let Some(envelope::Payload::ProfileResponse(applied)) = applied.payload else {
+            panic!("missing target edit");
+        };
+        assert_eq!(applied.status, ProfileStatus::Ok as i32);
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let selected_session_id = session.session_id.clone();
+        let policy_request = async move {
+            write_envelope(
+                &mut client,
+                &Envelope {
+                    request_id: 71,
+                    payload: Some(envelope::Payload::ClipboardPolicyRequest(
+                        cshell_ipc::ClipboardPolicyRequest {
+                            selected_session_id,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let response = read_envelope(&mut client).await.unwrap();
+            drop(client);
+            response
+        };
+        let (served, response) = tokio::join!(
+            service.serve_connection_with_features(
+                server,
+                cshell_ipc::features::HOST_CLIPBOARD_POLICY
+            ),
+            policy_request
+        );
+        served.unwrap();
+        let Some(envelope::Payload::ClipboardPolicyResponse(response)) = response.payload else {
+            panic!("missing captured endpoint");
+        };
+        assert_eq!(
+            response.status,
+            cshell_ipc::ClipboardPolicyStatus::Ok as i32
+        );
+        assert_eq!(response.selected_host, TARGET);
+        assert_eq!(response.selected_port, u32::from(PORT));
+        let restored = exchange(&service, envelope::Payload::ProfileRequest(profile_request! {
+            operation: ProfileOperation::ApplyChanges as i32,
+            expected_revision: 2,
+            changes: vec![cshell_ipc::ProfileChange {
+                change: Some(cshell_ipc::profile_change::Change::UpsertSshConnection(cshell_ipc::SshConnectionData::from(&target))),
+            }]
+        })).await;
+        let Some(envelope::Payload::ProfileResponse(restored)) = restored.payload else {
+            panic!("missing target restore");
+        };
+        assert_eq!(restored.status, ProfileStatus::Ok as i32);
         exchange(
             &service,
             envelope::Payload::SessionCloseRequest(SessionCloseRequest {
@@ -574,7 +639,7 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
                 &service,
                 envelope::Payload::ProfileRequest(profile_request! {
                 operation: ProfileOperation::ApplyChanges as i32,
-                expected_revision: 1,
+                expected_revision: 3,
                 changes: vec![cshell_ipc::ProfileChange {
                     change: Some(cshell_ipc::profile_change::Change::UpsertSshConnection(
                         cshell_ipc::SshConnectionData::from(&blocked),

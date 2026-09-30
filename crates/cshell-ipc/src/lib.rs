@@ -1,6 +1,8 @@
 //! Versioned local IPC protocol and bounded frame codec.
 
 mod clipboard;
+mod clipboard_policy;
+pub use clipboard_policy::*;
 mod codec;
 pub use clipboard::*;
 mod discovery;

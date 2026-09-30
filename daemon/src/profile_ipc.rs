@@ -47,6 +47,25 @@ struct PendingHostKey {
 }
 
 impl ProfileIpcService {
+    pub(crate) async fn load_clipboard_policy(
+        &self,
+    ) -> Result<cshell_application::ClipboardPolicySnapshot, cshell_application::ClipboardPolicyError>
+    {
+        use cshell_application::ClipboardPolicyRepository;
+        self.service.repository().load_clipboard_policy().await
+    }
+    pub(crate) async fn save_clipboard_policy(
+        &self,
+        revision: u64,
+        document: &cshell_application::ClipboardPolicyDocument,
+    ) -> Result<cshell_application::ClipboardPolicySnapshot, cshell_application::ClipboardPolicyError>
+    {
+        use cshell_application::ClipboardPolicyRepository;
+        self.service
+            .repository()
+            .save_clipboard_policy(revision, document)
+            .await
+    }
     pub fn new(repository: SqliteProfileRepository) -> Self {
         Self {
             service: ProfileService::new(repository),

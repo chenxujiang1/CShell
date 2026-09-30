@@ -241,16 +241,16 @@ async fn future_schema_is_not_downgraded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("future.db");
     let pool = raw_pool(&path).await?;
-    query("PRAGMA user_version = 8").execute(&pool).await?;
+    query("PRAGMA user_version = 9").execute(&pool).await?;
     pool.close().await;
     assert!(matches!(
         SqliteProfileRepository::open(&path).await,
-        Err(StorageError::UnsupportedSchema(8))
+        Err(StorageError::UnsupportedSchema(9))
     ));
     assert!(backups(temp.path())?.is_empty());
     let pool = raw_pool(&path).await?;
     let version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     pool.close().await;
     Ok(())
 }
@@ -432,6 +432,9 @@ async fn v3_route_migration_preserves_identity_and_backup_is_restorable()
         .execute(&pool)
         .await?;
     query("DROP TABLE workspace_state").execute(&pool).await?;
+    query("DROP TABLE clipboard_policy_state")
+        .execute(&pool)
+        .await?;
     query("PRAGMA user_version = 3").execute(&pool).await?;
     pool.close().await;
     let repository = SqliteProfileRepository::open(&path).await?;
@@ -558,6 +561,9 @@ async fn v4_local_migration_preserves_metadata_and_backup() -> Result<(), Box<dy
         .execute(&pool)
         .await?;
     query("DROP TABLE workspace_state").execute(&pool).await?;
+    query("DROP TABLE clipboard_policy_state")
+        .execute(&pool)
+        .await?;
     query("PRAGMA user_version = 4").execute(&pool).await?;
     pool.close().await;
     let repository = SqliteProfileRepository::open(&path).await?;
@@ -630,6 +636,9 @@ async fn existing_v5_local_json_defaults_to_keep_alive_without_rewriting_catalog
         .execute(&pool)
         .await?;
     query("DROP TABLE workspace_state").execute(&pool).await?;
+    query("DROP TABLE clipboard_policy_state")
+        .execute(&pool)
+        .await?;
     query("PRAGMA user_version = 5").execute(&pool).await?;
     pool.close().await;
     let repository = SqliteProfileRepository::open(&path).await?;
@@ -648,7 +657,7 @@ async fn existing_v5_local_json_defaults_to_keep_alive_without_rewriting_catalog
         query_scalar::<_, i64>("PRAGMA user_version")
             .fetch_one(&pool)
             .await?,
-        7
+        8
     );
     pool.close().await;
     let backup_paths = backups(temp.path())?;

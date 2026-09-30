@@ -43,8 +43,9 @@ pub enum SessionIpcError {
 #[derive(Clone, Debug)]
 pub struct SessionIpcService {
     registry: Arc<LocalSessionRegistry>,
-    profiles: Option<Arc<ProfileIpcService>>,
-    ssh_sessions: Arc<SshSessionRegistry>,
+    pub(crate) profiles: Option<Arc<ProfileIpcService>>,
+    pub(crate) ssh_sessions: Arc<SshSessionRegistry>,
+    pub(crate) clipboard_policy_gate: Arc<tokio::sync::Mutex<()>>,
     sftp: crate::sftp_ipc::SftpIpcService,
     known_hosts_path: Option<std::path::PathBuf>,
 }
@@ -84,6 +85,7 @@ impl SessionIpcService {
         Self {
             registry,
             profiles: None,
+            clipboard_policy_gate: Arc::new(tokio::sync::Mutex::new(())),
             ssh_sessions: Arc::new(SshSessionRegistry::default()),
             sftp: crate::sftp_ipc::SftpIpcService::default(),
             known_hosts_path: None,
@@ -215,6 +217,24 @@ impl SessionIpcService {
         mut request: Envelope,
         negotiated_features: u64,
     ) -> Result<DispatchResult, SessionIpcError> {
+        if let Some(envelope::Payload::ClipboardPolicyRequest(policy)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::HOST_CLIPBOARD_POLICY == 0
+            {
+                cshell_ipc::ClipboardPolicyResponse::with_status(
+                    cshell_ipc::ClipboardPolicyStatus::Unsupported,
+                )
+            } else {
+                self.handle_clipboard_policy(policy).await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::ClipboardPolicyResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
         if let Some(envelope::Payload::ClipboardRequest(clipboard)) = request.payload.as_ref() {
             let response = if negotiated_features & cshell_ipc::features::CLIPBOARD_CONTROL == 0 {
                 cshell_ipc::ClipboardResponse::with_status(cshell_ipc::ClipboardStatus::Unsupported)
@@ -222,12 +242,8 @@ impl SessionIpcService {
                 cshell_ipc::decode_id(&clipboard.session_id).map(SessionId::from_bytes),
                 cshell_ipc::ClipboardOperation::try_from(clipboard.operation),
             ) {
-                match self.ssh_sessions.get(session_id) {
-                    Ok(session) => session.clipboard_request(operation, &clipboard.token),
-                    Err(_) => cshell_ipc::ClipboardResponse::with_status(
-                        cshell_ipc::ClipboardStatus::Unavailable,
-                    ),
-                }
+                self.handle_clipboard_decision(session_id, operation, &clipboard.token)
+                    .await
             } else {
                 cshell_ipc::ClipboardResponse::with_status(
                     cshell_ipc::ClipboardStatus::InvalidRequest,
@@ -699,9 +715,18 @@ impl SessionIpcService {
         )
         .await
         .map_err(ssh_launch_failure)?;
-        let session = self
-            .ssh_sessions
-            .insert(session.with_profile_id(profile_id));
+        let host = cshell_domain::ClipboardHost::new(&plan.target.host, plan.target.port)
+            .ok_or("invalid clipboard host identity")?;
+        let _guard = self.clipboard_policy_gate.lock().await;
+        let policy = self
+            .load_launch_clipboard_policy()
+            .await
+            .map_err(|_| SshLaunchFailure::from("Clipboard policy storage unavailable"))?;
+        let session = session
+            .with_profile_id(profile_id)
+            .with_clipboard_host(host.clone());
+        session.set_host_clipboard_blocked(policy.document.blocked_hosts.contains(&host));
+        let session = self.ssh_sessions.insert(session);
         Ok(session.summary())
     }
 
@@ -1214,11 +1239,13 @@ mod tests {
     async fn verified_ssh_clipboard_consent_over_authenticated_ipc_is_one_shot() {
         use crate::SshSession;
         use crate::ssh_session::{SshAuthentication, SshConnect, tests::EchoServer};
-        use cshell_domain::{InputAction, SessionId, TerminalSize};
+        use cshell_application::{ClipboardPolicyDocument, encode_clipboard_policy};
+        use cshell_domain::{ClipboardHost, InputAction, SessionId, TerminalSize};
         use cshell_ipc::{
-            ClipboardOperation, ClipboardRequest, ClipboardResponse, ClipboardStatus, Handshake,
-            HandshakePolicy, client_handshake, features, read_envelope, server_handshake,
-            write_envelope,
+            ClipboardOperation, ClipboardPolicyOperation, ClipboardPolicyRequest,
+            ClipboardPolicyResponse, ClipboardPolicyStatus, ClipboardRequest, ClipboardResponse,
+            ClipboardStatus, Handshake, HandshakePolicy, client_handshake, features, read_envelope,
+            server_handshake, write_envelope,
         };
         use cshell_ssh::KnownHostsVerifier;
         use russh::keys::ssh_key::{Algorithm, PrivateKey};
@@ -1259,12 +1286,23 @@ mod tests {
         .await
         .unwrap();
         let registry = Arc::new(LocalSessionRegistry::new(temp.path().join("local"), 16).unwrap());
-        let service = SessionIpcService::new(registry);
-        let session = service.ssh_sessions.insert(session);
+        let database = temp.path().join("policies.sqlite");
+        let repository = cshell_storage::SqliteProfileRepository::open(&database)
+            .await
+            .unwrap();
+        let service = SessionIpcService::new(registry)
+            .with_profiles(Arc::new(crate::ProfileIpcService::new(repository)));
+        let host = ClipboardHost::new("127.0.0.1", address.port()).unwrap();
+        let session = service
+            .ssh_sessions
+            .insert(session.with_clipboard_host(host.clone()));
         let (mut client, mut server) = tokio::io::duplex(64 * 1024);
         let ipc_server = tokio::spawn(async move {
-            let policy =
-                HandshakePolicy::with_instance_id([2; 32], [1; 16], features::CLIPBOARD_CONTROL);
+            let policy = HandshakePolicy::with_instance_id(
+                [2; 32],
+                [1; 16],
+                features::CLIPBOARD_CONTROL | features::HOST_CLIPBOARD_POLICY,
+            );
             let negotiated = server_handshake(&mut server, &policy).await.unwrap();
             service
                 .serve_connection_with_features(server, negotiated.feature_bits)
@@ -1272,7 +1310,7 @@ mod tests {
                 .unwrap();
         });
         let mut handshake = Handshake::new(vec![1; 16], vec![2; 32]);
-        handshake.feature_bits = features::CLIPBOARD_CONTROL;
+        handshake.feature_bits = features::CLIPBOARD_CONTROL | features::HOST_CLIPBOARD_POLICY;
         client_handshake(&mut client, 1, handshake).await.unwrap();
         async fn control(
             client: &mut tokio::io::DuplexStream,
@@ -1300,6 +1338,58 @@ mod tests {
                 panic!("expected clipboard response");
             };
             response
+        }
+        async fn policy_control(
+            client: &mut tokio::io::DuplexStream,
+            id: SessionId,
+            revision: u64,
+            document: &ClipboardPolicyDocument,
+        ) -> ClipboardPolicyResponse {
+            write_envelope(
+                client,
+                &Envelope {
+                    request_id: 43,
+                    payload: Some(envelope::Payload::ClipboardPolicyRequest(
+                        ClipboardPolicyRequest {
+                            operation: ClipboardPolicyOperation::Save as i32,
+                            expected_revision: revision,
+                            document_json: encode_clipboard_policy(document).unwrap(),
+                            selected_session_id: id.as_uuid().as_bytes().to_vec(),
+                        },
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let response = read_envelope(client).await.unwrap();
+            assert_eq!(response.request_id, 43);
+            let Some(envelope::Payload::ClipboardPolicyResponse(response)) = response.payload
+            else {
+                panic!("expected policy response");
+            };
+            response
+        }
+        async fn pending_write(
+            client: &mut tokio::io::DuplexStream,
+            session: &SshSession,
+        ) -> ClipboardResponse {
+            tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+            session
+                .send_input(&InputAction::Text("\x1b]52;c;aGVsbG8=\x07\n".into()))
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let response =
+                        control(client, session.id(), ClipboardOperation::Poll, &[]).await;
+                    if !response.token.is_empty() {
+                        break response;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap()
         }
         session
             .send_input(&InputAction::Text("\x1b]52;c;?\x07QUERY-DONE\n".into()))
@@ -1365,6 +1455,64 @@ mod tests {
                 .status,
             ClipboardStatus::Stale as i32
         );
+        let pending = pending_write(&mut client, &session).await;
+        let blocked = ClipboardPolicyDocument {
+            blocked_hosts: vec![host.clone()],
+            ..Default::default()
+        };
+        let saved = policy_control(&mut client, id, 0, &blocked).await;
+        assert_eq!(saved.status, ClipboardPolicyStatus::Ok as i32);
+        assert_eq!(saved.revision, 1);
+        assert_eq!(saved.selected_host, host.host);
+        assert_eq!(saved.selected_port, u32::from(host.port));
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        let empty = ClipboardPolicyDocument::default();
+        assert_eq!(
+            policy_control(&mut client, id, 0, &empty).await.status,
+            ClipboardPolicyStatus::Conflict as i32
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        assert_eq!(policy_control(&mut client, id, 1, &empty).await.revision, 2);
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Stale as i32
+        );
+        assert!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .token
+                .is_empty()
+        );
+        let pending = pending_write(&mut client, &session).await;
+        // Loss of policy storage must clear pending payloads before an old client can approve.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&database))
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE clipboard_policy_state")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        pool.close().await;
         session.close().await.unwrap();
         assert_eq!(
             control(&mut client, id, ClipboardOperation::Poll, &[])
@@ -1378,6 +1526,98 @@ mod tests {
             .unwrap()
             .unwrap();
         ssh_server.abort();
+    }
+
+    #[tokio::test]
+    async fn clipboard_policy_requires_capability_and_refuses_stale_or_malformed_writes() {
+        use cshell_application::{ClipboardPolicyDocument, encode_clipboard_policy};
+        use cshell_domain::ClipboardHost;
+        use cshell_ipc::{
+            ClipboardPolicyOperation, ClipboardPolicyRequest, ClipboardPolicyStatus, features,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let repository =
+            cshell_storage::SqliteProfileRepository::open(temp.path().join("policy.db"))
+                .await
+                .unwrap();
+        let service = SessionIpcService::new(Arc::new(
+            LocalSessionRegistry::new(temp.path().join("journals"), 8).unwrap(),
+        ))
+        .with_profiles(Arc::new(crate::ProfileIpcService::new(repository)));
+        let document = ClipboardPolicyDocument {
+            blocked_hosts: vec![ClipboardHost::new("example.test", 22).unwrap()],
+            ..Default::default()
+        };
+        let save = ClipboardPolicyRequest {
+            operation: ClipboardPolicyOperation::Save as i32,
+            document_json: encode_clipboard_policy(&document).unwrap(),
+            ..Default::default()
+        };
+        for (request, bits, expected) in [
+            (save.clone(), 0, ClipboardPolicyStatus::Unsupported),
+            (
+                ClipboardPolicyRequest {
+                    selected_session_id: vec![1],
+                    ..save.clone()
+                },
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Invalid,
+            ),
+            (
+                ClipboardPolicyRequest {
+                    document_json: b"{\"secret\":\"private\"}".to_vec(),
+                    ..save.clone()
+                },
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Invalid,
+            ),
+            (
+                save.clone(),
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Ok,
+            ),
+            (
+                save,
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Conflict,
+            ),
+            (
+                ClipboardPolicyRequest {
+                    expected_revision: 1,
+                    ..Default::default()
+                },
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Invalid,
+            ),
+            (
+                ClipboardPolicyRequest::default(),
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Ok,
+            ),
+        ] {
+            let response = service
+                .dispatch_with_features(
+                    Envelope {
+                        request_id: 99,
+                        payload: Some(envelope::Payload::ClipboardPolicyRequest(request)),
+                        ..Default::default()
+                    },
+                    bits,
+                )
+                .await
+                .unwrap()
+                .response;
+            assert_eq!(response.request_id, 99);
+            let Some(envelope::Payload::ClipboardPolicyResponse(response)) = response.payload
+            else {
+                panic!("expected policy response");
+            };
+            assert_eq!(response.status, expected as i32);
+            if expected == ClipboardPolicyStatus::Ok {
+                assert_eq!(response.revision, 1);
+                assert!(response.selected_host.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

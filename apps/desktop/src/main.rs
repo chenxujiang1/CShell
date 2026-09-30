@@ -1,4 +1,5 @@
 mod clipboard_connection;
+mod clipboard_policy;
 mod cursor_blink;
 mod daemon_connection;
 mod profile_connection;
@@ -80,6 +81,8 @@ struct DesktopApp {
     last_sftp_generation: Option<u64>,
     clipboard: Option<clipboard_connection::DesktopClipboardConnection>,
     last_clipboard_generation: Option<u64>,
+    clipboard_policy: Option<clipboard_policy::DesktopClipboardPolicy>,
+    last_clipboard_policy_generation: Option<u64>,
     pending_tab: Option<SessionId>,
     workspace: workspace_model::DesktopWorkspace,
     workspace_connection: Option<workspace_connection::WorkspaceConnection>,
@@ -863,6 +866,14 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = std::time::Instant::now();
         let mut redraw_needed = self.sync_workspace();
+        if let Some(policy) = &self.clipboard_policy {
+            policy.select(self.active_terminal_session_id());
+            let generation = policy.generation();
+            if self.last_clipboard_policy_generation != Some(generation) {
+                self.last_clipboard_policy_generation = Some(generation);
+                redraw_needed = true;
+            }
+        }
         if let Some(clipboard) = &self.clipboard {
             let selected = self.active_terminal_session_id();
             clipboard.select(selected);
@@ -1544,6 +1555,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 let full_output = context.run_ui(raw_input, |ui| {
                     terminal_rect = cshell_ui::draw_workbench(ui, &mut self.view_model);
                     profile_command = self.profile_panel.draw(ui.ctx());
+                    if let Some(policy) = &mut self.clipboard_policy {
+                        policy.draw(ui.ctx());
+                    }
                     if let Some(clipboard) = &self.clipboard {
                         let title = self
                             .view_model
@@ -1748,6 +1762,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             (&self.sftp, self.active_terminal_session_id())
                         {
                             sftp.request(sftp_connection::SftpClientCommand::Recover(session_id));
+                        }
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::ClipboardPolicy) => {
+                        if let Some(policy) = &mut self.clipboard_policy {
+                            policy.open = true;
+                            policy.refresh();
                         }
                         window.request_redraw();
                     }
@@ -2751,6 +2772,8 @@ impl DesktopWindows {
                 child.sftp = DesktopSftpConnection::start(config.clone()).ok();
                 child.clipboard =
                     clipboard_connection::DesktopClipboardConnection::start(config.clone()).ok();
+                child.clipboard_policy =
+                    clipboard_policy::DesktopClipboardPolicy::start(config.clone()).ok();
             }
             child.terminal_search = TerminalSearchWorker::start().ok();
             child.log_reflow = LogReflowWorker::start().ok();
@@ -3044,6 +3067,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .map(workspace_connection::WorkspaceConnection::start)
         .transpose()?;
+    let clipboard_policy = daemon_config
+        .clone()
+        .map(clipboard_policy::DesktopClipboardPolicy::start)
+        .transpose()?;
     let workspace_config = daemon_config.map(|config| config.with_log_pages(show_session_log));
     let mut app = DesktopApp {
         accesskit_proxy: Some(event_loop.create_proxy()),
@@ -3052,6 +3079,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         profiles,
         sftp,
         clipboard,
+        clipboard_policy,
         terminal_search: Some(TerminalSearchWorker::start()?),
         ..DesktopApp::default()
     };

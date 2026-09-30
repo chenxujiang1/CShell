@@ -24,6 +24,8 @@ impl Drop for Pending {
 struct State {
     pending: Option<Pending>,
     blocked: bool,
+    host_blocked: bool,
+    policy_epoch: u64,
     last_capture: Option<Instant>,
 }
 #[derive(Clone, Default)]
@@ -34,13 +36,34 @@ impl std::fmt::Debug for ClipboardInbox {
     }
 }
 impl ClipboardInbox {
-    fn can_capture(&self, now: Instant) -> bool {
+    pub(crate) fn set_host_blocked(&self, blocked: bool) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.host_blocked != blocked {
+            state.policy_epoch = state.policy_epoch.wrapping_add(1);
+            state.host_blocked = blocked;
+        }
+        if blocked {
+            state.pending = None;
+        }
+    }
+    fn policy_epoch(&self) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .policy_epoch
+    }
+    fn can_capture(&self, now: Instant, policy_epoch: u64) -> bool {
         let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         expire(&mut state, now);
         !state.blocked
+            && !state.host_blocked
+            && state.policy_epoch == policy_epoch
             && state.pending.is_none()
             && state
                 .last_capture
@@ -55,7 +78,11 @@ impl ClipboardInbox {
             Instant::now(),
         );
     }
+    #[cfg(test)]
     fn capture(&self, text: String, now: Instant) {
+        self.capture_if_epoch(text, now, self.policy_epoch());
+    }
+    fn capture_if_epoch(&self, text: String, now: Instant, policy_epoch: u64) {
         let text = Zeroizing::new(text);
         let mut state = self
             .0
@@ -63,6 +90,8 @@ impl ClipboardInbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         expire(&mut state, now);
         if state.blocked
+            || state.host_blocked
+            || state.policy_epoch != policy_epoch
             || state.pending.is_some()
             || state
                 .last_capture
@@ -99,9 +128,11 @@ impl ClipboardInbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         expire(&mut state, now);
-        if !running {
+        if !running || state.host_blocked {
             state.pending = None;
-            state.blocked = true;
+            if !running {
+                state.blocked = true;
+            }
             return ClipboardResponse::with_status(ClipboardStatus::Unavailable);
         }
         if operation == ClipboardOperation::Poll {
@@ -156,6 +187,7 @@ fn expire(state: &mut State, now: Instant) {
 /// Observes seven-bit OSC without changing the terminal's disabled OSC52 policy.
 /// No payload is decoded until a complete sequence passes the hard size limit.
 pub(crate) struct ClipboardObserver {
+    policy_epoch: u64,
     escape: bool,
     osc: bool,
     overflow: bool,
@@ -167,6 +199,7 @@ impl Default for ClipboardObserver {
             escape: false,
             osc: false,
             overflow: false,
+            policy_epoch: 0,
             buffer: Zeroizing::new(Vec::with_capacity(MAX_OSC_BYTES)),
         }
     }
@@ -194,6 +227,7 @@ impl ClipboardObserver {
                 self.reset();
                 if byte == b']' {
                     self.osc = true;
+                    self.policy_epoch = inbox.policy_epoch();
                 }
                 if byte == 0x1b {
                     self.escape = true;
@@ -225,10 +259,10 @@ impl ClipboardObserver {
             if let (Some(b"52"), Some(selection), Some(encoded), None) =
                 (parts.next(), parts.next(), parts.next(), parts.next())
                 && (selection.is_empty() || selection == b"c")
-                && inbox.can_capture(Instant::now())
+                && inbox.can_capture(Instant::now(), self.policy_epoch)
                 && let Some(text) = decode_text(encoded)
             {
-                inbox.capture(text, Instant::now());
+                inbox.capture_if_epoch(text, Instant::now(), self.policy_epoch);
             }
         }
         self.reset();
@@ -397,6 +431,80 @@ mod tests {
                 )
                 .token
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn host_restriction_discards_pending_without_removing_session_block() {
+        let inbox = ClipboardInbox::default();
+        let now = Instant::now();
+        inbox.capture("discarded".into(), now);
+        let pending = inbox.handle_at(ClipboardOperation::Poll, &[], true, now);
+        inbox.set_host_blocked(true);
+        inbox.capture("blocked".into(), now + COOLDOWN);
+        assert_eq!(
+            inbox
+                .handle_at(ClipboardOperation::Approve, &pending.token, true, now)
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        inbox.set_host_blocked(false);
+        assert_eq!(
+            inbox
+                .handle_at(ClipboardOperation::Approve, &pending.token, true, now)
+                .status,
+            ClipboardStatus::Stale as i32
+        );
+        assert!(
+            inbox
+                .handle_at(ClipboardOperation::Poll, &[], true, now)
+                .token
+                .is_empty()
+        );
+        inbox.capture("new request".into(), now + COOLDOWN);
+        let pending = inbox.handle_at(ClipboardOperation::Poll, &[], true, now + COOLDOWN);
+        assert_eq!(pending.byte_count, 11);
+        inbox.handle_at(
+            ClipboardOperation::Block,
+            &pending.token,
+            true,
+            now + COOLDOWN,
+        );
+        inbox.set_host_blocked(true);
+        inbox.set_host_blocked(false);
+        inbox.capture("still blocked".into(), now + COOLDOWN * 2);
+        assert!(
+            inbox
+                .handle_at(ClipboardOperation::Poll, &[], true, now + COOLDOWN * 2)
+                .token
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn policy_change_invalidates_fragmented_sequences_and_capture_races() {
+        let inbox = ClipboardInbox::default();
+        let mut observer = ClipboardObserver::default();
+        observer.feed(b"\x1b]52;c;aGVs", &inbox);
+        let old_epoch = inbox.policy_epoch();
+        inbox.set_host_blocked(true);
+        inbox.set_host_blocked(false);
+        observer.feed(b"bG8=\x07", &inbox);
+        inbox.capture_if_epoch("late decoded payload".into(), Instant::now(), old_epoch);
+        assert!(
+            inbox
+                .handle(ClipboardOperation::Poll, &[], true)
+                .token
+                .is_empty()
+        );
+        observer.feed(b"\x1b]52;c;aGVsbG8=\x07", &inbox);
+        let pending = inbox.handle(ClipboardOperation::Poll, &[], true);
+        assert_eq!(pending.byte_count, 5);
+        assert_eq!(
+            inbox
+                .handle(ClipboardOperation::Approve, &pending.token, true)
+                .text,
+            "hello"
         );
     }
 }

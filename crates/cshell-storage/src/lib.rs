@@ -1,5 +1,6 @@
 //! SQLite-backed profile catalog storage.
 
+mod clipboard;
 mod migration;
 mod profiles;
 mod workspace;

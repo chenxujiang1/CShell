@@ -81,6 +81,9 @@ async fn v6_upgrade_backs_up_original_and_corruption_is_not_replaced() -> Result
     repository.close().await;
     let pool = raw(&path).await?;
     query("DROP TABLE workspace_state").execute(&pool).await?;
+    query("DROP TABLE clipboard_policy_state")
+        .execute(&pool)
+        .await?;
     query("PRAGMA user_version = 6").execute(&pool).await?;
     pool.close().await;
     let repository = SqliteProfileRepository::open(&path).await?;

@@ -63,6 +63,7 @@ pub struct SshSession {
     ingress: Mutex<Option<PipelineIngress>>,
     snapshots: LatestSnapshot,
     clipboard: crate::clipboard::ClipboardInbox,
+    clipboard_host: Option<cshell_domain::ClipboardHost>,
     line_index: JournalLineIndex,
     commands: tokio::sync::mpsc::Sender<Command>,
     closed: Arc<AtomicBool>,
@@ -273,6 +274,7 @@ impl SshSession {
             ingress: Mutex::new(Some(ingress)),
             snapshots,
             clipboard,
+            clipboard_host: None,
             line_index,
             commands,
             closed,
@@ -299,6 +301,16 @@ impl SshSession {
     pub fn with_profile_id(mut self, id: ProfileId) -> Self {
         self.profile_id = Some(id);
         self
+    }
+    pub(crate) fn with_clipboard_host(mut self, host: cshell_domain::ClipboardHost) -> Self {
+        self.clipboard_host = Some(host);
+        self
+    }
+    pub(crate) fn clipboard_host(&self) -> Option<&cshell_domain::ClipboardHost> {
+        self.clipboard_host.as_ref()
+    }
+    pub(crate) fn set_host_clipboard_blocked(&self, blocked: bool) {
+        self.clipboard.set_host_blocked(blocked);
     }
     pub fn summary(&self) -> SessionSummary {
         SessionSummary {

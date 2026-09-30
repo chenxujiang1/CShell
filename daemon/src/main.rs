@@ -121,6 +121,7 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
                 | features::WORKSPACE_CONTROL
                 | features::SFTP_CONTROL
                 | features::CLIPBOARD_CONTROL
+                | features::HOST_CLIPBOARD_POLICY
                 | features::SSH_SESSION_STATUS,
         ),
         SessionIpcService::new(Arc::clone(&registry)).with_profiles(profiles),
