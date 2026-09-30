@@ -6,7 +6,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
+use alacritty_terminal::term::{Config, Osc52, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{
     self, Color as AlacrittyColor, CursorShape as AlacrittyCursorShape, NamedColor,
 };
@@ -180,6 +180,10 @@ impl AlacrittyTerminalEngine {
         let dimensions = TerminalDimensions::from(size);
         let config = Config {
             kitty_keyboard: true,
+            // OSC 52 remains disabled until a per-session consent path is available.
+            // Upstream currently defaults to OnlyCopy; relying on that would still
+            // decode remote clipboard payloads before our event sink discards them.
+            osc52: Osc52::Disabled,
             ..Config::default()
         };
         let mut terminal = Term::new(config, &dimensions, response_sink.clone());

@@ -10,7 +10,7 @@ use cshell_ipc::{
     SshConnectionData, profile_change,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Selected {
@@ -597,11 +597,11 @@ impl ProfilePanel {
                                                     command = Some(ProfileClientCommand::SetPassword {
                                                         profile_id: draft.record.id,
                                                         expected_revision: catalog.revision,
-                                                        password: std::mem::take(&mut draft.password).into_bytes(),
+                                                        password: Zeroizing::new(std::mem::take(&mut draft.password).into_bytes()),
                                                     });
                                                 }
                                                 if ui.add_enabled(saved_target, egui::Button::new("Remove password")).clicked() {
-                                                    draft.password.clear();
+                                                    draft.password.zeroize();
                                                     command = Some(ProfileClientCommand::DeletePassword {
                                                         profile_id: draft.record.id,
                                                         expected_revision: catalog.revision,
@@ -637,11 +637,11 @@ impl ProfilePanel {
                                                     command = Some(ProfileClientCommand::SetKeyPassphrase {
                                                         profile_id: draft.record.id,
                                                         expected_revision: catalog.revision,
-                                                        passphrase: std::mem::take(&mut draft.key_passphrase).into_bytes(),
+                                                        passphrase: Zeroizing::new(std::mem::take(&mut draft.key_passphrase).into_bytes()),
                                                     });
                                                 }
                                                 if ui.add_enabled(saved_key_target, egui::Button::new("Remove key passphrase")).clicked() {
-                                                    draft.key_passphrase.clear();
+                                                    draft.key_passphrase.zeroize();
                                                     command = Some(ProfileClientCommand::DeleteKeyPassphrase {
                                                         profile_id: draft.record.id,
                                                         expected_revision: catalog.revision,

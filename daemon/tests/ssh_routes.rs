@@ -124,6 +124,14 @@ impl russh::server::Handler for RoutedServer {
     }
 }
 
+macro_rules! profile_request {
+    ($($field:ident : $value:expr),* $(,)?) => {{
+        let mut request = ProfileRequest::default();
+        $(request.$field = $value;)*
+        request
+    }};
+}
+
 #[allow(clippy::unwrap_used)]
 async fn host(
     key: PrivateKey,
@@ -384,11 +392,10 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
         assert_eq!(target_auth.load(Ordering::SeqCst), 0);
         let preview = exchange(
             &service,
-            envelope::Payload::ProfileRequest(ProfileRequest {
-                operation: ProfileOperation::PreviewHostKey as i32,
-                expected_revision: 1,
-                credential_profile_id: target_id.as_uuid().as_bytes().to_vec(),
-                ..ProfileRequest::default()
+            envelope::Payload::ProfileRequest(profile_request! {
+            operation: ProfileOperation::PreviewHostKey as i32,
+            expected_revision: 1,
+            credential_profile_id: target_id.as_uuid().as_bytes().to_vec()
             }),
         )
         .await;
@@ -405,13 +412,12 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
         assert_eq!(preview.host, TARGET);
         let confirmed = exchange(
             &service,
-            envelope::Payload::ProfileRequest(ProfileRequest {
-                operation: ProfileOperation::ConfirmHostKey as i32,
-                expected_revision: 1,
-                credential_profile_id: target_id.as_uuid().as_bytes().to_vec(),
-                host_key_token: preview.token,
-                host_key_fingerprint: preview.fingerprint,
-                ..ProfileRequest::default()
+            envelope::Payload::ProfileRequest(profile_request! {
+            operation: ProfileOperation::ConfirmHostKey as i32,
+            expected_revision: 1,
+            credential_profile_id: target_id.as_uuid().as_bytes().to_vec(),
+            host_key_token: preview.token,
+            host_key_fingerprint: preview.fingerprint
             }),
         )
         .await;
@@ -566,15 +572,14 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
             .unwrap();
             let applied = exchange(
                 &service,
-                envelope::Payload::ProfileRequest(ProfileRequest {
-                    operation: ProfileOperation::ApplyChanges as i32,
-                    expected_revision: 1,
-                    changes: vec![cshell_ipc::ProfileChange {
-                        change: Some(cshell_ipc::profile_change::Change::UpsertSshConnection(
-                            cshell_ipc::SshConnectionData::from(&blocked),
-                        )),
-                    }],
-                    ..ProfileRequest::default()
+                envelope::Payload::ProfileRequest(profile_request! {
+                operation: ProfileOperation::ApplyChanges as i32,
+                expected_revision: 1,
+                changes: vec![cshell_ipc::ProfileChange {
+                    change: Some(cshell_ipc::profile_change::Change::UpsertSshConnection(
+                        cshell_ipc::SshConnectionData::from(&blocked),
+                    )),
+                }]
                 }),
             )
             .await;

@@ -15,6 +15,7 @@ rand.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 unicode-segmentation.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

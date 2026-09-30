@@ -148,7 +148,7 @@ impl ProfileIpcService {
 
     async fn handle_inner(
         &self,
-        request: ProfileRequest,
+        mut request: ProfileRequest,
     ) -> Result<ProfileResponse, (ProfileStatus, String)> {
         let operation = ProfileOperation::try_from(request.operation)
             .map_err(|_| invalid("unknown Profile operation"))?;
@@ -183,8 +183,7 @@ impl ProfileIpcService {
                 if request.changes.len() > MAX_PROFILE_CONTROL_CHANGES {
                     return Err(invalid("too many Profile changes"));
                 }
-                let changes = request
-                    .changes
+                let changes = std::mem::take(&mut request.changes)
                     .into_iter()
                     .map(decode_change)
                     .collect::<Result<Vec<_>, _>>()
@@ -252,7 +251,7 @@ impl ProfileIpcService {
                     {
                         return Err(invalid("password must contain 1 to 4096 bytes"));
                     }
-                    let secret = Secret::new(request.credential_secret);
+                    let secret = Secret::new(std::mem::take(&mut request.credential_secret));
                     tokio::task::spawn_blocking(move || vault.write(&reference, &binding, &secret))
                         .await
                 } else {
@@ -327,7 +326,7 @@ impl ProfileIpcService {
                     {
                         return Err(invalid("key passphrase must contain 1 to 4096 bytes"));
                     }
-                    let secret = Secret::new(request.credential_secret);
+                    let secret = Secret::new(std::mem::take(&mut request.credential_secret));
                     tokio::task::spawn_blocking(move || vault.write(&reference, &key_path, &secret))
                         .await
                 } else {

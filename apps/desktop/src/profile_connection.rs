@@ -11,6 +11,7 @@ use cshell_ipc::{
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 const MAX_IMPORT_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -44,7 +45,7 @@ pub enum ProfileClientCommand {
     SetPassword {
         profile_id: ProfileId,
         expected_revision: u64,
-        password: Vec<u8>,
+        password: Zeroizing<Vec<u8>>,
     },
     DeletePassword {
         profile_id: ProfileId,
@@ -53,7 +54,7 @@ pub enum ProfileClientCommand {
     SetKeyPassphrase {
         profile_id: ProfileId,
         expected_revision: u64,
-        passphrase: Vec<u8>,
+        passphrase: Zeroizing<Vec<u8>>,
     },
     DeleteKeyPassphrase {
         profile_id: ProfileId,
@@ -184,11 +185,11 @@ async fn profile_worker(
                 match command {
                     ProfileClientCommand::OpenProfile(_) | ProfileClientCommand::OpenLocal(..) => {}
                     ProfileClientCommand::DiscoverLocalShells => { discover_local_shells(&config, &shared).await; }
-                    ProfileClientCommand::SetPassword { profile_id, expected_revision, password } => {
+                    ProfileClientCommand::SetPassword { profile_id, expected_revision, mut password } => {
                         let mut outgoing = request(ProfileOperation::SetPassword);
                         outgoing.expected_revision = expected_revision;
                         outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
-                        outgoing.credential_secret = password;
+                        outgoing.credential_secret = std::mem::take(&mut *password);
                         let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
                         publish_credential_result(&shared, result, "Password saved in system keychain");
                     }
@@ -199,11 +200,11 @@ async fn profile_worker(
                         let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
                         publish_credential_result(&shared, result, "Password removed from system keychain");
                     }
-                    ProfileClientCommand::SetKeyPassphrase { profile_id, expected_revision, passphrase } => {
+                    ProfileClientCommand::SetKeyPassphrase { profile_id, expected_revision, mut passphrase } => {
                         let mut outgoing = request(ProfileOperation::SetKeyPassphrase);
                         outgoing.expected_revision = expected_revision;
                         outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
-                        outgoing.credential_secret = passphrase;
+                        outgoing.credential_secret = std::mem::take(&mut *passphrase);
                         let result = send(&config, outgoing).await.and_then(|response| check_response(&response));
                         publish_credential_result(&shared, result, "Key passphrase saved in system keychain");
                     }

@@ -12,6 +12,7 @@ use thiserror::Error;
 pub const MAX_PROFILE_CONTROL_CHANGES: usize = 2048;
 
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct ProfileRequest {
     #[prost(enumeration = "ProfileOperation", tag = "1")]
     pub operation: i32,
@@ -31,6 +32,26 @@ pub struct ProfileRequest {
     pub host_key_token: Vec<u8>,
     #[prost(string, tag = "9")]
     pub host_key_fingerprint: String,
+}
+
+impl std::fmt::Debug for ProfileRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProfileRequest")
+            .field("operation", &self.operation)
+            .field("expected_revision", &self.expected_revision)
+            .field("changes", &self.changes.len())
+            .field("credential_secret", &"[REDACTED]")
+            .field("host_key_token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ProfileRequest {
+    fn drop(&mut self) {
+        self.credential_secret.fill(0);
+        self.host_key_token.fill(0);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]

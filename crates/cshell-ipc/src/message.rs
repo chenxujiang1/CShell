@@ -43,6 +43,7 @@ pub mod features {
 }
 
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct Handshake {
     #[prost(fixed32, tag = "1")]
     pub magic: u32,
@@ -56,6 +57,24 @@ pub struct Handshake {
     pub daemon_instance_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "6")]
     pub instance_token: Vec<u8>,
+}
+
+impl Drop for Handshake {
+    fn drop(&mut self) {
+        self.instance_token.fill(0);
+    }
+}
+
+impl std::fmt::Debug for Handshake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Handshake")
+            .field("protocol_major", &self.protocol_major)
+            .field("protocol_minor", &self.protocol_minor)
+            .field("feature_bits", &self.feature_bits)
+            .field("instance_token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1665,6 +1684,33 @@ mod tests {
         Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameSnapshot, Style, TerminalModes,
     };
     use prost::Message;
+
+    #[test]
+    fn credential_and_handshake_debug_output_redacts_secret_bytes() {
+        let mut request = crate::ProfileRequest::default();
+        request.operation = crate::ProfileOperation::SetPassword as i32;
+        request.credential_secret = b"credential-unique-marker".to_vec();
+        request.host_key_token = b"host-token-unique-marker".to_vec();
+        let request_debug = format!("{request:?}");
+        assert!(request_debug.contains("[REDACTED]"));
+        assert!(!request_debug.contains("credential-unique-marker"));
+        assert!(!request_debug.contains("host-token-unique-marker"));
+        let envelope_debug = format!(
+            "{:?}",
+            Envelope {
+                request_id: 1,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::ProfileRequest(request)),
+            }
+        );
+        assert!(!envelope_debug.contains("credential-unique-marker"));
+
+        let handshake =
+            super::Handshake::new(vec![1; 16], b"instance-token-unique-marker".to_vec());
+        let handshake_debug = format!("{handshake:?}");
+        assert!(handshake_debug.contains("[REDACTED]"));
+        assert!(!handshake_debug.contains("instance-token-unique-marker"));
+    }
 
     #[test]
     fn terminal_control_round_trip_preserves_typed_input_and_bounded_resize() {

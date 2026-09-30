@@ -39,6 +39,14 @@ async fn exchange(
     Ok(response.payload.ok_or("missing response")?)
 }
 
+macro_rules! profile_request {
+    ($($field:ident : $value:expr),* $(,)?) => {{
+        let mut request = ProfileRequest::default();
+        $(request.$field = $value;)*
+        request
+    }};
+}
+
 async fn save(
     service: &SessionIpcService,
     revision: u64,
@@ -47,22 +55,21 @@ async fn save(
 ) -> Result<cshell_ipc::ProfileResponse, Box<dyn Error>> {
     let payload = exchange(
         service,
-        envelope::Payload::ProfileRequest(ProfileRequest {
-            operation: ProfileOperation::ApplyChanges as i32,
-            expected_revision: revision,
-            changes: vec![
-                ProfileChange {
-                    change: Some(profile_change::Change::UpsertProfile(
-                        ProfileRecordData::from(record),
-                    )),
-                },
-                ProfileChange {
-                    change: Some(profile_change::Change::UpsertLocalConnection(
-                        LocalConnectionData::from(target),
-                    )),
-                },
-            ],
-            ..ProfileRequest::default()
+        envelope::Payload::ProfileRequest(profile_request! {
+        operation: ProfileOperation::ApplyChanges as i32,
+        expected_revision: revision,
+        changes: vec![
+            ProfileChange {
+                change: Some(profile_change::Change::UpsertProfile(
+                    ProfileRecordData::from(record),
+                )),
+            },
+            ProfileChange {
+                change: Some(profile_change::Change::UpsertLocalConnection(
+                    LocalConnectionData::from(target),
+                )),
+            },
+        ]
         }),
     )
     .await?;
@@ -403,18 +410,16 @@ async fn local_configuration_and_discovery_require_capability() -> Result<(), Bo
             .await
     });
     for (request_id, request) in [
-        ProfileRequest {
-            operation: ProfileOperation::ApplyChanges as i32,
-            changes: vec![ProfileChange {
-                change: Some(profile_change::Change::UpsertLocalConnection(
-                    LocalConnectionData::from(&target),
-                )),
-            }],
-            ..ProfileRequest::default()
+        profile_request! {
+        operation: ProfileOperation::ApplyChanges as i32,
+        changes: vec![ProfileChange {
+            change: Some(profile_change::Change::UpsertLocalConnection(
+                LocalConnectionData::from(&target),
+            )),
+        }]
         },
-        ProfileRequest {
-            operation: ProfileOperation::DiscoverLocalShells as i32,
-            ..ProfileRequest::default()
+        profile_request! {
+        operation: ProfileOperation::DiscoverLocalShells as i32
         },
     ]
     .into_iter()
@@ -470,9 +475,8 @@ async fn local_configuration_and_discovery_require_capability() -> Result<(), Bo
     serving.await??;
     let envelope::Payload::ProfileResponse(discovery) = exchange(
         &service,
-        envelope::Payload::ProfileRequest(ProfileRequest {
-            operation: ProfileOperation::DiscoverLocalShells as i32,
-            ..ProfileRequest::default()
+        envelope::Payload::ProfileRequest(profile_request! {
+        operation: ProfileOperation::DiscoverLocalShells as i32
         }),
     )
     .await?
@@ -633,15 +637,14 @@ async fn local_launch_isolation_probe() -> Result<(), Box<dyn Error>> {
     let response = exchange_features(
         Arc::clone(&service),
         old,
-        envelope::Payload::ProfileRequest(ProfileRequest {
-            operation: ProfileOperation::ApplyChanges as i32,
-            expected_revision: 1,
-            changes: vec![ProfileChange {
-                change: Some(profile_change::Change::UpsertLocalConnection(
-                    LocalConnectionData::from(&target),
-                )),
-            }],
-            ..ProfileRequest::default()
+        envelope::Payload::ProfileRequest(profile_request! {
+        operation: ProfileOperation::ApplyChanges as i32,
+        expected_revision: 1,
+        changes: vec![ProfileChange {
+            change: Some(profile_change::Change::UpsertLocalConnection(
+                LocalConnectionData::from(&target),
+            )),
+        }]
         }),
     )
     .await?

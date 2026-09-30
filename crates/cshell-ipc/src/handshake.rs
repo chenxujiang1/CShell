@@ -15,6 +15,12 @@ pub struct HandshakePolicy {
     supported_feature_bits: u64,
 }
 
+impl Drop for HandshakePolicy {
+    fn drop(&mut self) {
+        self.expected_token.fill(0);
+    }
+}
+
 impl std::fmt::Debug for HandshakePolicy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

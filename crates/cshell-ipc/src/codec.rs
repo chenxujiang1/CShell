@@ -2,10 +2,21 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use zeroize::Zeroizing;
 
 use crate::Envelope;
 
 const LENGTH_PREFIX_SIZE: usize = 4;
+
+// A frame can contain a Profile credential or the daemon handshake token.
+struct WipeFrame(BytesMut);
+
+impl Drop for WipeFrame {
+    fn drop(&mut self) {
+        self.0.as_mut().fill(0);
+    }
+}
+
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -66,8 +77,10 @@ impl FrameCodec {
             return Ok(None);
         }
         input.advance(LENGTH_PREFIX_SIZE);
-        let payload = input.split_to(frame_len);
-        Ok(Some(Envelope::decode(payload.freeze())?))
+        let mut payload = input.split_to(frame_len);
+        let decoded = Envelope::decode(payload.as_ref());
+        payload.as_mut().fill(0);
+        Ok(Some(decoded?))
     }
 }
 
@@ -75,9 +88,9 @@ pub async fn write_envelope<W>(writer: &mut W, message: &Envelope) -> Result<(),
 where
     W: AsyncWrite + Unpin,
 {
-    let mut frame = BytesMut::new();
-    FrameCodec::default().encode(message, &mut frame)?;
-    writer.write_all(&frame).await?;
+    let mut frame = WipeFrame(BytesMut::new());
+    FrameCodec::default().encode(message, &mut frame.0)?;
+    writer.write_all(&frame.0).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -93,7 +106,7 @@ where
             limit: DEFAULT_MAX_FRAME_SIZE,
         });
     }
-    let mut payload = vec![0_u8; frame_len];
+    let mut payload = Zeroizing::new(vec![0_u8; frame_len]);
     reader.read_exact(&mut payload).await?;
     Ok(Envelope::decode(payload.as_slice())?)
 }
