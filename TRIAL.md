@@ -16,7 +16,7 @@
 
 每包附 SHA-256；保留包内源码版本用于反馈关联。本地未提交修改的包会标记 `modified workspace`，不能仅凭 HEAD 哈希视为可复现版本。工作流只上传 CI artifact，不创建公开 Release，也不自动发布给用户。
 
-另有 `macOS personal trial` 工作流，向 `codex/macos-trial` 分支推送后构建两个 Mac 架构，执行 SSH、凭据库、存储、本地 PTY、脚本运行时回归及原生钥匙串检查，并验证解压 app 的窗口运行。它用于用户本人早期试用，不代表完整公开发布门禁已经通过；完整 `ci` 的质量检查仍独立运行，不会隐藏其失败结果。向公开仓库推送源码快照前应确认快照内容可以公开。
+另有 `macOS personal trial` 工作流，向 `codex/macos-trial` 分支推送后构建两个 Mac 架构，执行 SSH、凭据库、存储、本地 PTY、脚本运行时单元与集成测试、原生钥匙串检查、完整桌面交互单元测试，并验证解压 app 的窗口运行。该分支只运行这套专用 Mac 流程，避免普通 CI 的其他平台任务重复占用 Mac 运行器；其他分支及 PR 继续运行完整 `ci`。它用于用户本人早期试用，不代表完整公开发布门禁已经通过，已有格式与严格 Clippy 失败仍需处理。向公开仓库推送源码快照前应确认快照内容可以公开。
 
 Windows 包含 `CShell.exe`、`cshelld.exe`、`cshell-script-worker.exe` 和首次使用说明。macOS 包含 `CShell.app` 和外部可读的首次使用说明；三个可执行文件都位于 `Contents/MacOS`，保证桌面程序能找到后台、后台能找到脚本工作进程。不要单独分发 GUI。
 

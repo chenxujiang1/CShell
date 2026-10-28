@@ -320,6 +320,8 @@ fn favorite_menus_filter_by_pane_and_navigate_without_confirmation() {
         route: "direct".into(),
     };
     view.peer = Some(peer.clone());
+    // Unix panes both expose a "/" breadcrumb. Exercise that ambiguity on Windows too.
+    view.local_directory = Some("/".into());
     let mut other = peer.clone();
     other.username = "someone-else".into();
     let local_path = if cfg!(windows) {
@@ -356,36 +358,7 @@ fn favorite_menus_filter_by_pane_and_navigate_without_confirmation() {
     assert!(
         matches!(click(&context, &mut panel, &view, size, local_path), Some(SftpClientCommand::BrowseManaged(_, options)) if options.local && options.path == local_path)
     );
-    let (tree, _) = draw(&context, &mut panel, &view, size, vec![]);
-    let pos = crate::ui_layout_gate::bounds(
-        &tree
-            .nodes
-            .iter()
-            .filter(|(_, n)| n.role() == egui::accesskit::Role::Button && n.label() == Some("☆"))
-            .max_by(|(_, a), (_, b)| {
-                crate::ui_layout_gate::bounds(a)
-                    .min
-                    .x
-                    .total_cmp(&crate::ui_layout_gate::bounds(b).min.x)
-            })
-            .unwrap()
-            .1,
-    )
-    .center();
-    let pointer = |pressed| egui::Event::PointerButton {
-        pos,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: Default::default(),
-    };
-    draw(
-        &context,
-        &mut panel,
-        &view,
-        size,
-        vec![egui::Event::PointerMoved(pos), pointer(true)],
-    );
-    draw(&context, &mut panel, &view, size, vec![pointer(false)]);
+    click_remote(&context, &mut panel, &view, size, "☆");
     let (tree, _) = draw(&context, &mut panel, &view, size, vec![]);
     assert!(
         !tree
@@ -403,6 +376,32 @@ fn favorite_menus_filter_by_pane_and_navigate_without_confirmation() {
         matches!(click(&context, &mut panel, &view, size, "/srv/favorite"), Some(SftpClientCommand::BrowseManaged(_, options)) if !options.local && options.path == "/srv/favorite")
     );
     assert!(
-        matches!(click(&context, &mut panel, &view, size, "/"), Some(SftpClientCommand::BrowseManaged(_, options)) if !options.local && options.path == "/")
+        matches!(click_remote(&context, &mut panel, &view, size, "/"), Some(SftpClientCommand::BrowseManaged(_, options)) if !options.local && options.path == "/")
     );
+}
+
+fn click_remote(
+    context: &egui::Context,
+    panel: &mut SftpPanel,
+    view: &SftpView,
+    size: egui::Vec2,
+    name: &str,
+) -> Option<SftpClientCommand> {
+    let (tree, _) = draw(context, panel, view, size, vec![]);
+    let bounds = crate::ui_layout_gate::bounds;
+    let pos = bounds(
+        &tree.nodes.iter()
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::Button && node.label() == Some(name))
+            .max_by(|(_, a), (_, b)| bounds(a).min.x.total_cmp(&bounds(b).min.x))
+            .unwrap_or_else(|| panic!("missing remote button {name}"))
+            .1,
+    ).center();
+    let pointer = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    draw(context, panel, view, size, vec![egui::Event::PointerMoved(pos), pointer(true)]);
+    draw(context, panel, view, size, vec![pointer(false)]).1
 }

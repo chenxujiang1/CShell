@@ -45,6 +45,9 @@ jobs:
         env:
           CSHELL_KEYCHAIN_NATIVE_TEST: '1'
         run: cargo test --locked -p cshell-vault native_ -- --test-threads=1
+      # Exercise desktop interaction on both native Mac architectures.
+      - name: Run desktop interaction regression tests
+        run: cargo test --locked -p cshell-gui --bin cshell-gui
       - name: Build optimized application and companions
         run: cargo build --release --locked --target ${{ matrix.target }} -p cshell-gui -p cshelld -p cshell-script-worker
       - name: Package an ad-hoc signed trial application
