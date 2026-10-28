@@ -207,7 +207,7 @@ pub(super) fn prepare() -> Result<(), ScriptWorkerError> {
 }
 
 #[cfg(feature = "supervisor")]
-pub(super) fn memory_within_limit(pid: u32, heap: u64) -> Result<bool, ScriptWorkerError> {
+pub(crate) fn memory_within_limit(pid: u32, heap: u64) -> Result<bool, ScriptWorkerError> {
     let pid = libc::pid_t::try_from(pid).map_err(|_| ScriptWorkerError::Isolation)?;
     let mut info = MaybeUninit::<libc::proc_taskinfo>::uninit();
     let size = size_of::<libc::proc_taskinfo>();

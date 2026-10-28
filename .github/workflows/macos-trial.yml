@@ -38,6 +38,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-trial-${{ matrix.target }}
+          cache-on-failure: 'true'
       - name: Run SSH, vault, storage, PTY and script runtime regression tests
         run: cargo test --locked -p cshell-ssh -p cshell-vault -p cshell-storage -p cshell-local -p cshell-script-runtime --lib
       - name: Check native macOS keychain
