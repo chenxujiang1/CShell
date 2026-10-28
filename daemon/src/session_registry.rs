@@ -2,7 +2,7 @@ use crate::{
     LocalSessionError, LocalSessionExit, LocalTerminalHandle, LocalTerminalSession,
     TerminalFrameSubscription,
 };
-use cshell_domain::{InputAction, SessionId, TerminalSize};
+use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{
     FullFrame, HistorySearchCodecError, HistorySearchDirection as IpcHistorySearchDirection,
     HistorySearchRequest as IpcHistorySearchRequest, LogPageCodecError, LogPageRequest,
@@ -45,6 +45,9 @@ pub enum SessionRegistryError {
 #[derive(Debug)]
 struct ManagedLocalSession {
     title: String,
+    profile_id: Option<ProfileId>,
+    launch_detail: Option<String>,
+    close_policy: cshell_domain::LocalClosePolicy,
     session: LocalTerminalSession,
     exit: Option<LocalSessionExit>,
 }
@@ -53,6 +56,8 @@ struct ManagedLocalSession {
 pub struct LocalSessionInfo {
     pub session_id: SessionId,
     pub title: String,
+    pub profile_id: Option<ProfileId>,
+    pub launch_detail: Option<String>,
     pub running: bool,
     pub generation: u64,
 }
@@ -147,30 +152,103 @@ impl LocalSessionRegistry {
         profile: &LocalProfile,
         size: TerminalSize,
     ) -> Result<LocalSessionAttachment, SessionRegistryError> {
+        self.spawn_local_inner(
+            profile,
+            size,
+            None,
+            None,
+            cshell_domain::LocalClosePolicy::KeepAlive,
+            true,
+        )
+    }
+
+    pub fn spawn_saved_local(
+        &self,
+        profile_id: ProfileId,
+        profile: &LocalProfile,
+        size: TerminalSize,
+        close_policy: cshell_domain::LocalClosePolicy,
+    ) -> Result<LocalSessionInfo, SessionRegistryError> {
+        self.spawn_saved_local_configured(profile_id, profile, size, close_policy, true)
+    }
+
+    pub(crate) fn spawn_saved_local_configured(
+        &self,
+        profile_id: ProfileId,
+        profile: &LocalProfile,
+        size: TerminalSize,
+        close_policy: cshell_domain::LocalClosePolicy,
+        logging: bool,
+    ) -> Result<LocalSessionInfo, SessionRegistryError> {
+        let mut profile = profile.clone();
+        let launch_detail = if matches!(&profile.cwd_policy, cshell_local::WorkingDirectoryPolicy::Explicit(path) if !path.is_dir())
+        {
+            let home = cshell_local::home_directory().ok_or_else(|| {
+                LocalSessionError::from(cshell_local::LocalPtyError::InvalidProfile(
+                    "configured directory and home directory are unavailable",
+                ))
+            })?;
+            let detail = format!(
+                "Configured working directory is unavailable; using home directory: {}",
+                home.display()
+            );
+            profile.cwd_policy = cshell_local::WorkingDirectoryPolicy::Explicit(home);
+            Some(detail)
+        } else {
+            None
+        };
+        let launch_detail = if !logging {
+            Some(match launch_detail {
+                Some(detail) => format!("{detail}; output recording is disabled for this session"),
+                None => "Output recording is disabled for this session".into(),
+            })
+        } else {
+            launch_detail
+        };
+        let attachment = self.spawn_local_inner(
+            &profile,
+            size,
+            Some(profile_id),
+            launch_detail,
+            close_policy,
+            logging,
+        )?;
+        self.session_info(attachment.session_id())
+    }
+
+    fn spawn_local_inner(
+        &self,
+        profile: &LocalProfile,
+        size: TerminalSize,
+        profile_id: Option<ProfileId>,
+        launch_detail: Option<String>,
+        close_policy: cshell_domain::LocalClosePolicy,
+        logging: bool,
+    ) -> Result<LocalSessionAttachment, SessionRegistryError> {
+        let size = validated_terminal_size(u32::from(size.rows), u32::from(size.cols))?;
         let session_id = SessionId::new();
         let journal_path = self.journal_path(session_id);
         #[cfg(unix)]
-        let session = match &self.guardian_executable {
-            Some(guardian) => LocalTerminalSession::spawn_guarded(
-                profile,
-                size,
-                journal_path,
-                self.ingress_capacity,
-                guardian,
-            )?,
-            None => {
-                LocalTerminalSession::spawn(profile, size, journal_path, self.ingress_capacity)?
-            }
-        };
+        let guardian = self.guardian_executable.as_deref();
         #[cfg(windows)]
-        let session =
-            LocalTerminalSession::spawn(profile, size, journal_path, self.ingress_capacity)?;
+        let guardian = None;
+        let session = LocalTerminalSession::spawn_configured(
+            profile,
+            size,
+            &journal_path,
+            self.ingress_capacity,
+            guardian,
+            logging,
+        )?;
         let attachment = LocalSessionAttachment {
             session_id,
             handle: session.handle(),
         };
         let managed = Arc::new(Mutex::new(ManagedLocalSession {
             title: profile.name.clone(),
+            profile_id,
+            launch_detail,
+            close_policy,
             session,
             exit: None,
         }));
@@ -186,26 +264,8 @@ impl LocalSessionRegistry {
         rows: u32,
         cols: u32,
     ) -> Result<LocalSessionInfo, SessionRegistryError> {
-        let rows = u16::try_from(rows)
-            .ok()
-            .filter(|rows| *rows > 0)
-            .ok_or(SessionRegistryError::InvalidTerminalSize { rows, cols })?;
-        let cols = u16::try_from(cols).ok().filter(|cols| *cols > 0).ok_or(
-            SessionRegistryError::InvalidTerminalSize {
-                rows: u32::from(rows),
-                cols,
-            },
-        )?;
-        if usize::from(rows).saturating_mul(usize::from(cols)) > 1_000_000 {
-            return Err(SessionRegistryError::InvalidTerminalSize {
-                rows: u32::from(rows),
-                cols: u32::from(cols),
-            });
-        }
-        let attachment = self.spawn_local(
-            &LocalProfile::platform_default(),
-            TerminalSize::cells(rows, cols),
-        )?;
+        let size = validated_terminal_size(rows, cols)?;
+        let attachment = self.spawn_local(&LocalProfile::platform_default(), size)?;
         self.session_info(attachment.session_id())
     }
 
@@ -268,6 +328,18 @@ impl LocalSessionRegistry {
                 request.rows_after as usize,
             )
             .map_err(Into::into)
+    }
+
+    pub(crate) fn journal_index(
+        &self,
+        session_id: SessionId,
+    ) -> Result<cshell_output_store::JournalLineIndex, SessionRegistryError> {
+        Ok(self
+            .lookup(session_id)?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .session
+            .line_index())
     }
 
     pub fn fulfill_history_search_request(
@@ -350,6 +422,20 @@ impl LocalSessionRegistry {
             }
         }
         Ok(exits)
+    }
+
+    /// Only an explicit view-close request applies this policy. Client disconnects
+    /// and crashes never terminate a terminal.
+    pub fn close_view(&self, session_id: SessionId) -> Result<(), SessionRegistryError> {
+        let policy = self
+            .lookup(session_id)?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .close_policy;
+        if policy == cshell_domain::LocalClosePolicy::TerminateOnViewClose {
+            self.close(session_id)?;
+        }
+        Ok(())
     }
 
     /// Removes a session. A running child is terminated before its registry entry is lost.
@@ -478,6 +564,8 @@ impl LocalSessionRegistry {
         LocalSessionInfo {
             session_id,
             title: managed.title.clone(),
+            profile_id: managed.profile_id,
+            launch_detail: managed.launch_detail.clone(),
             running: managed.exit.is_none(),
             generation: managed
                 .session
@@ -486,6 +574,18 @@ impl LocalSessionRegistry {
                 .map_or(0, |snapshot| snapshot.generation),
         }
     }
+}
+
+fn validated_terminal_size(rows: u32, cols: u32) -> Result<TerminalSize, SessionRegistryError> {
+    if rows == 0
+        || cols == 0
+        || rows > u32::from(cshell_terminal::MAX_TERMINAL_ROWS)
+        || cols > u32::from(cshell_terminal::MAX_TERMINAL_COLUMNS)
+        || u64::from(rows) * u64::from(cols) > cshell_terminal::MAX_TERMINAL_CELLS as u64
+    {
+        return Err(SessionRegistryError::InvalidTerminalSize { rows, cols });
+    }
+    Ok(TerminalSize::cells(rows as u16, cols as u16))
 }
 
 #[cfg(test)]
@@ -498,6 +598,56 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn default_local_creation_rejects_sizes_that_the_parser_would_clamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = LocalSessionRegistry::new(directory.path(), 8).unwrap();
+        for (rows, cols) in [
+            (0, 80),
+            (24, 0),
+            (513, 80),
+            (24, 1025),
+            (300, 300),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(matches!(
+                registry.spawn_platform_default(rows, cols),
+                Err(SessionRegistryError::InvalidTerminalSize { rows: r, cols: c })
+                    if r == rows && c == cols
+            ));
+        }
+        assert!(registry.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_profile_creation_checks_size_before_starting_the_pty() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = LocalSessionRegistry::new(directory.path(), 8).unwrap();
+        let mut profile = reconnect_probe_profile();
+        profile.program = directory.path().join("missing-program");
+        assert!(matches!(
+            registry.spawn_local(&profile, TerminalSize::cells(300, 300)),
+            Err(SessionRegistryError::InvalidTerminalSize { rows: 300, cols: 300 })
+        ));
+        assert!(registry.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_creation_accepts_exact_parser_size_boundaries() {
+        for size in [
+            TerminalSize::cells(1, 1),
+            TerminalSize::cells(512, 128),
+            TerminalSize::cells(64, 1024),
+        ] {
+            let checked = super::validated_terminal_size(u32::from(size.rows), u32::from(size.cols))
+                .unwrap();
+            assert_eq!(checked, size);
+            let parser = cshell_terminal::AlacrittyTerminalEngine::new(checked);
+            let snapshot = cshell_terminal::TerminalEngine::snapshot(&parser);
+            assert_eq!((snapshot.rows, snapshot.cols), (size.rows, size.cols));
+        }
+    }
 
     fn reconnect_probe_profile() -> LocalProfile {
         #[cfg(windows)]

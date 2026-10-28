@@ -1,4 +1,18 @@
 //! Bounded SFTP filesystem and transfer primitives.
+mod directory;
+mod filesystem;
+pub use filesystem::RemoteEntryStamp;
+mod pinned_read;
+mod pipeline;
+#[cfg(test)]
+mod pipeline_tests;
+pub use directory::DirectoryCursor;
+#[cfg(test)]
+mod live_control_tests;
+mod staged;
+mod checksum;
+pub use pinned_read::{PinnedRead, PinnedReadContent, PinnedReadError};
+pub use staged::{StagedUpload, StagedUploadContent, StagedUploadError};
 
 use russh_sftp::client::rawsession::Limits;
 use russh_sftp::client::{Config, RawSftpSession};
@@ -12,17 +26,89 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const SFTP_MAX_PACKET_BYTES: u32 = 256 * 1024;
 pub const SFTP_TRANSFER_CHUNK_BYTES: usize = 32 * 1024;
+/// One bounded wire batch; a durable checkpoint may combine several batches.
+pub const SFTP_TRANSFER_BATCH_BYTES: usize = 1024 * 1024;
+const SFTP_PIPELINE_REQUESTS: usize = 16;
 pub const MAX_DIRECTORY_PAGE_ENTRIES: usize = 4_096;
 const SFTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Runtime progress for bounded remote SHA-256 reads; no file contents are exposed.
+pub type ReadProgress = Arc<dyn Fn(u64,u64)+Send+Sync>;
 
 #[derive(Clone, Debug, Default)]
 pub struct TransferControl {
     cancelled: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+    critical: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Debug)]
+pub struct TransferCriticalSection(TransferControl);
+impl Drop for TransferCriticalSection {
+    fn drop(&mut self) {
+        self.0.critical.fetch_sub(1, Ordering::AcqRel);
+        self.0.wake();
+    }
 }
 
 impl TransferControl {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.wake();
+    }
+
+    fn wake(&self) {
+        let waker = self
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Release);
+        self.wake();
+    }
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Release);
+        self.wake();
+    }
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+            && self.critical.load(Ordering::Acquire) == 0
+            && !self.is_cancelled()
+    }
+
+    /// Finish bounded metadata writes and release their locks before parking.
+    pub fn enter_critical(&self) -> TransferCriticalSection {
+        self.critical.fetch_add(1, Ordering::AcqRel);
+        TransferCriticalSection(self.clone())
+    }
+
+    /// Retain the future and its in-flight I/O while paused; never cancel/recreate it.
+    pub async fn run<F: std::future::Future>(&self, future: F) -> F::Output {
+        tokio::pin!(future);
+        let output = std::future::poll_fn(|cx| {
+            *self
+                .waker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cx.waker().clone());
+            if self.is_paused() {
+                std::task::Poll::Pending
+            } else {
+                future.as_mut().poll(cx)
+            }
+        })
+        .await;
+        self.waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        output
     }
 
     #[must_use]
@@ -68,25 +154,27 @@ pub struct RemoteMetadata {
     pub modified_unix_seconds: Option<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RemoteDirectoryEntry {
     pub name: String,
     pub path: String,
     pub metadata: RemoteMetadata,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DirectoryPage {
     pub entries: Vec<RemoteDirectoryEntry>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum SftpError {
-    #[error(transparent)]
-    Protocol(#[from] russh_sftp::client::error::Error),
-    #[error("local I/O failed: {0}")]
-    LocalIo(#[from] std::io::Error),
+    #[error("SFTP protocol operation failed: {}", protocol_category(.0))]
+    Protocol(russh_sftp::client::error::Error),
+    #[error("local I/O failed ({:?})", .0.kind())]
+    LocalIo(std::io::Error),
+    #[error("SFTP channel is unavailable")]
+    ChannelUnavailable,
     #[error("directory page limit must be between 1 and {MAX_DIRECTORY_PAGE_ENTRIES}")]
     InvalidDirectoryPageLimit,
     #[error("SFTP server returned an empty read before EOF")]
@@ -97,29 +185,89 @@ pub enum SftpError {
     SizeMismatch { expected: u64, actual: u64 },
     #[error("remote server omitted the temporary file size")]
     MissingRemoteSize,
-    #[error("destination already exists: {0}")]
+    #[error("destination already exists")]
     DestinationExists(String),
-    #[error("invalid remote destination path: {0}")]
+    #[error("invalid remote destination path")]
     InvalidRemotePath(String),
-    #[error("invalid local destination path: {0}")]
+    #[error("invalid local destination path")]
     InvalidLocalPath(String),
     #[error("transfer offset overflowed u64")]
     OffsetOverflow,
     #[error("SFTP server advertised an unusable packet or transfer limit")]
     InvalidServerLimits,
-    #[error("{cause}; additionally could not clean temporary file {path}: {reason}")]
+    #[error(
+        "transfer failed and temporary cleanup failed; inspect destination status before recovery"
+    )]
     TemporaryCleanupFailed {
         path: String,
         cause: String,
         reason: String,
     },
-    #[error("transfer committed, but temporary file cleanup failed for {path}: {reason}")]
+    #[error("transfer committed, but temporary cleanup failed; do not repeat the transfer")]
     CommittedCleanupFailed { path: String, reason: String },
+}
+
+impl SftpError {
+    /// Only an explicit remote NoSuchFile status permits creating a missing path.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Protocol(error) if is_status(error, StatusCode::NoSuchFile))
+    }
+}
+
+fn protocol_category(error: &russh_sftp::client::error::Error) -> String {
+    use russh_sftp::client::error::Error;
+    match error {
+        Error::Status(status) => format!("status {}", status.status_code),
+        Error::IO(_) => "I/O failure".into(),
+        Error::Timeout => "timeout".into(),
+        Error::Limited(_) => "limit exceeded".into(),
+        Error::UnexpectedPacket => "unexpected packet".into(),
+        Error::UnexpectedBehavior(_) => "unexpected server behavior".into(),
+    }
+}
+
+impl std::fmt::Debug for SftpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SftpError")
+            .field("category", &self.to_string())
+            .finish_non_exhaustive()
+    }
+}
+impl From<russh_sftp::client::error::Error> for SftpError {
+    fn from(error: russh_sftp::client::error::Error) -> Self {
+        Self::Protocol(error)
+    }
+}
+impl From<std::io::Error> for SftpError {
+    fn from(error: std::io::Error) -> Self {
+        Self::LocalIo(error)
+    }
+}
+impl std::fmt::Debug for RemoteDirectoryEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteDirectoryEntry")
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Debug for DirectoryPage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DirectoryPage")
+            .field("entry_count", &self.entries.len())
+            .field("truncated", &self.truncated)
+            .finish()
+    }
 }
 
 pub struct SftpClient {
     session: Arc<RawSftpSession>,
     limits: Limits,
+    verified_publish: bool,
+    verified_replace: bool,
+    checksum_handle: bool,
 }
 
 impl std::fmt::Debug for SftpClient {
@@ -129,6 +277,9 @@ impl std::fmt::Debug for SftpClient {
 }
 
 impl SftpClient {
+    pub fn abort_channel(&self) {
+        let _closed = self.session.close_session();
+    }
     pub async fn connect<S>(stream: S) -> Result<Self, SftpError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -142,7 +293,24 @@ impl SftpClient {
         };
         let mut session = RawSftpSession::new_with_config(stream, config);
         let version = session.init().await?;
+        let verified_publish = [
+            russh_sftp::extensions::HARDLINK,
+            russh_sftp::extensions::FSYNC,
+        ]
+        .iter()
+        .all(|name| {
+            version
+                .extensions
+                .get(*name)
+                .is_some_and(|version| version == "1")
+        });
         let mut limits = Limits::default();
+        // Never probe unadvertised vendor operations on an ordinary OpenSSH server.
+        let checksum_handle = checksum::advertised(&version.extensions);
+        let verified_replace = version
+            .extensions
+            .get("posix-rename@openssh.com")
+            .is_some_and(|v| v == "1");
         if version
             .extensions
             .get(russh_sftp::extensions::LIMITS)
@@ -154,6 +322,9 @@ impl SftpClient {
         Ok(Self {
             session: Arc::new(session),
             limits,
+            verified_publish,
+            verified_replace,
+            checksum_handle,
         })
     }
 
@@ -662,6 +833,8 @@ mod tests {
         files: HashMap<String, Vec<u8>>,
         handles: HashMap<String, String>,
         directory_read: bool,
+        reject_remove: bool,
+        reject_rename: bool,
     }
 
     #[derive(Clone, Debug)]
@@ -777,6 +950,10 @@ mod tests {
         async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
             self.stat(id, path).await
         }
+        async fn fstat(&mut self,id:u32,handle:String)->Result<Attrs,Self::Error> {
+            let path=self.state.lock().unwrap().handles.get(&handle).cloned().ok_or(StatusCode::Failure)?;
+            self.stat(id,path).await
+        }
 
         async fn opendir(&mut self, id: u32, _path: String) -> Result<Handle, Self::Error> {
             self.state.lock().unwrap().directory_read = false;
@@ -804,7 +981,16 @@ mod tests {
         }
 
         async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
-            if self.state.lock().unwrap().files.remove(&filename).is_none() {
+            let mut state = self.state.lock().unwrap();
+            if state.reject_remove {
+                return Ok(Status {
+                    status_code: StatusCode::Failure,
+                    error_message: "PRIVATE_PEER_SENTINEL".into(),
+                    language_tag: "PRIVATE_PEER_SENTINEL".into(),
+                    ..Self::status(id)
+                });
+            }
+            if state.files.remove(&filename).is_none() {
                 return Err(StatusCode::NoSuchFile);
             }
             Ok(Self::status(id))
@@ -817,6 +1003,14 @@ mod tests {
             newpath: String,
         ) -> Result<Status, Self::Error> {
             let mut state = self.state.lock().unwrap();
+            if state.reject_rename {
+                return Ok(Status {
+                    status_code: StatusCode::Failure,
+                    error_message: "PRIVATE_PEER_SENTINEL".into(),
+                    language_tag: "PRIVATE_PEER_SENTINEL".into(),
+                    ..Self::status(id)
+                });
+            }
             if state.files.contains_key(&newpath) {
                 return Err(StatusCode::Failure);
             }
@@ -837,6 +1031,124 @@ mod tests {
         )
         .await;
         (SftpClient::connect(client_stream).await.unwrap(), state)
+    }
+
+    #[tokio::test]
+    async fn remote_checksum_reports_progress_and_closes_handles_for_both_probes() {
+        use sha2::{Digest,Sha256};
+        let (client,state)=client().await;
+        let payload=vec![42;2*super::SFTP_TRANSFER_BATCH_BYTES+17];
+        {
+            let mut state=state.lock().unwrap();
+            state.files.insert("/temporary".into(),payload.clone());
+            state.files.insert("/destination".into(),payload.clone());
+        }
+        let staged=client.staged_upload();
+        let captured=Arc::new(Mutex::new(Vec::new()));
+        let output=captured.clone();
+        let report:super::ReadProgress=Arc::new(move|done,total|output.lock().unwrap().push((done,total)));
+        let (a,b)=tokio::join!(staged.probe_with_progress("/temporary",payload.len() as u64,&report),staged.probe("/destination",payload.len() as u64));
+        let a=a.unwrap().unwrap();let b=b.unwrap().unwrap();
+        assert_eq!(a,b);assert_eq!(a.sha256,<[u8;32]>::from(Sha256::digest(&payload)));
+        let events=captured.lock().unwrap();
+        assert_eq!(events.first(),Some(&(0,payload.len() as u64)));
+        assert_eq!(events.last(),Some(&(payload.len() as u64,payload.len() as u64)));
+        assert!(events.len()>=4);assert!(events.windows(2).all(|pair|pair[0].0<=pair[1].0));
+        assert!(state.lock().unwrap().handles.is_empty(),"both reads must drain and close their handles");
+    }
+
+    #[test]
+    fn error_diagnostics_hide_peer_text_paths_and_source_chains() {
+        use russh_sftp::client::error::Error as RawError;
+        let marker = "PRIVATE_PEER_SENTINEL";
+        let errors = [
+            SftpError::from(RawError::Status(Status {
+                id: 1,
+                status_code: StatusCode::PermissionDenied,
+                error_message: marker.into(),
+                language_tag: marker.into(),
+            })),
+            SftpError::from(RawError::IO(marker.into())),
+            SftpError::from(RawError::Limited(marker.into())),
+            SftpError::from(RawError::UnexpectedBehavior(marker.into())),
+            SftpError::from(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                marker,
+            )),
+            SftpError::DestinationExists(marker.into()),
+            SftpError::InvalidLocalPath(marker.into()),
+            SftpError::InvalidRemotePath(marker.into()),
+            SftpError::TemporaryCleanupFailed {
+                path: marker.into(),
+                cause: marker.into(),
+                reason: marker.into(),
+            },
+            SftpError::CommittedCleanupFailed {
+                path: marker.into(),
+                reason: marker.into(),
+            },
+        ];
+        for error in &errors {
+            assert!(!format!("{error}: {error:?}").contains(marker));
+            assert!(std::error::Error::source(error).is_none());
+        }
+        assert!(
+            errors[0]
+                .to_string()
+                .contains(&format!("status {}", StatusCode::PermissionDenied))
+        );
+        assert!(errors[4].to_string().contains("PermissionDenied"));
+    }
+
+    #[tokio::test]
+    async fn peer_errors_and_cancelled_cleanup_failure_retain_recovery_without_diagnostic_leaks() {
+        let (client, state) = client().await;
+        state.lock().unwrap().reject_rename = true;
+        let mut reader = b"content".as_slice();
+        let error = client
+            .upload_atomic(
+                &mut reader,
+                "/PRIVATE_PATH_SENTINEL",
+                Some(7),
+                &TransferControl::default(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, SftpError::Protocol(russh_sftp::client::error::Error::Status(status)) if status.error_message == "PRIVATE_PEER_SENTINEL")
+        );
+        assert!(!format!("{error}: {error:?}").contains("SENTINEL"));
+        assert!(state.lock().unwrap().files.is_empty());
+
+        state.lock().unwrap().reject_remove = true;
+        let control = TransferControl::default();
+        let payload = vec![0x33; SFTP_TRANSFER_CHUNK_BYTES * 2];
+        let mut reader = payload.as_slice();
+        let error = client
+            .upload_atomic(
+                &mut reader,
+                "/PRIVATE_PATH_SENTINEL",
+                Some(payload.len() as u64),
+                &control,
+                |_| control.cancel(),
+            )
+            .await
+            .unwrap_err();
+        assert!(control.is_cancelled());
+        let SftpError::TemporaryCleanupFailed { path, .. } = &error else {
+            panic!("cleanup failure must remain a failure")
+        };
+        assert!(state.lock().unwrap().files.contains_key(path));
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .files
+                .contains_key("/PRIVATE_PATH_SENTINEL")
+        );
+        assert!(!format!("{error}: {error:?}").contains("SENTINEL"));
+        client.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -901,6 +1213,9 @@ mod tests {
         let (stream, _peer) = tokio::io::duplex(4_096);
         let client = SftpClient {
             session: Arc::new(RawSftpSession::new(stream)),
+            verified_publish: false,
+            checksum_handle: false,
+            verified_replace: false,
             limits: Limits {
                 packet_len: Some(1_024),
                 read_len: Some(700),
@@ -912,6 +1227,9 @@ mod tests {
         assert_eq!(client.write_chunk_bytes("handle").unwrap(), 600);
         let impossible = SftpClient {
             session: client.session,
+            verified_publish: false,
+            checksum_handle: false,
+            verified_replace: false,
             limits: Limits {
                 packet_len: Some(10),
                 ..Limits::default()

@@ -9,6 +9,8 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 const DEFAULT_MAX_CONNECTIONS: usize = 512;
+#[cfg(test)]
+mod desktop_lifetime_tests;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IpcServerStats {
@@ -60,6 +62,7 @@ pub struct SessionIpcServer {
     service: SessionIpcService,
     stats: Arc<SharedStats>,
     max_connections: usize,
+    desktop_lifetime: Option<Arc<crate::desktop_lifetime::DesktopLifetime>>,
 }
 
 impl SessionIpcServer {
@@ -75,6 +78,7 @@ impl SessionIpcServer {
             service,
             stats: Arc::new(SharedStats::default()),
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            desktop_lifetime: None,
         }
     }
 
@@ -82,6 +86,16 @@ impl SessionIpcServer {
     fn with_connection_limit(mut self, max_connections: usize) -> Self {
         self.max_connections = max_connections.max(1);
         self
+    }
+
+    #[must_use]
+    pub fn with_desktop_lifetime(mut self, shutdown: watch::Sender<bool>) -> Self {
+        self.desktop_lifetime = Some(crate::desktop_lifetime::DesktopLifetime::new(shutdown));
+        self
+    }
+
+    pub async fn shutdown_sessions(&self) {
+        self.service.shutdown_sessions().await;
     }
 
     #[must_use]
@@ -94,13 +108,22 @@ impl SessionIpcServer {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<IpcServerStats, IpcServerError> {
         let mut connections = JoinSet::new();
+        let watchdog = self
+            .desktop_lifetime
+            .clone()
+            .map(|lifetime| tokio::spawn(lifetime.startup_watchdog()));
+        // Windows accept owns a pending named-pipe instance. Reaping another
+        // connection must not drop that instance after a new client has opened it.
+        let pending_accept = self.listener.accept();
+        tokio::pin!(pending_accept);
         loop {
             if *shutdown.borrow() {
                 break;
             }
             tokio::select! {
-                accepted = self.listener.accept() => {
+                accepted = &mut pending_accept => {
                     let stream = accepted.map_err(IpcServerError::Accept)?;
+                    pending_accept.set(self.listener.accept());
                     self.stats.accepted.fetch_add(1, Ordering::Relaxed);
                     if connections.len() >= self.max_connections {
                         self.stats.rejected.fetch_add(1, Ordering::Relaxed);
@@ -114,8 +137,9 @@ impl SessionIpcServer {
                     let policy = self.handshake_policy.clone();
                     let service = self.service.clone();
                     let stats = Arc::clone(&self.stats);
+                    let lifetime = self.desktop_lifetime.clone();
                     connections.spawn(async move {
-                        let result = serve_authenticated_connection(stream, &policy, &service).await;
+                        let result = serve_authenticated_connection(stream, &policy, &service, lifetime).await;
                         match result {
                             Ok(()) => {
                                 stats.completed.fetch_add(1, Ordering::Relaxed);
@@ -141,6 +165,9 @@ impl SessionIpcServer {
 
         connections.abort_all();
         while connections.join_next().await.is_some() {}
+        if let Some(watchdog) = watchdog {
+            watchdog.abort();
+        }
         Ok(self.stats())
     }
 }
@@ -149,21 +176,89 @@ async fn serve_authenticated_connection<S>(
     mut stream: S,
     policy: &HandshakePolicy,
     service: &SessionIpcService,
+    lifetime: Option<Arc<crate::desktop_lifetime::DesktopLifetime>>,
 ) -> Result<(), ConnectionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let negotiated = server_handshake(&mut stream, policy).await?;
+    if negotiated.feature_bits == features::DESKTOP_LIFETIME {
+        use tokio::io::AsyncReadExt;
+        let _lease = lifetime
+            .as_ref()
+            .and_then(|lifetime| lifetime.acquire())
+            .ok_or(ConnectionError::SessionServiceRequired)?;
+        // This authenticated socket is a lifetime lease, never a session data stream.
+        // EOF (including a GUI crash) releases it; other GUI processes keep their own lease.
+        let mut byte = [0];
+        let _ = stream.read(&mut byte).await;
+        return Ok(());
+    }
     if negotiated.feature_bits
-        & (features::FULL_FRAME_RECOVERY
+        & (features::ZMODEM | features::FULL_FRAME_RECOVERY
             | features::LOG_PAGING
             | features::TERMINAL_CONTROL
-            | features::HISTORY_SEARCH)
+            | features::HISTORY_SEARCH
+            | features::PROFILE_CONTROL
+            | features::SSH_PROFILE_TARGET
+            | features::SSH_PROFILE_SESSION
+            | features::SSH_PROFILE_AUTH
+            | features::SSH_HOST_KEY_IMPORT
+            | features::SSH_PROFILE_ROUTE
+            | features::LOCAL_PROFILE
+            | features::LOCAL_LAUNCH_OPTIONS
+            | features::WORKSPACE_CONTROL
+            | features::SFTP_CONTROL
+            | features::SSH_SESSION_STATUS
+            | features::VAULT_CONTROL
+            | features::CLIPBOARD_CONTROL
+            | features::HOST_CLIPBOARD_POLICY
+            | features::TASK_CONTROL
+            | features::TASK_PLAN_CONTROL
+            | features::TASK_RESULTS
+            | features::TASK_UPLOADS
+            | features::TASK_DOWNLOADS
+            | features::MIXED_TASK_CONTROL
+            | features::MIXED_FILE_REPAIR
+            | features::MIXED_RESULTS
+            | features::TASK_OUTPUT_ANALYSIS
+            | features::TASK_OUTPUT_SEARCH
+            | features::TASK_OUTPUT_MERGE
+            | features::TASK_OUTPUT_ARCHIVE
+            | features::MIXED_TASK_RETRY
+            | features::MIXED_ROLLOUT
+            | features::VAULT_SESSION_STATE
+            | features::HOST_GROUP_CONTROL
+            | features::QUICK_COMMAND_CONTROL
+            | features::QUICK_TASK_TEMPLATES
+            | features::OUTPUT_WORKSPACE
+            | features::FILE_PUBLICATION
+            | features::SFTP_BROWSER_QUEUE
+            | features::SFTP_DIRECTORY_CURSOR
+            | features::SFTP_VERIFIED_QUEUE
+            | features::SFTP_LIVE_CONTROL
+            | features::SFTP_WORKSPACE
+            | features::TUNNEL_CONTROL
+            | features::DEDICATED_TUNNELS
+            | features::HOST_CA_CONTROL
+            | features::SSH_PROVIDER_CONTROL
+            | features::TERMINAL_TOOLS
+            | features::PROFILE_BATCH
+            | features::TERMINAL_POLICIES
+            | features::TERMINAL_CONTEXT_LAUNCH
+            | features::PROFILE_CONNECTION_IMPORT
+            | features::PROFILE_TRANSFER
+            | features::THEME_TRANSFER
+            | features::CREDENTIAL_PACKAGE
+            | features::OPENSSH_EXPORT
+            | features::AUTOMATIC_CLIPBOARD)
         == 0
     {
         return Err(ConnectionError::SessionServiceRequired);
     }
-    service.serve_connection(stream).await?;
+    service
+        .serve_connection_with_features(stream, negotiated.feature_bits)
+        .await?;
     Ok(())
 }
 
@@ -182,6 +277,74 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn retiring_connections_do_not_cancel_a_pending_named_pipe_accept() {
+        use std::time::Duration;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let endpoint = format!(r"\\.\pipe\cshell-accept-retirement-{}", std::process::id());
+        let listener = transport::LocalListener::bind(&endpoint).unwrap();
+        let token = [0x83; 32];
+        let server = Arc::new(SessionIpcServer::new(
+            listener,
+            HandshakePolicy::new(token, features::TERMINAL_CONTROL),
+            SessionIpcService::new(registry),
+        ));
+        let (shutdown, stopped) = tokio::sync::watch::channel(false);
+        let task = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move { server.run_until(stopped).await })
+        };
+        let mut previous = None;
+        for round in 0..128 {
+            // Keep the preceding request connection alive until the next pipe has
+            // opened: its retirement competes with accepting the new client.
+            let mut client = transport::connect(&endpoint).await.unwrap();
+            drop(previous.take());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut handshake = Handshake::new(vec![4; 16], token.to_vec());
+                handshake.feature_bits = features::TERMINAL_CONTROL;
+                client_handshake(&mut client, 1, handshake)
+                    .await
+                    .unwrap_or_else(|e| panic!("round {round} handshake: {e}"));
+                write_envelope(
+                    &mut client,
+                    &Envelope {
+                        request_id: 2,
+                        payload: Some(envelope::Payload::SessionListRequest(SessionListRequest {})),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let response = read_envelope(&mut client).await.unwrap();
+                assert_eq!(response.request_id, 2);
+                assert!(matches!(
+                    response.payload,
+                    Some(envelope::Payload::SessionListResponse(_))
+                ));
+            })
+            .await
+            .unwrap_or_else(|e| panic!("round {round}: {e}"));
+            previous = Some(client);
+        }
+        drop(previous);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.stats().completed_connections != 128 {
+                assert_eq!(server.stats().rejected_connections, 0);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.send(true).unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(stats.accepted_connections, 128);
+        assert_eq!(stats.completed_connections, 128);
+        assert_eq!(stats.rejected_connections, 0);
+    }
 
     fn long_running_profile() -> LocalProfile {
         #[cfg(windows)]
@@ -578,6 +741,7 @@ mod tests {
                     request_id: log_request_id,
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::LogPageRequest(LogPageRequest {
+                        terminal_history: false,
                         session_id: session_id.as_uuid().as_bytes().to_vec(),
                         anchor_line_id: None,
                         cell_offset: 0,
@@ -630,6 +794,7 @@ mod tests {
                 request_id: 101,
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::LogPageRequest(LogPageRequest {
+                    terminal_history: false,
                     session_id: session_id.as_uuid().as_bytes().to_vec(),
                     anchor_line_id: None,
                     cell_offset: 0,

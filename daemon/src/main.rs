@@ -4,8 +4,12 @@ use cshell_ipc::{
     features, transport::LocalListener,
 };
 use cshell_local::LocalProfile;
-use cshell_ssh::{RusshProvider, SshProvider};
-use cshelld::{LocalSessionRegistry, SessionExitMonitor, SessionIpcServer, SessionIpcService};
+use cshell_ssh::registered_ssh_providers;
+use cshell_storage::SqliteProfileRepository;
+use cshelld::{
+    LocalSessionRegistry, ProfileIpcService, SessionExitMonitor, SessionIpcServer,
+    SessionIpcService,
+};
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,11 +28,9 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let provider = RusshProvider::default();
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        ssh_provider = provider.name(),
-        capabilities = ?provider.capabilities(),
+        ssh_providers = ?registered_ssh_providers(),
         "cshelld Phase 0 service skeleton initialized"
     );
 
@@ -94,7 +96,25 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
     let listener = LocalListener::bind(&PathBuf::from(&endpoint))?;
 
-    let server = SessionIpcServer::new(
+    let profile_path = profile_database_path()?;
+    let output_path = profile_path.with_file_name("task-output");
+    let profile_repository = SqliteProfileRepository::open(profile_path).await?;
+    let profiles = Arc::new(ProfileIpcService::new(profile_repository));
+    let _session_lock_monitor = match profiles.start_session_lock_monitor() {
+        Ok(monitor) => Some(monitor),
+        Err(_) => {
+            tracing::warn!(
+                "native session monitor unavailable; vault lifetime remains user-controlled"
+            );
+            None
+        }
+    };
+    let output = cshelld::TaskOutputStore::new(output_path)?;
+    let tasks = cshelld::TaskIpcService::new(profiles.clone(), output)?;
+    let desktop_managed =
+        std::env::var_os("CSHELL_DESKTOP_MANAGED").is_some_and(|value| value == "1");
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
+    let mut server = SessionIpcServer::new(
         listener,
         HandshakePolicy::with_instance_id(
             token,
@@ -103,16 +123,82 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
                 | features::PRIORITY_STREAMS
                 | features::LOG_PAGING
                 | features::TERMINAL_CONTROL
-                | features::HISTORY_SEARCH,
+                | features::COMPOSE_INPUT
+                | features::QUICK_COMMAND_CONTROL
+                | features::HOST_GROUP_CONTROL
+                | features::TASK_CONTROL
+                | features::TASK_PLAN_CONTROL
+                | features::TASK_RESULTS
+                | features::TASK_UPLOADS
+                | features::TASK_DOWNLOADS
+                | features::MIXED_TASK_CONTROL
+                | features::MIXED_FILE_REPAIR
+                | features::HISTORY_SEARCH
+                | features::PROFILE_CONTROL
+                | features::SSH_PROFILE_TARGET
+                | features::SSH_PROFILE_SESSION
+                | features::SSH_PROFILE_AUTH
+                | features::SSH_HOST_KEY_IMPORT
+                | features::SSH_PROFILE_ROUTE
+                | features::LOCAL_PROFILE
+                | features::LOCAL_LAUNCH_OPTIONS
+                | features::WORKSPACE_CONTROL
+                | features::SFTP_CONTROL
+                | features::CLIPBOARD_CONTROL
+                | features::HOST_CLIPBOARD_POLICY
+                | features::VAULT_CONTROL
+                | features::VAULT_SESSION_STATE
+                | features::AUTOMATIC_CLIPBOARD
+                | features::PROFILE_CONNECTION_IMPORT
+                | features::PROFILE_TRANSFER
+                | features::OPENSSH_EXPORT
+                | features::CREDENTIAL_PACKAGE
+                | features::THEME_TRANSFER
+                | features::SSH_SESSION_STATUS
+                | features::MIXED_RESULTS
+                | features::TASK_OUTPUT_ANALYSIS
+                | features::TASK_OUTPUT_SEARCH
+                | features::TASK_OUTPUT_MERGE
+                | features::TASK_OUTPUT_ARCHIVE
+                | features::MIXED_TASK_RETRY
+                | features::MIXED_ROLLOUT
+                | features::QUICK_TASK_TEMPLATES
+                | features::OUTPUT_WORKSPACE
+                | features::FILE_PUBLICATION
+                | features::SFTP_BROWSER_QUEUE
+                | features::SFTP_DIRECTORY_CURSOR
+                | features::SFTP_VERIFIED_QUEUE
+                | features::SFTP_LIVE_CONTROL
+                | features::ZMODEM
+                | features::TERMINAL_SCROLLBACK
+                | features::SFTP_WORKSPACE
+                | features::TUNNEL_CONTROL
+                | features::DEDICATED_TUNNELS
+                | features::HOST_CA_CONTROL
+                | features::SSH_PROVIDER_CONTROL
+                | features::TERMINAL_TOOLS
+                | features::PROFILE_BATCH
+                | features::TERMINAL_POLICIES
+                | features::TERMINAL_CONTEXT_LAUNCH
+                | features::SCRIPT_CONTROL
+                | if desktop_managed {
+                    features::DESKTOP_LIFETIME
+                } else {
+                    0
+                },
         ),
-        SessionIpcService::new(Arc::clone(&registry)),
+        SessionIpcService::new(Arc::clone(&registry))
+            .with_profiles(profiles)
+            .with_tasks(tasks),
     );
+    if desktop_managed {
+        server = server.with_desktop_lifetime(shutdown_sender.clone());
+    }
     let _discovery_publication = runtime_paths
         .as_ref()
         .zip(discovery_record.as_ref())
         .map(|(paths, record)| DiscoveryPublication::publish(paths, record))
         .transpose()?;
-    let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
     let signal_shutdown = shutdown_sender.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
@@ -138,6 +224,7 @@ async fn run_daemon() -> Result<(), Box<dyn Error>> {
         }
     };
     info!(reaped_sessions, "local session exit monitor stopped");
+    server.shutdown_sessions().await;
     info!(?stats, "daemon IPC server stopped");
     Ok(())
 }
@@ -165,4 +252,34 @@ fn required_hex<const N: usize>(name: &'static str) -> Result<[u8; N], Box<dyn E
             .map_err(|_| format!("{name} contains invalid hexadecimal data"))?;
     }
     Ok(decoded)
+}
+
+fn profile_database_path() -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(path) = std::env::var_os("CSHELL_PROFILE_DB") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(root) = std::env::var_os("CSHELL_DATA_DIR") {
+        return Ok(PathBuf::from(root).join("cshell.db"));
+    }
+    #[cfg(windows)]
+    let root = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or("LOCALAPPDATA is required for Profile storage")?
+        .join("CShell");
+    #[cfg(target_os = "macos")]
+    let root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is required for Profile storage")?
+        .join("Library")
+        .join("Application Support")
+        .join("CShell");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let root = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+        .ok_or("HOME or XDG_DATA_HOME is required for Profile storage")?
+        .join("cshell");
+    Ok(root.join("cshell.db"))
 }

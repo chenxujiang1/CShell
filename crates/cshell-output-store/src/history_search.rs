@@ -97,6 +97,9 @@ impl JournalLineIndex {
         &self,
         request: &HistorySearchRequest,
     ) -> Result<HistorySearchResult, HistorySearchError> {
+        if !self.recording_enabled() {
+            return Err(JournalError::RecordingDisabled.into());
+        }
         validate_request(request)?;
         let matcher = build_matcher(&request.query, request.options)?;
         let total = self.total_line_count();

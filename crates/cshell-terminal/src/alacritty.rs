@@ -1,3 +1,5 @@
+#[path = "shell_history.rs"]
+mod shell_history;
 use crate::{
     Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameDelta, FrameSnapshot, Style,
     TerminalEngine, TerminalModes,
@@ -6,12 +8,21 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
+use alacritty_terminal::term::{Config, Osc52, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{
     self, Color as AlacrittyColor, CursorShape as AlacrittyCursorShape, NamedColor,
 };
 use cshell_domain::TerminalSize;
 use std::collections::HashMap;
+pub const DEFAULT_HISTORY_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_TERMINAL_COLUMNS: u16 = 1024;
+pub const MAX_TERMINAL_ROWS: u16 = 512;
+pub const MAX_TERMINAL_CELLS: usize = 65536;
+fn bounded_size(mut size: TerminalSize) -> TerminalSize {
+    size.cols = size.cols.clamp(1, MAX_TERMINAL_COLUMNS);
+    size.rows = size.rows.clamp(1, MAX_TERMINAL_ROWS).min((MAX_TERMINAL_CELLS / usize::from(size.cols)) as u16);
+    size
+}
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug)]
@@ -161,6 +172,10 @@ pub struct AlacrittyTerminalEngine {
     xterm_keyboard: XtermKeyboardModes,
     size: TerminalSize,
     generation: u64,
+    output_guard: crate::output_guard::OutputGuard,
+    shell: shell_history::Tracker,
+    history_budget: usize,
+    history_bytes: usize,
 }
 
 impl std::fmt::Debug for AlacrittyTerminalEngine {
@@ -173,13 +188,113 @@ impl std::fmt::Debug for AlacrittyTerminalEngine {
     }
 }
 
+pub struct HistorySlice {
+    pub total: u64,
+    pub first_line: u64,
+    pub anchor: u64,
+    pub generation: u64,
+    rows: Vec<(u64, Vec<alacritty_terminal::term::cell::Cell>)>,
+    colors: Colors,
+}
+impl std::fmt::Debug for HistorySlice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistorySlice").field("rows", &self.rows.len()).field("anchor", &self.anchor).finish_non_exhaustive()
+    }
+}
+impl HistorySlice {
+    pub fn len(&self) -> usize { self.rows.len() }
+    pub fn is_empty(&self) -> bool { self.rows.is_empty() }
+    pub fn into_rows(self) -> impl Iterator<Item=(u64, Vec<Cell>)> {
+        self.rows.into_iter().map(move |(id, cells)| {
+            let cells = cells.into_iter().map(|source| {
+                let width = if source.flags.contains(Flags::WIDE_CHAR) { CellWidth::Wide }
+                    else if source.flags.contains(Flags::WIDE_CHAR_SPACER) { CellWidth::WideSpacer }
+                    else if source.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) { CellWidth::LeadingWideSpacer }
+                    else { CellWidth::Single };
+                Cell::with_zerowidth(if source.c.is_control() {' '} else {source.c}, source.zerowidth().into_iter().flatten().copied(), width, Style {
+                    foreground: map_color(source.fg, &self.colors), background: map_color(source.bg, &self.colors),
+                    bold: source.flags.contains(Flags::BOLD), italic: source.flags.contains(Flags::ITALIC),
+                    underline: source.flags.intersects(Flags::ALL_UNDERLINES), inverse: source.flags.contains(Flags::INVERSE),
+                }).with_soft_wrap(source.flags.contains(Flags::WRAPLINE))
+            }).collect();
+            (id,cells)
+        })
+    }
+}
+
 impl AlacrittyTerminalEngine {
+    pub fn generation(&self)->u64 {self.generation}
+    pub fn set_history_budget(&mut self, bytes: usize) {
+        self.history_budget = bytes.min(DEFAULT_HISTORY_BYTES);
+        self.enforce_history_budget();
+    }
+    pub fn retained_history_bytes(&self) -> usize { self.history_bytes }
+    pub fn history_budget_bytes(&self) -> usize { self.history_budget }
+    fn enforce_history_budget(&mut self) {
+        let row_cost = usize::from(self.size.cols) * std::mem::size_of::<alacritty_terminal::term::cell::Cell>() + 40;
+        let rows = (self.history_budget / row_cost).saturating_sub(64).min(10_000);
+        self.history_bytes = self.terminal.limit_history_bytes(self.history_budget, rows);
+    }
+
+    /// Clone a bounded native slice. Dynamic cell payloads are shared immutably;
+    /// expensive UTF-8/style conversion can run after releasing the parser lock.
+    pub fn history_slice(&self, anchor: Option<u64>, before: usize, after: usize) -> HistorySlice {
+        use alacritty_terminal::index::{Column, Line, Point};
+        let grid = self.terminal.grid();
+        let history = grid.history_size();
+        let total = history + usize::from(self.size.rows);
+        let offset = grid.history_offset();
+        let anchor = anchor.unwrap_or(offset + total as u64).clamp(offset + 1, offset + total.max(1) as u64);
+        let anchor = (anchor - offset) as usize;
+        let limit = (131072 / usize::from(self.size.cols).max(1)).clamp(1, 512);
+        let wanted_after = after.min(limit - 1).min(total - anchor);
+        let wanted_before = before.min(limit - 1).min(anchor - 1);
+        let (before, after) = if wanted_before + wanted_after + 1 <= limit {
+            (wanted_before, wanted_after)
+        } else {
+            let after = wanted_after.min((limit - 1) / 2);
+            let before = wanted_before.min(limit - 1 - after);
+            (before, wanted_after.min(limit - 1 - before))
+        };
+        let start = anchor - before - 1;
+        let end = anchor + after;
+        let rows = (start..end).map(|index| {
+            let line = Line(index as i32 - history as i32);
+            let cells = (0..usize::from(self.size.cols)).map(|col| grid[Point::new(line,Column(col))].clone()).collect();
+            (offset + (index+1) as u64, cells)
+        }).collect();
+        HistorySlice { total: offset + total as u64, first_line: offset + 1, anchor: offset + anchor as u64, generation: self.generation,
+            rows, colors: self.terminal.renderable_content().colors.clone() }
+    }
+    pub fn history_page(&self, anchor: Option<u64>, before: usize, after: usize) -> (u64, u64, Vec<(u64, Vec<Cell>)>) {
+        let slice = self.history_slice(anchor, before, after);
+        (slice.total, slice.anchor, slice.into_rows().collect())
+    }
+
+    /// Start a fresh remote shell without carrying parser fragments or keyboard
+    /// modes across transports. Keep snapshot generations monotonic.
+    pub fn reset_connection(&mut self, size: TerminalSize) {
+        let generation = self.generation.saturating_add(1);
+        let budget = self.history_budget;
+        let command_id=self.shell.next_id();
+        *self = Self::new(size);
+        self.shell.restore_next(command_id);
+        self.set_history_budget(budget);
+        self.generation = generation;
+    }
+
     #[must_use]
     pub fn new(size: TerminalSize) -> Self {
+        let size = bounded_size(size);
         let response_sink = ResponseSink::default();
         let dimensions = TerminalDimensions::from(size);
         let config = Config {
+            scrolling_history: 10_000,
             kitty_keyboard: true,
+            // Clipboard consent is handled by the daemon's bounded OSC52 observer.
+            // The adapter must never decode clipboard payloads or answer reads;
+            // upstream's OnlyCopy default would bypass that resource boundary.
+            osc52: Osc52::Disabled,
             ..Config::default()
         };
         let mut terminal = Term::new(config, &dimensions, response_sink.clone());
@@ -193,6 +308,10 @@ impl AlacrittyTerminalEngine {
             xterm_keyboard: XtermKeyboardModes::default(),
             size,
             generation: 0,
+            output_guard: Default::default(),
+            shell: Default::default(),
+            history_budget: DEFAULT_HISTORY_BYTES,
+            history_bytes: 0,
         }
     }
 }
@@ -200,14 +319,18 @@ impl AlacrittyTerminalEngine {
 impl TerminalEngine for AlacrittyTerminalEngine {
     fn feed(&mut self, bytes: &[u8]) -> FrameDelta {
         let base_generation = self.generation;
-        let mut consumed = 0;
-        for (offset, response) in self.xterm_keyboard.observe(bytes) {
-            self.parser
-                .advance(&mut self.terminal, &bytes[consumed..=offset]);
-            self.response_sink.push(response);
-            consumed = offset + 1;
+        // Parse bounded slices, enforcing retained allocation limits between slices.
+        for chunk in bytes.chunks(64 * 1024) {
+            let filtered = self.output_guard.filter(chunk);
+            let mut consumed = 0;
+            for (offset, event) in std::mem::take(&mut self.output_guard.events) {
+                self.advance_output(&filtered[consumed..offset]);
+                self.observe_shell(&event);
+                consumed = offset;
+            }
+            self.advance_output(&filtered[consumed..]);
+            self.enforce_history_budget();
         }
-        self.parser.advance(&mut self.terminal, &bytes[consumed..]);
         self.generation = self.generation.saturating_add(1);
         let dirty_rows = match self.terminal.damage() {
             TermDamage::Full => (0..self.size.rows).collect(),
@@ -225,8 +348,16 @@ impl TerminalEngine for AlacrittyTerminalEngine {
     }
 
     fn resize(&mut self, size: TerminalSize) {
+        let size = bounded_size(size);
+        if size.rows == self.size.rows && size.cols == self.size.cols { return; }
+        if size.cols != self.size.cols { self.shell.invalidate_positions(); }
+        // Bound history by the wider of the two row sizes before reflow.
+        let row_cost = usize::from(size.cols.max(self.size.cols)) * 24 + 40;
+        let rows = (self.history_budget / row_cost).saturating_sub(64).min(10_000);
+        self.terminal.limit_history_bytes(self.history_budget, rows);
         self.terminal.resize(TerminalDimensions::from(size));
         self.size = size;
+        self.enforce_history_budget();
         self.generation = self.generation.saturating_add(1);
     }
 
@@ -249,6 +380,8 @@ impl TerminalEngine for AlacrittyTerminalEngine {
             kitty_keyboard_flags |= TerminalModes::KITTY_REPORT_ASSOCIATED_TEXT;
         }
         TerminalModes {
+            mouse_tracking: if modes.contains(TermMode::MOUSE_MOTION) { 3 } else if modes.contains(TermMode::MOUSE_DRAG) { 2 } else if modes.contains(TermMode::MOUSE_REPORT_CLICK) { 1 } else { 0 },
+            mouse_encoding: if modes.contains(TermMode::SGR_MOUSE) { 2 } else if modes.contains(TermMode::UTF8_MOUSE) { 1 } else { 0 },
             application_cursor: modes.contains(TermMode::APP_CURSOR),
             bracketed_paste: modes.contains(TermMode::BRACKETED_PASTE),
             kitty_keyboard_flags,
@@ -321,10 +454,11 @@ impl TerminalEngine for AlacrittyTerminalEngine {
                     cell = cell.with_hyperlink_uri(shared_uri);
                 }
             }
-            cells[row * usize::from(cols) + col] = cell;
+            cells[row * usize::from(cols) + col] = cell.with_soft_wrap(source.flags.contains(Flags::WRAPLINE));
         }
         FrameSnapshot {
             generation: self.generation,
+            screen_start_line: self.terminal.grid().history_offset() + self.terminal.grid().history_size() as u64 + 1,
             rows,
             cols,
             cursor_row: cursor_row.min(rows.saturating_sub(1)),
@@ -567,5 +701,70 @@ mod tests {
             terminal.snapshot().row(0).unwrap_or_default()[0].hyperlink_uri(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    #[test]
+    fn history_preserves_old_commands_colors_unicode_and_does_not_change_live_screen() {
+        let mut terminal=AlacrittyTerminalEngine::new(TerminalSize::cells(4,40));
+        terminal.feed("user$ echo hello\r\n\x1b[31m你好 e\u{301}\x1b[0m\r\n".as_bytes());
+        for i in 0..100 {terminal.feed(format!("line {i}\r\n").as_bytes());}
+        let live=terminal.snapshot();
+        let (total,anchor,rows)=terminal.history_page(Some(1),0,5);
+        assert!(total>100);assert_eq!(anchor,1);
+        let text:Vec<String>=rows.iter().map(|(_,cells)|cells.iter().filter(|c|!matches!(c.width,CellWidth::WideSpacer|CellWidth::LeadingWideSpacer)).flat_map(|c|c.characters()).collect()).collect();
+        assert!(text[0].contains("user$ echo hello"));assert!(text[1].contains("你好 e\u{301}"));
+        assert_eq!(rows[1].1[0].style.foreground,Color::Indexed(1));
+        assert_eq!(terminal.snapshot(),live);
+        for _ in 0..10100 {terminal.feed(b"next\r\n");}
+        let (total,_,rows)=terminal.history_page(None,usize::MAX,usize::MAX);
+        assert!(total>=10104);assert!(rows[0].0>1);assert!(rows.len()<=4096);
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    #[test]
+    fn native_combining_storage_is_bounded_and_osc_overflow_does_not_leak_text() {
+        use alacritty_terminal::index::{Line,Column};
+        let mut term = AlacrittyTerminalEngine::new(TerminalSize::cells(4,80));
+        term.feed(b"a");
+        for _ in 0..32 { term.feed("\u{301}".repeat(8192).as_bytes()); }
+        assert_eq!(term.terminal.grid()[Line(0)][Column(0)].zerowidth().unwrap().len(),64);
+        term.feed(b"\x1b]0;");
+        for _ in 0..128 {term.feed(&vec![b'x';65536]);}
+        term.feed(b"\x1b\\OK");
+        assert_eq!(term.snapshot().row(0).unwrap()[1].character,'O');
+    }
+    #[test]
+    fn oversized_hyperlinks_do_not_enter_native_cells_and_utf8_still_recovers() {
+        use alacritty_terminal::index::{Line,Column};
+        let mut term = AlacrittyTerminalEngine::new(TerminalSize::cells(4,80));
+        term.feed(format!("\x1b]8;;https://example.org/{}\x07x\x1b]8;;\x07", "a".repeat(8192)).as_bytes());
+        assert!(term.terminal.grid()[Line(0)][Column(0)].hyperlink().is_none());
+        term.feed("你好".as_bytes());
+        assert_eq!(term.snapshot().row(0).unwrap()[1].character,'你');
+    }
+    #[test]
+    fn byte_budget_reclaims_oldest_rows_and_keeps_ids_and_alternate_screen() {
+        let mut term = AlacrittyTerminalEngine::new(TerminalSize::cells(4,120));
+        term.set_history_budget(256*1024);
+        term.feed("row\r\n".repeat(15000).as_bytes());
+        assert!(term.retained_history_bytes()<=256*1024);
+        let first = term.history_slice(Some(1),0,4);
+        assert!(first.first_line>1);assert_eq!(first.anchor,first.first_line);
+        let before = first.first_line;
+        term.feed(b"\x1b[?1049h\x1b[HTOP");
+        term.set_history_budget(128*1024);
+        assert_eq!(term.snapshot().row(0).unwrap()[0].character,'T');
+        term.feed(b"\x1b[?1049l");
+        assert!(term.history_slice(Some(1),0,4).first_line>=before);
+        assert!(term.retained_history_bytes()<=128*1024);
+        term.resize(TerminalSize::cells(24,500));
+        assert!(term.retained_history_bytes()<=128*1024);
     }
 }

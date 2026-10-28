@@ -48,6 +48,7 @@ pub enum TaskState {
     AwaitingConfirmation,
     Queued,
     Running,
+    Paused,
     Cancelling,
     Completed,
     PartialFailed,
@@ -65,12 +66,23 @@ impl TaskState {
                     Self::AwaitingConfirmation | Self::Queued | Self::Failed
                 )
                 | (Self::AwaitingConfirmation, Self::Queued | Self::Cancelled)
-                | (Self::Queued, Self::Running | Self::Cancelled)
+                | (
+                    Self::Queued,
+                    Self::Running | Self::Cancelled | Self::Cancelling
+                )
                 | (
                     Self::Running,
-                    Self::Cancelling | Self::Completed | Self::PartialFailed | Self::Failed
+                    Self::Paused
+                        | Self::Cancelling
+                        | Self::Completed
+                        | Self::PartialFailed
+                        | Self::Failed
                 )
-                | (Self::Cancelling, Self::Cancelled | Self::PartialFailed)
+                | (Self::Paused, Self::Running | Self::Cancelling)
+                | (
+                    Self::Cancelling,
+                    Self::Cancelled | Self::PartialFailed | Self::Completed | Self::Failed
+                )
         );
         valid.then_some(next).ok_or_else(|| {
             DomainError::new(

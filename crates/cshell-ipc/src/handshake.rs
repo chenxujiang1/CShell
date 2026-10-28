@@ -4,6 +4,7 @@ use crate::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use zeroize::Zeroize;
 
 const INSTANCE_ID_LENGTH: usize = 16;
 const TOKEN_LENGTH: usize = 32;
@@ -13,6 +14,12 @@ pub struct HandshakePolicy {
     expected_token: [u8; TOKEN_LENGTH],
     expected_daemon_instance_id: Option<[u8; INSTANCE_ID_LENGTH]>,
     supported_feature_bits: u64,
+}
+
+impl Drop for HandshakePolicy {
+    fn drop(&mut self) {
+        self.expected_token.zeroize();
+    }
 }
 
 impl std::fmt::Debug for HandshakePolicy {

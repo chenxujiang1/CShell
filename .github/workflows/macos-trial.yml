@@ -1,0 +1,76 @@
+name: macOS personal trial
+
+on:
+  push:
+    branches:
+      - codex/macos-trial
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-personal-trial-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: macOS ${{ matrix.architecture }} trial
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            architecture: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            architecture: x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-trial-${{ matrix.target }}
+      - name: Run SSH, vault, storage, PTY and script runtime regression tests
+        run: cargo test --locked -p cshell-ssh -p cshell-vault -p cshell-storage -p cshell-local -p cshell-script-runtime --lib
+      - name: Check native macOS keychain
+        env:
+          CSHELL_KEYCHAIN_NATIVE_TEST: '1'
+        run: cargo test --locked -p cshell-vault native_ -- --test-threads=1
+      - name: Build optimized application and companions
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cshell-gui -p cshelld -p cshell-script-worker
+      - name: Package an ad-hoc signed trial application
+        run: bash .github/scripts/package-trial-macos.sh target/${{ matrix.target }}/release ${{ matrix.architecture }}
+      - name: Verify and run the extracted app
+        shell: bash
+        run: |
+          destination="$RUNNER_TEMP/cshell-macos-trial-check"
+          mkdir -p "$destination"
+          ditto -x -k "artifacts/ui-refresh-20261015/bin/CShell-trial-macos-${{ matrix.architecture }}.zip" "$destination"
+          app="$destination/CShell.app"
+          for executable in CShell cshelld cshell-script-worker; do
+            test -x "$app/Contents/MacOS/$executable"
+          done
+          test -s "$destination/README-first-run.txt"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          export CSHELL_DATA_DIR="$RUNNER_TEMP/cshell-macos-trial-data"
+          export CSHELL_PROFILE_DB="$CSHELL_DATA_DIR/profiles.sqlite"
+          export CSHELL_RUNTIME_DIR="$RUNNER_TEMP/cshell-macos-trial-runtime"
+          mkdir -p "$CSHELL_DATA_DIR"
+          "$app/Contents/MacOS/CShell" --log-window-e2e
+      - name: Upload the trial app and SHA-256
+        uses: actions/upload-artifact@v4
+        with:
+          name: CShell-trial-macos-${{ matrix.architecture }}
+          path: |
+            artifacts/ui-refresh-20261015/bin/CShell-trial-macos-${{ matrix.architecture }}.zip
+            artifacts/ui-refresh-20261015/bin/CShell-trial-macos-${{ matrix.architecture }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

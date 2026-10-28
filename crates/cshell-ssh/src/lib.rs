@@ -5,10 +5,36 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+pub mod connection_progress;
+
+mod working_directory;
+mod managed_keys;
+mod file_checksum;
+mod ordered_auth;
+pub use ordered_auth::{OrderedAuthentication,OrderedAuthStep,LoginResponder,PasswordResponder};
 
 mod forwarding;
+mod ppk;
+mod rsa_signer;
+mod legacy_pem;
+pub use legacy_pem::LegacyPemError;
+pub use managed_keys::PrivateKeyImportError;
+pub use rsa_signer::RsaKeyError;
+mod provider;
+pub use cshell_domain::SshAlgorithmPolicy as AlgorithmPolicy;
+pub use ppk::{MAX_PPK_BYTES, PpkError, PpkInspection, PpkKdfInfo, inspect_ppk};
+pub use provider::{SshConnection, registered_ssh_providers, select_ssh_provider};
+mod host_authorities;
+mod known_hosts;
+pub use host_authorities::{
+    CertificateFacts, HostAuthorityRule, inspect_openssh_certificate, normalize_host_authority,
+};
+mod transport;
+pub use transport::{ProxyProtocol, SshStream, SshTransport, open_proxy_stream, open_tcp_stream};
 
 pub use forwarding::{ForwardHandle, ForwardLimits, RemoteForwardTarget};
+pub use known_hosts::import_confirmed_host_key;
+pub use known_hosts::{HostKeyCheck, KnownHostsError, KnownHostsVerifier};
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_AUTH_ROUND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -30,14 +56,6 @@ type ForwardRouteKey = (String, u32);
 type ForwardRouteSender = tokio::sync::mpsc::Sender<russh::Channel<russh::client::Msg>>;
 type ForwardRoutes =
     Arc<std::sync::RwLock<std::collections::HashMap<ForwardRouteKey, ForwardRouteSender>>>;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub enum AlgorithmPolicy {
-    #[default]
-    Modern,
-    Compatible,
-    Legacy,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum HostKeyDecision {
@@ -68,6 +86,28 @@ pub trait SshProvider: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> SshCapabilities;
     fn algorithm_policy(&self) -> AlgorithmPolicy;
+    fn descriptor(&self) -> cshell_application::SshProviderDescriptor;
+    fn connect<'a>(
+        &'a self,
+        stream: SshTransport,
+        username: String,
+        authentication: SshAuthentication,
+        verifier: KnownHostsVerifier,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<SshConnection, SshError>> + Send + 'a>> {
+        self.connect_configured(stream, username, authentication, verifier, Default::default())
+    }
+    fn connect_configured<'a>(
+        &'a self,
+        stream: SshTransport,
+        username: String,
+        authentication: SshAuthentication,
+        verifier: KnownHostsVerifier,
+        options: cshell_domain::SshConnectionOptions,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<SshConnection, SshError>> + Send + 'a>>;
+    fn scan<'a>(
+        &'a self,
+        stream: SshTransport,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<ScannedHostKey, String>> + Send + 'a>>;
 }
 
 #[derive(Debug, Default)]
@@ -103,19 +143,56 @@ impl SshProvider for RusshProvider {
             password: true,
             public_key: true,
             keyboard_interactive: true,
-            agent: true,
+            agent: cfg!(any(unix, windows)),
             certificates: true,
             jump_host: true,
             local_forward: true,
             remote_forward: true,
             dynamic_forward: true,
             sftp: true,
-            x11_forwarding: cfg!(feature = "x11-forwarding"),
+            x11_forwarding: false,
         }
     }
 
     fn algorithm_policy(&self) -> AlgorithmPolicy {
         self.algorithm_policy
+    }
+    fn descriptor(&self) -> cshell_application::SshProviderDescriptor {
+        provider::russh_descriptor()
+    }
+    fn connect_configured<'a>(
+        &'a self,
+        stream: SshTransport,
+        username: String,
+        authentication: SshAuthentication,
+        verifier: KnownHostsVerifier,
+        options: cshell_domain::SshConnectionOptions,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<SshConnection, SshError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut requirements = provider::authentication_requirements(&authentication);
+            requirements.algorithm_policy = self.algorithm_policy;
+            select_ssh_provider(&requirements)?;
+            let identity=match &authentication {SshAuthentication::Ordered(ordered)=>Some(ordered.identity.clone()),_=>None};
+            let fallback_username=username.clone();
+            let client =
+                RusshClient::connect_known_hosts_stream_configured(stream, username, authentication, verifier, options)
+                    .await?;
+            let username=identity.map(|id|id.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()).unwrap_or(fallback_username);
+            Ok(SshConnection::from_russh(client).with_authenticated_username(username))
+        })
+    }
+    fn scan<'a>(
+        &'a self,
+        stream: SshTransport,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<ScannedHostKey, String>> + Send + 'a>> {
+        Box::pin(async move {
+            select_ssh_provider(&cshell_domain::SshProviderRequirements {
+                algorithm_policy: self.algorithm_policy,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+            scan_host_key_stream(stream).await
+        })
     }
 }
 
@@ -127,6 +204,7 @@ pub struct PinnedHostKey {
 #[derive(Clone)]
 pub struct SshPrivateKey {
     key: Arc<russh::keys::PrivateKey>,
+    rsa: Option<Arc<rsa_signer::RsaSigningKey>>,
 }
 
 #[derive(Clone)]
@@ -159,9 +237,37 @@ impl std::fmt::Debug for SshPrivateKey {
 
 impl SshPrivateKey {
     pub fn decode_openssh(encoded: &str, passphrase: Option<&str>) -> Result<Self, SshError> {
-        let key =
-            russh::keys::decode_secret_key(encoded, passphrase).map_err(SshError::PrivateKey)?;
-        Ok(Self { key: Arc::new(key) })
+        Self::decode_private_key(encoded, passphrase)
+    }
+
+    pub fn decode_private_key(encoded: &str, passphrase: Option<&str>) -> Result<Self, SshError> {
+        let encoded = managed_keys::normalize(encoded);
+        let encoded = encoded.as_str();
+        if encoded
+            .trim_start_matches('\u{feff}')
+            .trim_start()
+            .starts_with("PuTTY-User-Key-File-")
+        {
+            let key = ppk::decode(encoded, passphrase).map_err(SshError::Ppk)?;
+            return Ok(Self {
+                key: Arc::new(key.key),
+                rsa: key.rsa,
+            });
+        }
+        let key = if encoded.starts_with("-----BEGIN RSA PRIVATE KEY-----") {
+            legacy_pem::decode(encoded, passphrase)?
+        } else {
+            russh::keys::decode_secret_key(encoded, passphrase).map_err(SshError::PrivateKey)?
+        };
+        let rsa = if key.algorithm().is_rsa() {
+            Some(rsa_signer::RsaSigningKey::from_key(&key)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            key: Arc::new(key),
+            rsa,
+        })
     }
 
     #[must_use]
@@ -224,24 +330,143 @@ impl PinnedHostKey {
     }
 }
 
+#[derive(Clone, Debug)]
+enum HostKeyPolicy {
+    Pinned(PinnedHostKey),
+    KnownHosts(KnownHostsVerifier),
+}
+
+impl From<PinnedHostKey> for HostKeyPolicy {
+    fn from(value: PinnedHostKey) -> Self {
+        Self::Pinned(value)
+    }
+}
+
+impl From<KnownHostsVerifier> for HostKeyPolicy {
+    fn from(value: KnownHostsVerifier) -> Self {
+        Self::KnownHosts(value)
+    }
+}
+
 #[derive(Debug)]
 struct VerifiedClient {
-    host_key: PinnedHostKey,
+    progress:Option<connection_progress::Observer>,
+    verified_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
+    host_key: HostKeyPolicy,
     forward_routes: ForwardRoutes,
 }
 
-impl russh::client::Handler for VerifiedClient {
+/// A host key observed during an unauthenticated SSH handshake. This is
+/// untrusted data until the user compares its fingerprint out of band.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScannedHostKey {
+    pub public_key_line: String,
+    pub fingerprint: String,
+    pub algorithm: String,
+}
+
+#[derive(Debug)]
+struct ScanClient {
+    observed: Option<tokio::sync::oneshot::Sender<Result<ScannedHostKey, String>>>,
+}
+
+impl russh::client::Handler for ScanClient {
     type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        if let Some(sender) = self.observed.take() {
+            let result = if key.certificate().is_some() {
+                Err("host certificates require a trusted CA entry and cannot be imported as a raw key".into())
+            } else {
+                let raw = key.public_key();
+                raw.to_openssh()
+                    .map(|line| ScannedHostKey {
+                        public_key_line: line,
+                        fingerprint: raw
+                            .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                            .to_string(),
+                        algorithm: raw.algorithm().to_string(),
+                    })
+                    .map_err(|error| error.to_string())
+            };
+            let _ = sender.send(result);
+        }
+        // Deliberately abort key exchange before any user authentication.
+        Ok(false)
+    }
+}
+
+/// Observe a server's offered key without trusting it or sending credentials.
+pub async fn scan_host_key(host: &str, port: u16) -> Result<ScannedHostKey, String> {
+    let stream = open_tcp_stream(host, port)
+        .await
+        .map_err(|error| error.to_string())?;
+    scan_host_key_stream(stream).await
+}
+
+pub async fn scan_host_key_stream<S>(stream: S) -> Result<ScannedHostKey, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    let _result = tokio::time::timeout(
+        SSH_CONNECT_TIMEOUT,
+        russh::client::connect_stream(
+            Arc::new(verified_config()),
+            stream,
+            ScanClient {
+                observed: Some(sender),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| "SSH host-key scan timed out".to_owned())?;
+    match receiver.try_recv() {
+        Ok(key) => key,
+        Err(_) => Err("SSH host-key scan failed before receiving a key".into()),
+    }
+}
+
+impl russh::client::Handler for VerifiedClient {
+    type Error = SshError;
 
     async fn check_server_key(
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        let fingerprint = server_public_key
-            .public_key()
-            .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
-            .to_string();
-        Ok(fingerprint == self.host_key.sha256_fingerprint)
+        if let Some(observer)=self.progress.take(){observer.stage(cshell_domain::ConnectionStage::HostKey);}
+        let check = match &self.host_key {
+            HostKeyPolicy::Pinned(pinned) => {
+                if server_public_key
+                    .public_key()
+                    .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                    .to_string()
+                    == pinned.sha256_fingerprint
+                {
+                    HostKeyCheck::Trusted
+                } else {
+                    HostKeyCheck::Changed
+                }
+            }
+            HostKeyPolicy::KnownHosts(verifier) => verifier.check(server_public_key),
+        };
+        if check == HostKeyCheck::Trusted {
+            *self
+                .verified_fingerprint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+                server_public_key
+                    .public_key()
+                    .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                    .to_string(),
+            );
+            Ok(true)
+        } else {
+            Err(SshError::HostKeyRejected(check))
+        }
     }
 
     fn server_channel_open_forwarded_tcpip(
@@ -270,33 +495,59 @@ impl russh::client::Handler for VerifiedClient {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum SshError {
+    #[error("{0}")]
+    CredentialUnavailable(String),
+    #[error("private key decoder worker unavailable")]
+    KeyDecodeWorker,
     #[error(transparent)]
-    Protocol(#[from] russh::Error),
+    Ppk(ppk::PpkError),
+    #[error("terminal type is invalid")]
+    InvalidTerminalType,
+    #[error("SSH provider requirements are unsupported: {0:?}")]
+    ProviderUnsupported(Vec<cshell_application::SshProviderRefusal>),
+    #[error("proxy route failed: {0}")]
+    ProxyRejected(&'static str),
+    #[error("SSH host key rejected: {0:?}")]
+    HostKeyRejected(HostKeyCheck),
+    #[error("SSH protocol operation failed")]
+    Protocol(russh::Error),
     #[error("SSH authentication was rejected")]
     AuthenticationRejected,
+    #[error("SSH requires another authentication method")]
+    AuthenticationPartial(Vec<String>),
     #[error("SSH authentication was cancelled")]
     AuthenticationCancelled,
     #[error("SSH authentication round timed out")]
     AuthenticationTimeout,
-    #[error("SSH private key could not be decoded: {0}")]
-    PrivateKey(#[source] russh::keys::Error),
-    #[error("OpenSSH certificate could not be decoded: {0}")]
-    Certificate(#[source] russh::keys::ssh_key::Error),
+    #[error("SSH keyboard-interactive input timed out")]
+    KeyboardInteractiveTimeout,
+    #[error("SSH requires an interactive desktop to enter credentials")]
+    InteractiveAuthenticationRequired,
+    #[error("SSH private key could not be decoded")]
+    PrivateKey(russh::keys::Error),
+    #[error(transparent)]
+    LegacyPem(#[from] LegacyPemError),
+    #[error(transparent)]
+    RsaKey(#[from] RsaKeyError),
+    #[error("OpenSSH certificate could not be decoded")]
+    Certificate(russh::keys::ssh_key::Error),
     #[error("a host certificate cannot be used for user authentication")]
     HostCertificateForUserAuthentication,
     #[error("OpenSSH certificate does not match the selected private key")]
     CertificateKeyMismatch,
-    #[error("SSH agent operation failed: {0}")]
-    Agent(#[source] russh::keys::Error),
-    #[error("SSH agent signing authentication failed: {0}")]
+    #[error("SSH agent operation failed")]
+    Agent(russh::keys::Error),
+    #[error("SSH agent signing authentication failed")]
     AgentAuthentication(String),
     #[error("SSH agent returned {actual} identities; maximum is {maximum}")]
     AgentIdentityLimit { actual: usize, maximum: usize },
+    #[error("selected SSH agent identity is unavailable")]
+    AgentIdentityUnavailable,
     #[error("SSH agent backend {backend:?} is not supported on this platform")]
     AgentBackendUnsupported { backend: AgentBackend },
-    #[error("no Windows SSH agent backend was available: {0}")]
+    #[error("no Windows SSH agent backend was available")]
     AgentBackendsUnavailable(String),
     #[error("server only advertised legacy RSA/SHA-1 user authentication")]
     LegacyRsaSignatureRejected,
@@ -306,22 +557,74 @@ pub enum SshError {
     KeyboardInteractiveResponseCount { expected: usize, actual: usize },
     #[error("SSH connection attempt timed out")]
     ConnectionTimeout,
+    #[error("SSH known_hosts validation failed: {0}")]
+    KnownHosts(KnownHostsError),
     #[error("SSH command channel closed without an exit status")]
     MissingExitStatus,
     #[error("SSH server rejected the {0} channel request")]
     ChannelRequestRejected(&'static str),
     #[error("SSH channel closed while waiting for the {0} request acknowledgement")]
     ChannelClosedDuringRequest(&'static str),
-    #[error("SFTP subsystem failed: {0}")]
-    Sftp(#[from] cshell_sftp::SftpError),
-    #[error("SSH forwarding I/O failed: {0}")]
-    ForwardIo(#[source] std::io::Error),
-    #[error("SSH forwarding configuration is invalid: {0}")]
+    #[error("SFTP subsystem failed")]
+    Sftp(cshell_sftp::SftpError),
+    #[error("SSH forwarding I/O failed ({:?})", .0.kind())]
+    ForwardIo(std::io::Error),
+    #[error("SSH forwarding configuration is invalid")]
     InvalidForwardConfig(String),
-    #[error("SOCKS5 handshake failed: {0}")]
+    #[error("SOCKS5 handshake failed")]
     Socks5(String),
-    #[error("SSH forwarding task failed: {0}")]
+    #[error("SSH forwarding task failed")]
     ForwardTask(String),
+}
+
+impl std::fmt::Debug for SshError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshError")
+            .field("category", &self.to_string())
+            .finish_non_exhaustive()
+    }
+}
+
+// Keep typed conversions without attaching raw backend errors as diagnostic sources.
+impl From<russh::Error> for SshError {
+    fn from(error: russh::Error) -> Self {
+        Self::Protocol(error)
+    }
+}
+impl From<KnownHostsError> for SshError {
+    fn from(error: KnownHostsError) -> Self {
+        Self::KnownHosts(error)
+    }
+}
+impl From<cshell_sftp::SftpError> for SshError {
+    fn from(error: cshell_sftp::SftpError) -> Self {
+        Self::Sftp(error)
+    }
+}
+
+impl SshError {
+    #[must_use]
+    pub fn is_network_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectionTimeout
+                | Self::Protocol(russh::Error::IO(_) | russh::Error::Disconnect)
+        )
+    }
+    #[must_use]
+    pub fn is_request_denied(&self) -> bool {
+        matches!(self, Self::Protocol(russh::Error::RequestDenied))
+    }
+    #[must_use]
+    pub fn is_transport_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectionTimeout
+                | Self::AuthenticationTimeout
+                | Self::Protocol(russh::Error::IO(_) | russh::Error::Disconnect)
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -337,7 +640,7 @@ pub enum TerminalDataStream {
     Extended(u32),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TerminalEvent {
     Data {
@@ -357,6 +660,34 @@ pub enum TerminalEvent {
     Closed,
     RequestSucceeded,
     RequestFailed,
+}
+
+impl std::fmt::Debug for TerminalEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Data { stream, data } => formatter
+                .debug_struct("Data")
+                .field("stream", stream)
+                .field("byte_count", &data.len())
+                .finish_non_exhaustive(),
+            Self::ExitSignal { core_dumped, .. } => formatter
+                .debug_struct("ExitSignal")
+                .field("core_dumped", core_dumped)
+                .finish_non_exhaustive(),
+            Self::ExitStatus(code) => formatter.debug_tuple("ExitStatus").field(code).finish(),
+            Self::FlowControl(enabled) => {
+                formatter.debug_tuple("FlowControl").field(enabled).finish()
+            }
+            Self::WindowAdjusted(bytes) => formatter
+                .debug_tuple("WindowAdjusted")
+                .field(bytes)
+                .finish(),
+            Self::Eof => formatter.write_str("Eof"),
+            Self::Closed => formatter.write_str("Closed"),
+            Self::RequestSucceeded => formatter.write_str("RequestSucceeded"),
+            Self::RequestFailed => formatter.write_str("RequestFailed"),
+        }
+    }
 }
 
 pub struct SshTerminalReader {
@@ -411,6 +742,19 @@ impl SshTerminalReader {
                 _ => continue,
             };
             return Some(event);
+        }
+    }
+}
+
+// A failed or cancelled PTY/shell request must close only its own channel;
+// authenticated transports can be shared by other terminals and SFTP.
+struct OpeningTerminalChannel(Option<russh::Channel<russh::client::Msg>>);
+impl Drop for OpeningTerminalChannel {
+    fn drop(&mut self) {
+        if let Some(channel)=self.0.take() {
+            if let Ok(runtime)=tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {let _=tokio::time::timeout(Duration::from_secs(2),channel.close()).await;});
+            }
         }
     }
 }
@@ -490,9 +834,87 @@ impl SshTerminal {
     }
 }
 
+/// The caller owns the response UI and cancellation; futures own their response
+/// state. Challenge metadata and responses must not be logged by adapters.
+pub type KeyboardInteractiveResponder = Box<
+    dyn FnMut(
+            KeyboardInteractiveChallenge,
+        )
+            -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<String>, SshError>> + Send>>
+        + Send,
+>;
+
+pub enum SshAuthentication {
+    Ordered(Box<OrderedAuthentication>),
+    Password(String),
+    KeyboardInteractive {
+        responder: KeyboardInteractiveResponder,
+    },
+    PrivateKey(SshPrivateKey),
+    Certificate {
+        private_key: SshPrivateKey,
+        certificate: Box<SshCertificate>,
+    },
+    Agent {
+        backend: AgentBackend,
+        identity_fingerprint: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for SshAuthentication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ordered(_) => formatter.write_str("OrderedAuthentication([REDACTED])"),
+            Self::Password(_) => formatter.write_str("Password([REDACTED])"),
+            Self::KeyboardInteractive { .. } => {
+                formatter.write_str("KeyboardInteractive([REDACTED])")
+            }
+            Self::PrivateKey(_) => formatter.write_str("PrivateKey([REDACTED])"),
+            Self::Certificate { .. } => formatter.write_str("Certificate([REDACTED])"),
+            Self::Agent { backend, .. } => formatter
+                .debug_struct("Agent")
+                .field("backend", backend)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 pub struct RusshClient {
+    verified_fingerprint: String,
     pub(crate) session: russh::client::Handle<VerifiedClient>,
     pub(crate) forward_routes: ForwardRoutes,
+}
+
+/// Streaming exec keeps acknowledgements and data in wire order; it never
+/// consumes early output while waiting for an acknowledgement.
+#[derive(Debug)]
+pub struct SshExecChannel {
+    reader: SshTerminalReader,
+    writer: SshTerminalWriter,
+}
+impl SshExecChannel {
+    /// A dedicated bidirectional exec channel, separate from terminal input.
+    pub async fn request_bidirectional(&self, command: &[u8]) -> Result<(), SshError> {
+        self.writer.channel.exec(true, command).await?;
+        Ok(())
+    }
+    pub async fn send_input(&self, data: Vec<u8>) -> Result<(), SshError> {
+        self.writer.send_input(data).await
+    }
+    pub async fn request(&self, command: &[u8]) -> Result<(), SshError> {
+        self.writer.channel.exec(true, command).await?;
+        self.writer.channel.eof().await?;
+        Ok(())
+    }
+    pub async fn next_event(&mut self) -> Option<TerminalEvent> {
+        self.reader.next_event().await
+    }
+    pub async fn close(&self) -> Result<(), SshError> {
+        // A signal is best effort, never evidence that the process stopped.
+        let _ = self.writer.channel.signal(russh::Sig::TERM).await;
+        self.writer.channel.close().await?;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for RusshClient {
@@ -504,14 +926,131 @@ impl std::fmt::Debug for RusshClient {
 }
 
 impl RusshClient {
+    /// Open a task-owned non-PTY channel without sending a command. Callers can
+    /// create their output sink before dispatch and retain the channel on cancel.
+    pub async fn open_exec(&self) -> Result<SshExecChannel, SshError> {
+        let channel = self.session.channel_open_session().await?;
+        let (reader, writer) = channel.split();
+        Ok(SshExecChannel {
+            reader: SshTerminalReader { channel: reader },
+            writer: SshTerminalWriter { channel: writer },
+        })
+    }
+
+    pub fn verified_host_key_fingerprint(&self) -> &str {
+        &self.verified_fingerprint
+    }
+    pub async fn connect_known_hosts_stream<S>(
+        stream: S,
+        username: String,
+        authentication: SshAuthentication,
+        known_hosts: KnownHostsVerifier,
+    ) -> Result<Self, SshError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_known_hosts_stream_configured(stream, username, authentication, known_hosts, Default::default()).await
+    }
+
+    pub async fn connect_known_hosts_stream_configured<S>(
+        stream: S,
+        username: String,
+        authentication: SshAuthentication,
+        known_hosts: KnownHostsVerifier,
+        options: cshell_domain::SshConnectionOptions,
+    ) -> Result<Self, SshError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified_stream_configured(stream, known_hosts, &options).await?;
+        connection_progress::stage(cshell_domain::ConnectionStage::Authentication);
+        match authentication {
+            SshAuthentication::Ordered(mut ordered) => {ordered_auth::authenticate(&mut session,username,&mut ordered).await?;}
+            SshAuthentication::KeyboardInteractive { mut responder } => {
+                authenticate_keyboard_interactive(&mut session, username, &mut responder).await?;
+            }
+            SshAuthentication::Password(password) => {
+                let result = tokio::time::timeout(
+                    SSH_AUTH_ROUND_TIMEOUT,
+                    session.authenticate_password(username, password),
+                )
+                .await
+                .map_err(|_| SshError::AuthenticationTimeout)??;
+                ensure_authenticated(result)?;
+            }
+            SshAuthentication::PrivateKey(key) => {
+                authenticate_with_private_key(&mut session, username, key).await?;
+            }
+            SshAuthentication::Certificate {
+                private_key,
+                certificate,
+            } => {
+                certificate.validate_private_key(&private_key)?;
+                authenticate_with_certificate(&mut session, username, private_key, *certificate)
+                    .await?;
+            }
+            SshAuthentication::Agent {
+                backend,
+                identity_fingerprint,
+            } => {
+                let mut agent =
+                    tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, connect_agent_backend(backend))
+                        .await
+                        .map_err(|_| SshError::AuthenticationTimeout)??;
+                authenticate_with_agent_selected(
+                    &mut session,
+                    username,
+                    &mut agent,
+                    identity_fingerprint.as_deref(),
+                )
+                .await?;
+            }
+        }
+        Ok(Self {
+            session,
+            forward_routes,
+            verified_fingerprint,
+        })
+    }
+
     pub async fn open_terminal(&self, rows: u32, cols: u32) -> Result<SshTerminal, SshError> {
-        let mut channel = self.session.channel_open_session().await?;
+        self.open_terminal_with_type(rows, cols, "xterm-256color")
+            .await
+    }
+
+    pub async fn open_terminal_with_type(
+        &self,
+        rows: u32,
+        cols: u32,
+        terminal_type: &str,
+    ) -> Result<SshTerminal, SshError> {
+        self.open_terminal_tracked(rows, cols, terminal_type, None).await
+    }
+    /// A channel-local environment marker enables passive cwd lookup on Linux.
+    /// Servers may ignore it; shell requests and authentication remain unchanged.
+    pub async fn open_terminal_tracked(&self, rows:u32, cols:u32, terminal_type:&str, marker:Option<&str>) -> Result<SshTerminal,SshError> {
+        if terminal_type.trim().is_empty()
+            || terminal_type.len() > 128
+            || terminal_type.chars().any(char::is_control)
+        {
+            return Err(SshError::InvalidTerminalType);
+        }
+        connection_progress::stage(cshell_domain::ConnectionStage::TerminalChannel);
+        let mut opening=OpeningTerminalChannel(Some(self.session.channel_open_session().await?));
+        let channel=opening.0.as_mut().ok_or(russh::Error::Disconnect)?;
+        if let Some(marker)=marker.filter(|s| !s.is_empty() && s.len()<=64 && s.bytes().all(|c| c.is_ascii_alphanumeric() || c==b'-')) {
+            channel.set_env(false,"LC_CSHELL_SESSION",marker).await?;
+        }
+        connection_progress::stage(cshell_domain::ConnectionStage::Pty);
         channel
-            .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+            .request_pty(true, terminal_type, cols, rows, 0, 0, &[])
             .await?;
-        await_channel_request(&mut channel, "PTY").await?;
+        await_channel_request(channel, "PTY").await?;
+        connection_progress::stage(cshell_domain::ConnectionStage::Shell);
         channel.request_shell(true).await?;
-        await_channel_request(&mut channel, "shell").await?;
+        await_channel_request(channel, "shell").await?;
+        let channel=opening.0.take().ok_or(russh::Error::Disconnect)?;
         let (reader, writer) = channel.split();
         Ok(SshTerminal {
             reader: SshTerminalReader { channel: reader },
@@ -530,12 +1069,14 @@ impl RusshClient {
         A: tokio::net::ToSocketAddrs,
     {
         certificate.validate_private_key(&private_key)?;
-        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, host_key).await?;
         authenticate_with_certificate(&mut session, username.into(), private_key, certificate)
             .await?;
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
         })
     }
 
@@ -552,12 +1093,14 @@ impl RusshClient {
         let stream = jump
             .open_direct_stream(target_host.into(), target_port)
             .await?;
-        let (mut session, forward_routes) = connect_verified_stream(stream, host_key).await?;
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified_stream(stream, host_key).await?;
         authenticate_with_certificate(&mut session, username.into(), private_key, certificate)
             .await?;
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
         })
     }
 
@@ -572,7 +1115,8 @@ impl RusshClient {
         let stream = jump
             .open_direct_stream(target_host.into(), target_port)
             .await?;
-        let (mut session, forward_routes) = connect_verified_stream(stream, host_key).await?;
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified_stream(stream, host_key).await?;
         let result = tokio::time::timeout(
             SSH_AUTH_ROUND_TIMEOUT,
             session.authenticate_password(username, password),
@@ -583,6 +1127,7 @@ impl RusshClient {
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
         })
     }
 
@@ -597,25 +1142,17 @@ impl RusshClient {
         let stream = jump
             .open_direct_stream(target_host.into(), target_port)
             .await?;
-        let (mut session, forward_routes) = connect_verified_stream(stream, host_key).await?;
-        let hash_alg = modern_rsa_hash(&session, &private_key.key).await?;
-        let result = tokio::time::timeout(
-            SSH_AUTH_ROUND_TIMEOUT,
-            session.authenticate_publickey(
-                username,
-                russh::keys::PrivateKeyWithHashAlg::new(private_key.key, hash_alg),
-            ),
-        )
-        .await
-        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
-        ensure_authenticated(result)?;
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified_stream(stream, host_key).await?;
+        authenticate_with_private_key(&mut session, username.into(), private_key).await?;
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
         })
     }
 
-    async fn open_direct_stream(
+    pub async fn open_direct_stream(
         &self,
         target_host: String,
         target_port: u16,
@@ -639,16 +1176,18 @@ impl RusshClient {
         Ok(channel.into_stream())
     }
 
-    pub async fn connect_password<A>(
-        address: A,
+    /// Connect with an already loaded OpenSSH known_hosts snapshot. Unknown or changed keys fail closed.
+    pub async fn connect_password_known_hosts(
         username: impl Into<String>,
         password: impl Into<String>,
-        host_key: PinnedHostKey,
-    ) -> Result<Self, SshError>
-    where
-        A: tokio::net::ToSocketAddrs,
-    {
-        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
+        known_hosts: KnownHostsVerifier,
+    ) -> Result<Self, SshError> {
+        let address = {
+            let (host, port) = known_hosts.target();
+            (host.to_owned(), port)
+        };
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, known_hosts).await?;
         let result = tokio::time::timeout(
             SSH_AUTH_ROUND_TIMEOUT,
             session.authenticate_password(username, password),
@@ -659,6 +1198,111 @@ impl RusshClient {
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
+        })
+    }
+
+    pub async fn connect_public_key_known_hosts(
+        username: impl Into<String>,
+        private_key: SshPrivateKey,
+        known_hosts: KnownHostsVerifier,
+    ) -> Result<Self, SshError> {
+        let address = {
+            let (host, port) = known_hosts.target();
+            (host.to_owned(), port)
+        };
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, known_hosts).await?;
+        authenticate_with_private_key(&mut session, username.into(), private_key).await?;
+        Ok(Self {
+            session,
+            forward_routes,
+            verified_fingerprint,
+        })
+    }
+
+    pub async fn connect_certificate_known_hosts(
+        username: impl Into<String>,
+        private_key: SshPrivateKey,
+        certificate: SshCertificate,
+        known_hosts: KnownHostsVerifier,
+    ) -> Result<Self, SshError> {
+        certificate.validate_private_key(&private_key)?;
+        let address = {
+            let (host, port) = known_hosts.target();
+            (host.to_owned(), port)
+        };
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, known_hosts).await?;
+        authenticate_with_certificate(&mut session, username.into(), private_key, certificate)
+            .await?;
+        Ok(Self {
+            session,
+            forward_routes,
+            verified_fingerprint,
+        })
+    }
+
+    pub async fn connect_agent_known_hosts(
+        username: impl Into<String>,
+        known_hosts: KnownHostsVerifier,
+        backend: AgentBackend,
+    ) -> Result<Self, SshError> {
+        Self::connect_agent_known_hosts_identity(username, known_hosts, backend, None).await
+    }
+
+    pub async fn connect_agent_known_hosts_identity(
+        username: impl Into<String>,
+        known_hosts: KnownHostsVerifier,
+        backend: AgentBackend,
+        identity_fingerprint: Option<&str>,
+    ) -> Result<Self, SshError> {
+        let address = {
+            let (host, port) = known_hosts.target();
+            (host.to_owned(), port)
+        };
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, known_hosts).await?;
+        let mut agent =
+            tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, connect_agent_backend(backend))
+                .await
+                .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        authenticate_with_agent_selected(
+            &mut session,
+            username.into(),
+            &mut agent,
+            identity_fingerprint,
+        )
+        .await?;
+        Ok(Self {
+            session,
+            forward_routes,
+            verified_fingerprint,
+        })
+    }
+
+    pub async fn connect_password<A>(
+        address: A,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        host_key: PinnedHostKey,
+    ) -> Result<Self, SshError>
+    where
+        A: tokio::net::ToSocketAddrs,
+    {
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, host_key).await?;
+        let result = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_password(username, password),
+        )
+        .await
+        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+        ensure_authenticated(result)?;
+        Ok(Self {
+            session,
+            forward_routes,
+            verified_fingerprint,
         })
     }
 
@@ -671,22 +1315,14 @@ impl RusshClient {
     where
         A: tokio::net::ToSocketAddrs,
     {
-        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, host_key).await?;
         let username = username.into();
-        let hash_alg = modern_rsa_hash(&session, &private_key.key).await?;
-        let result = tokio::time::timeout(
-            SSH_AUTH_ROUND_TIMEOUT,
-            session.authenticate_publickey(
-                username,
-                russh::keys::PrivateKeyWithHashAlg::new(private_key.key, hash_alg),
-            ),
-        )
-        .await
-        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
-        ensure_authenticated(result)?;
+        authenticate_with_private_key(&mut session, username, private_key).await?;
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
         })
     }
 
@@ -710,7 +1346,8 @@ impl RusshClient {
     where
         A: tokio::net::ToSocketAddrs,
     {
-        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, host_key).await?;
         let mut agent =
             tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, connect_agent_backend(backend))
                 .await
@@ -719,6 +1356,7 @@ impl RusshClient {
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
         })
     }
 
@@ -733,7 +1371,8 @@ impl RusshClient {
         let stream = jump
             .open_direct_stream(target_host.into(), target_port)
             .await?;
-        let (mut session, forward_routes) = connect_verified_stream(stream, host_key).await?;
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified_stream(stream, host_key).await?;
         let mut agent =
             tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, connect_agent_backend(backend))
                 .await
@@ -742,6 +1381,7 @@ impl RusshClient {
         Ok(Self {
             session,
             forward_routes,
+            verified_fingerprint,
         })
     }
 
@@ -756,69 +1396,14 @@ impl RusshClient {
         R: FnMut(KeyboardInteractiveChallenge) -> F + Send,
         F: Future<Output = Result<Vec<String>, SshError>> + Send,
     {
-        let (mut session, forward_routes) = connect_verified(address, host_key).await?;
-        let mut response = tokio::time::timeout(
-            SSH_AUTH_ROUND_TIMEOUT,
-            session.authenticate_keyboard_interactive_start(username, None),
-        )
-        .await
-        .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
-        let mut rounds = 0_usize;
-        loop {
-            match response {
-                russh::client::KeyboardInteractiveAuthResponse::Success => {
-                    return Ok(Self {
-                        session,
-                        forward_routes,
-                    });
-                }
-                russh::client::KeyboardInteractiveAuthResponse::Failure { .. } => {
-                    return Err(SshError::AuthenticationRejected);
-                }
-                russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
-                    name,
-                    instructions,
-                    prompts,
-                } => {
-                    rounds = rounds.saturating_add(1);
-                    let metadata_bytes = name
-                        .len()
-                        .saturating_add(instructions.len())
-                        .saturating_add(prompts.iter().map(|prompt| prompt.prompt.len()).sum());
-                    if rounds > MAX_KEYBOARD_INTERACTIVE_ROUNDS
-                        || prompts.len() > MAX_KEYBOARD_INTERACTIVE_PROMPTS
-                        || metadata_bytes > MAX_KEYBOARD_INTERACTIVE_METADATA_BYTES
-                    {
-                        return Err(SshError::KeyboardInteractiveLimitExceeded);
-                    }
-                    let challenge = KeyboardInteractiveChallenge {
-                        name,
-                        instructions,
-                        prompts: prompts
-                            .into_iter()
-                            .map(|prompt| KeyboardInteractivePrompt {
-                                text: prompt.prompt,
-                                echo: prompt.echo,
-                            })
-                            .collect(),
-                    };
-                    let expected = challenge.prompts.len();
-                    let answers = responder(challenge).await?;
-                    if answers.len() != expected {
-                        return Err(SshError::KeyboardInteractiveResponseCount {
-                            expected,
-                            actual: answers.len(),
-                        });
-                    }
-                    response = tokio::time::timeout(
-                        SSH_AUTH_ROUND_TIMEOUT,
-                        session.authenticate_keyboard_interactive_respond(answers),
-                    )
-                    .await
-                    .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
-                }
-            }
-        }
+        let (mut session, forward_routes, verified_fingerprint) =
+            connect_verified(address, host_key).await?;
+        authenticate_keyboard_interactive(&mut session, username.into(), &mut responder).await?;
+        Ok(Self {
+            session,
+            forward_routes,
+            verified_fingerprint,
+        })
     }
 
     pub async fn exec_with_pty(
@@ -867,16 +1452,31 @@ impl RusshClient {
     }
 
     pub async fn open_sftp(&self) -> Result<cshell_sftp::SftpClient, SshError> {
+        connection_progress::stage(cshell_domain::ConnectionStage::SftpChannel);
         let channel = self.session.channel_open_session().await?;
+        connection_progress::stage(cshell_domain::ConnectionStage::SftpSubsystem);
         channel.request_subsystem(true, "sftp").await?;
         Ok(cshell_sftp::SftpClient::connect(channel.into_stream()).await?)
     }
 
-    pub async fn disconnect(self) -> Result<(), SshError> {
+    pub async fn disconnect(&self) -> Result<(), SshError> {
         self.session
             .disconnect(russh::Disconnect::ByApplication, "", "")
             .await?;
         Ok(())
+    }
+    pub fn transport_closed(&self) -> bool {
+        self.session.is_closed()
+    }
+    pub async fn disconnect_confirmed(&self) -> bool {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.disconnect()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !self.transport_closed() {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .is_ok()
     }
 }
 
@@ -900,13 +1500,14 @@ async fn await_channel_request(
 
 async fn connect_verified<A>(
     address: A,
-    host_key: PinnedHostKey,
-) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes), SshError>
+    host_key: impl Into<HostKeyPolicy>,
+) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes, String), SshError>
 where
     A: tokio::net::ToSocketAddrs,
 {
     let config = verified_config();
 
+    let verified_fingerprint = Arc::new(std::sync::Mutex::new(None));
     let forward_routes = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     let session = tokio::time::timeout(
         SSH_CONNECT_TIMEOUT,
@@ -914,25 +1515,167 @@ where
             Arc::new(config),
             address,
             VerifiedClient {
-                host_key,
+                progress:connection_progress::current(),
+                verified_fingerprint: Arc::clone(&verified_fingerprint),
+                host_key: host_key.into(),
                 forward_routes: Arc::clone(&forward_routes),
             },
         ),
     )
     .await
-    .map_err(|_elapsed| SshError::ConnectionTimeout)?
-    .map_err(SshError::Protocol)?;
-    Ok((session, forward_routes))
+    .map_err(|_elapsed| SshError::ConnectionTimeout)??;
+    let fingerprint = verified_fingerprint
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .ok_or(SshError::AuthenticationRejected)?;
+    Ok((session, forward_routes, fingerprint))
+}
+
+async fn authenticate_keyboard_interactive<R, F>(
+    session: &mut russh::client::Handle<VerifiedClient>,
+    username: String,
+    responder: &mut R,
+) -> Result<(), SshError>
+where
+    R: FnMut(KeyboardInteractiveChallenge) -> F + Send,
+    F: Future<Output = Result<Vec<String>, SshError>> + Send,
+{
+    // Preserve the legacy keyboard-interactive API's password second factor.
+    // Ordered authentication calls the method-only helper below so that its
+    // configured methods and password responder remain the authority.
+    match authenticate_keyboard_interactive_step(session, username.clone(), responder).await {
+        Err(SshError::AuthenticationPartial(methods))
+            if methods.iter().any(|m| m == "password") =>
+        {
+            let mut answers = zeroize::Zeroizing::new(
+                responder(KeyboardInteractiveChallenge {
+                    name: String::new(),
+                    instructions: String::new(),
+                    prompts: vec![KeyboardInteractivePrompt {
+                        text: "Password: ".into(),
+                        echo: false,
+                    }],
+                })
+                .await?,
+            );
+            if answers.len() != 1 {
+                return Err(SshError::KeyboardInteractiveResponseCount {
+                    expected: 1,
+                    actual: answers.len(),
+                });
+            }
+            let result = tokio::time::timeout(
+                SSH_AUTH_ROUND_TIMEOUT,
+                session.authenticate_password(username, std::mem::take(&mut answers[0])),
+            )
+            .await
+            .map_err(|_| SshError::AuthenticationTimeout)??;
+            ensure_authenticated(result)
+        }
+        result => result,
+    }
+}
+
+async fn authenticate_keyboard_interactive_step<R, F>(
+    session: &mut russh::client::Handle<VerifiedClient>,
+    username: String,
+    responder: &mut R,
+) -> Result<(), SshError>
+where
+    R: FnMut(KeyboardInteractiveChallenge) -> F + Send,
+    F: Future<Output = Result<Vec<String>, SshError>> + Send,
+{
+    let mut response = tokio::time::timeout(
+        SSH_AUTH_ROUND_TIMEOUT,
+        session.authenticate_keyboard_interactive_start(username.clone(), None),
+    )
+    .await
+    .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+    let mut rounds = 0_usize;
+    loop {
+        match response {
+            russh::client::KeyboardInteractiveAuthResponse::Success => {
+                return Ok(());
+            }
+            russh::client::KeyboardInteractiveAuthResponse::Failure {
+                remaining_methods,
+                partial_success,
+            } => {
+                if partial_success {
+                    return Err(SshError::AuthenticationPartial(
+                        remaining_methods.iter().map(String::from).collect(),
+                    ));
+                }
+                return Err(SshError::AuthenticationRejected);
+            }
+            russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                rounds = rounds.saturating_add(1);
+                let metadata_bytes = name
+                    .len()
+                    .saturating_add(instructions.len())
+                    .saturating_add(prompts.iter().map(|prompt| prompt.prompt.len()).sum());
+                if rounds > MAX_KEYBOARD_INTERACTIVE_ROUNDS
+                    || prompts.len() > MAX_KEYBOARD_INTERACTIVE_PROMPTS
+                    || metadata_bytes > MAX_KEYBOARD_INTERACTIVE_METADATA_BYTES
+                {
+                    return Err(SshError::KeyboardInteractiveLimitExceeded);
+                }
+                let challenge = KeyboardInteractiveChallenge {
+                    name,
+                    instructions,
+                    prompts: prompts
+                        .into_iter()
+                        .map(|prompt| KeyboardInteractivePrompt {
+                            text: prompt.prompt,
+                            echo: prompt.echo,
+                        })
+                        .collect(),
+                };
+                let expected = challenge.prompts.len();
+                let answers = responder(challenge).await?;
+                if answers.len() != expected {
+                    return Err(SshError::KeyboardInteractiveResponseCount {
+                        expected,
+                        actual: answers.len(),
+                    });
+                }
+                response = tokio::time::timeout(
+                    SSH_AUTH_ROUND_TIMEOUT,
+                    session.authenticate_keyboard_interactive_respond(answers),
+                )
+                .await
+                .map_err(|_elapsed| SshError::AuthenticationTimeout)??;
+            }
+        }
+    }
 }
 
 async fn connect_verified_stream<R>(
     stream: R,
-    host_key: PinnedHostKey,
-) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes), SshError>
+    host_key: impl Into<HostKeyPolicy>,
+) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes, String), SshError>
 where
     R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let config = verified_config();
+    connect_verified_stream_configured(stream, host_key, &Default::default()).await
+}
+
+async fn connect_verified_stream_configured<R>(
+    stream: R,
+    host_key: impl Into<HostKeyPolicy>,
+    options: &cshell_domain::SshConnectionOptions,
+) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes, String), SshError>
+where
+    R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    connection_progress::stage(cshell_domain::ConnectionStage::Handshake);
+    let config = verified_config_with_options(options);
+    let verified_fingerprint = Arc::new(std::sync::Mutex::new(None));
     let forward_routes = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     let session = tokio::time::timeout(
         SSH_CONNECT_TIMEOUT,
@@ -940,34 +1683,75 @@ where
             Arc::new(config),
             stream,
             VerifiedClient {
-                host_key,
+                progress:connection_progress::current(),
+                verified_fingerprint: Arc::clone(&verified_fingerprint),
+                host_key: host_key.into(),
                 forward_routes: Arc::clone(&forward_routes),
             },
         ),
     )
     .await
-    .map_err(|_elapsed| SshError::ConnectionTimeout)?
-    .map_err(SshError::Protocol)?;
-    Ok((session, forward_routes))
+    .map_err(|_elapsed| SshError::ConnectionTimeout)??;
+    let fingerprint = verified_fingerprint
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .ok_or(SshError::AuthenticationRejected)?;
+    Ok((session, forward_routes, fingerprint))
 }
 
 fn verified_config() -> russh::client::Config {
+    verified_config_with_options(&Default::default())
+}
+
+fn verified_config_with_options(options: &cshell_domain::SshConnectionOptions) -> russh::client::Config {
     let mut config = RusshProvider::default().client_config();
     // Interactive sessions may legitimately remain idle for a long time.
     // Bound connection establishment externally instead of enabling russh's
     // whole-session inactivity garbage collection.
     config.inactivity_timeout = None;
-    config.keepalive_interval = Some(Duration::from_secs(15));
-    config.keepalive_max = 3;
+    config.keepalive_interval = options.keepalive_enabled
+        .then(|| Duration::from_secs(u64::from(options.keepalive_interval_secs.max(1))));
+    config.keepalive_max = options.keepalive_max.max(1) as usize;
     config
 }
 
 fn ensure_authenticated(result: russh::client::AuthResult) -> Result<(), SshError> {
-    if result.success() {
-        Ok(())
-    } else {
-        Err(SshError::AuthenticationRejected)
+    match result {
+        russh::client::AuthResult::Success=>Ok(()),
+        russh::client::AuthResult::Failure {remaining_methods,partial_success:true}=>Err(SshError::AuthenticationPartial(remaining_methods.iter().map(String::from).collect())),
+        _=>Err(SshError::AuthenticationRejected),
     }
+}
+
+async fn authenticate_with_private_key(
+    session: &mut russh::client::Handle<VerifiedClient>,
+    username: String,
+    private_key: SshPrivateKey,
+) -> Result<(), SshError> {
+    let hash = modern_rsa_hash(session, &private_key.key).await?;
+    if let Some(rsa) = private_key.rsa {
+        let hash = hash.ok_or(SshError::LegacyRsaSignatureRejected)?;
+        let public = private_key.key.public_key().clone();
+        let mut signer = rsa_signer::RsaAuthSigner::new(rsa, public.clone().into(), hash);
+        let result = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_publickey_with(username, public, Some(hash), &mut signer),
+        )
+        .await
+        .map_err(|_| SshError::AuthenticationTimeout)??;
+        return ensure_authenticated(result);
+    }
+    let result = tokio::time::timeout(
+        SSH_AUTH_ROUND_TIMEOUT,
+        session.authenticate_publickey(
+            username,
+            russh::keys::PrivateKeyWithHashAlg::new(private_key.key, hash),
+        ),
+    )
+    .await
+    .map_err(|_| SshError::AuthenticationTimeout)??;
+    ensure_authenticated(result)
 }
 
 async fn modern_rsa_hash(
@@ -1046,6 +1830,21 @@ async fn authenticate_with_certificate(
     private_key: SshPrivateKey,
     certificate: SshCertificate,
 ) -> Result<(), SshError> {
+    certificate.validate_private_key(&private_key)?;
+    if let Some(rsa) = private_key.rsa {
+        let hash = modern_rsa_hash(session, &private_key.key)
+            .await?
+            .ok_or(SshError::LegacyRsaSignatureRejected)?;
+        let cert = certificate.certificate;
+        let mut signer = rsa_signer::RsaAuthSigner::new(rsa, cert.clone().into(), hash);
+        let result = tokio::time::timeout(
+            SSH_AUTH_ROUND_TIMEOUT,
+            session.authenticate_certificate_with(username, cert, Some(hash), &mut signer),
+        )
+        .await
+        .map_err(|_| SshError::AuthenticationTimeout)??;
+        return ensure_authenticated(result);
+    }
     let result = tokio::time::timeout(
         SSH_AUTH_ROUND_TIMEOUT,
         session.authenticate_openssh_cert(username, private_key.key, certificate.certificate),
@@ -1063,6 +1862,18 @@ async fn authenticate_with_agent<S>(
 where
     S: russh::keys::agent::client::AgentStream + Send + Unpin,
 {
+    authenticate_with_agent_selected(session, username, agent, None).await
+}
+
+async fn authenticate_with_agent_selected<S>(
+    session: &mut russh::client::Handle<VerifiedClient>,
+    username: String,
+    agent: &mut russh::keys::agent::client::AgentClient<S>,
+    identity_fingerprint: Option<&str>,
+) -> Result<(), SshError>
+where
+    S: russh::keys::agent::client::AgentStream + Send + Unpin,
+{
     let identities = tokio::time::timeout(SSH_AUTH_ROUND_TIMEOUT, agent.request_identities())
         .await
         .map_err(|_elapsed| SshError::AuthenticationTimeout)?
@@ -1073,7 +1884,18 @@ where
             maximum: MAX_AGENT_IDENTITIES,
         });
     }
+    let mut selected_identity_found = false;
     for identity in identities {
+        if let Some(requested) = identity_fingerprint {
+            let fingerprint = identity
+                .public_key()
+                .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                .to_string();
+            if fingerprint != requested {
+                continue;
+            }
+            selected_identity_found = true;
+        }
         let hash_alg = if identity.public_key().algorithm().is_rsa() {
             match session.best_supported_rsa_hash().await? {
                 Some(Some(hash)) => Some(hash),
@@ -1106,20 +1928,36 @@ where
         }
         .map_err(|_elapsed| SshError::AuthenticationTimeout)?
         .map_err(|error| SshError::AgentAuthentication(error.to_string()))?;
-        if result.success() {
-            return Ok(());
+        if let Some(outcome) = agent_identity_outcome(result) {
+            return outcome;
         }
     }
-    Err(SshError::AuthenticationRejected)
+    if identity_fingerprint.is_some() && !selected_identity_found {
+        Err(SshError::AgentIdentityUnavailable)
+    } else {
+        Err(SshError::AuthenticationRejected)
+    }
 }
+
+fn agent_identity_outcome(result: russh::client::AuthResult) -> Option<Result<(), SshError>> {
+    match ensure_authenticated(result) {
+        // Only rejection permits trying another Agent key. Partial success
+        // ends this factor and hands the server's methods to ordered auth.
+        Err(SshError::AuthenticationRejected) => None,
+        outcome => Some(outcome),
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        AgentBackend, AlgorithmPolicy, KeyboardInteractiveChallenge, PinnedHostKey, RusshClient,
-        RusshProvider, SshCertificate, SshError, SshPrivateKey, SshProvider,
-        authenticate_with_agent, connect_verified,
+        AgentBackend, AlgorithmPolicy, HostKeyCheck, KeyboardInteractiveChallenge,
+        KnownHostsVerifier, PinnedHostKey, RusshClient, RusshProvider, SshCertificate, SshError,
+        SshPrivateKey, SshProvider, authenticate_with_agent_selected, connect_verified,
     };
     use futures::stream;
     use rand::rng;
@@ -1135,10 +1973,20 @@ mod tests {
     fn modern_policy_is_the_default() {
         let provider = RusshProvider::default();
         assert_eq!(provider.algorithm_policy(), AlgorithmPolicy::Modern);
-        assert_eq!(
-            provider.capabilities().x11_forwarding,
-            cfg!(feature = "x11-forwarding")
-        );
+        assert!(!provider.capabilities().x11_forwarding);
+    }
+
+    #[test]
+    fn saved_keepalive_options_configure_protocol_probes_and_can_disable_them() {
+        let mut options = cshell_domain::SshConnectionOptions::new_profile();
+        options.keepalive_interval_secs = 37;
+        options.keepalive_max = 4;
+        let config = super::verified_config_with_options(&options);
+        assert_eq!(config.keepalive_interval, Some(std::time::Duration::from_secs(37)));
+        assert_eq!(config.keepalive_max, 4);
+        assert!(config.inactivity_timeout.is_none());
+        options.keepalive_enabled = false;
+        assert!(super::verified_config_with_options(&options).keepalive_interval.is_none());
     }
 
     #[test]
@@ -1452,6 +2300,19 @@ mod tests {
         accepted_certificate_key_id: Option<String>,
     ) -> (std::net::SocketAddr, String, tokio::task::JoinHandle<()>) {
         let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        spawn_protocol_server_with_host_key(
+            accepted_public_key,
+            accepted_certificate_key_id,
+            host_key,
+        )
+        .await
+    }
+
+    async fn spawn_protocol_server_with_host_key(
+        accepted_public_key: Option<PublicKey>,
+        accepted_certificate_key_id: Option<String>,
+        host_key: PrivateKey,
+    ) -> (std::net::SocketAddr, String, tokio::task::JoinHandle<()>) {
         let fingerprint = host_key.fingerprint(HashAlg::Sha256).to_string();
         let mut server_config = russh::server::Config::default();
         server_config.keys.push(host_key);
@@ -1535,6 +2396,68 @@ mod tests {
                 .unwrap();
         });
         (address, server)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_russh_password_known_hosts_pty_and_exec_round_trip() {
+        let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let public_key = host_key.public_key().to_openssh().unwrap();
+        let (address, _fingerprint, server) =
+            spawn_protocol_server_with_host_key(None, None, host_key).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            format!("[127.0.0.1]:{} {public_key}\n", address.port()),
+        )
+        .unwrap();
+        let verifier = KnownHostsVerifier::load(&path, "127.0.0.1", address.port()).unwrap();
+        let client = RusshClient::connect_password_known_hosts("cshell", "phase0", verifier)
+            .await
+            .unwrap();
+        let result = client.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
+        assert_eq!(result.stdout, b"CSHELL_SSH_OK\r\n");
+        client.disconnect().await.unwrap();
+        await_protocol_server(server).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn strict_host_key_rejections_preserve_their_reason() {
+        for expected in [
+            HostKeyCheck::Unknown,
+            HostKeyCheck::Changed,
+            HostKeyCheck::Revoked,
+        ] {
+            let host_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+            let public = host_key.public_key().to_openssh().unwrap();
+            let (address, _, server) =
+                spawn_protocol_server_with_host_key(None, None, host_key).await;
+            let contents = match expected {
+                HostKeyCheck::Unknown => String::new(),
+                HostKeyCheck::Changed => format!(
+                    "[127.0.0.1]:{} {}\n",
+                    address.port(),
+                    PrivateKey::random(&mut rng(), Algorithm::Ed25519)
+                        .unwrap()
+                        .public_key()
+                        .to_openssh()
+                        .unwrap()
+                ),
+                HostKeyCheck::Revoked => {
+                    format!("@revoked [127.0.0.1]:{} {public}\n", address.port())
+                }
+                HostKeyCheck::Trusted => unreachable!(),
+            };
+            let verifier =
+                KnownHostsVerifier::parse(&contents, "127.0.0.1", address.port()).unwrap();
+            let result =
+                RusshClient::connect_password_known_hosts("cshell", "phase0", verifier).await;
+            assert!(
+                matches!(result, Err(SshError::HostKeyRejected(reason)) if reason == expected),
+                "{result:?}"
+            );
+            server.abort();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1669,6 +2592,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn encrypted_private_key_requires_matching_passphrase() {
+        let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let encrypted = key.encrypt(&mut rng(), "test-passphrase").unwrap();
+        let encoded = encrypted.to_openssh(LineEnding::LF).unwrap();
+        assert!(SshPrivateKey::decode_openssh(&encoded, None).is_err());
+        assert!(SshPrivateKey::decode_openssh(&encoded, Some("wrong")).is_err());
+        let decoded = SshPrivateKey::decode_openssh(&encoded, Some("test-passphrase")).unwrap();
+        assert_eq!(
+            decoded.sha256_fingerprint(),
+            key.fingerprint(HashAlg::Sha256).to_string()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn real_russh_openssh_user_certificate_auth_round_trip() {
         let user_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
@@ -1752,8 +2689,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn real_russh_agent_signature_host_key_pty_and_exec_round_trip() {
+        agent_signature_round_trip(true).await;
+        agent_signature_round_trip(false).await;
+    }
+
+    async fn agent_signature_round_trip(select_identity: bool) {
         let rejected_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
         let accepted_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let identity_fingerprint = accepted_key.fingerprint(HashAlg::Sha256).to_string();
         let (address, fingerprint, server) =
             spawn_protocol_server(Some(accepted_key.public_key().clone())).await;
 
@@ -1768,16 +2711,22 @@ mod tests {
         agent.add_identity(&rejected_key, &[]).await.unwrap();
         agent.add_identity(&accepted_key, &[]).await.unwrap();
 
-        let (mut session, forward_routes) =
+        let (mut session, forward_routes, verified_fingerprint) =
             connect_verified(address, PinnedHostKey::sha256(fingerprint))
                 .await
                 .unwrap();
-        authenticate_with_agent(&mut session, "cshell".to_owned(), &mut agent)
-            .await
-            .unwrap();
+        authenticate_with_agent_selected(
+            &mut session,
+            "cshell".to_owned(),
+            &mut agent,
+            select_identity.then_some(identity_fingerprint.as_str()),
+        )
+        .await
+        .unwrap();
         let client = RusshClient {
             session,
             forward_routes,
+            verified_fingerprint,
         };
         let result = client.exec_with_pty(b"phase0-probe", 24, 80).await.unwrap();
         assert_eq!(result.exit_status, 0);
@@ -2026,3 +2975,8 @@ mod tests {
         await_protocol_server(first_server).await;
     }
 }
+
+#[cfg(test)]
+mod keyboard_auth_tests;
+#[cfg(test)]
+mod openssh_mfa_tests;

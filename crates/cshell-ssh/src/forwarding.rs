@@ -28,14 +28,18 @@ impl Default for ForwardLimits {
 
 impl ForwardLimits {
     fn validate(self) -> Result<Self, SshError> {
-        if self.max_connections == 0 || self.pending_remote_channels == 0 {
+        if !(1..=128).contains(&self.max_connections)
+            || !(1..=128).contains(&self.pending_remote_channels)
+        {
             return Err(SshError::InvalidForwardConfig(
-                "connection and queue limits must be greater than zero".to_owned(),
+                "connection and queue limits must be between one and 128".to_owned(),
             ));
         }
-        if self.socks_handshake_timeout.is_zero() {
+        if self.socks_handshake_timeout.is_zero()
+            || self.socks_handshake_timeout > Duration::from_secs(30)
+        {
             return Err(SshError::InvalidForwardConfig(
-                "SOCKS5 handshake timeout must be greater than zero".to_owned(),
+                "SOCKS5 handshake timeout must be positive and at most 30 seconds".to_owned(),
             ));
         }
         Ok(self)
@@ -66,6 +70,22 @@ impl std::fmt::Debug for ForwardHandle {
 }
 
 impl ForwardHandle {
+    pub fn is_finished(&self) -> bool {
+        self.task.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    pub fn abort_handle(&self) -> Option<tokio::task::AbortHandle> {
+        self.task.as_ref().map(JoinHandle::abort_handle)
+    }
+    pub async fn wait(&mut self) -> Result<(), SshError> {
+        let result = self
+            .task
+            .as_mut()
+            .ok_or_else(|| SshError::ForwardTask("forwarding task is missing".into()))?
+            .await
+            .map_err(|e| SshError::ForwardTask(e.to_string()))?;
+        self.task.take();
+        result
+    }
     #[must_use]
     pub fn bound_address(&self) -> &str {
         &self.bound_address
@@ -77,14 +97,21 @@ impl ForwardHandle {
     }
 
     pub async fn shutdown(mut self) -> Result<(), SshError> {
+        self.stop().await
+    }
+    /// Cancellation retains the join handle so the caller can still abort and join.
+    pub async fn stop(&mut self) -> Result<(), SshError> {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        self.task
-            .take()
+        let result = self
+            .task
+            .as_mut()
             .ok_or_else(|| SshError::ForwardTask("forwarding task is missing".to_owned()))?
             .await
-            .map_err(|error| SshError::ForwardTask(error.to_string()))?
+            .map_err(|error| SshError::ForwardTask(error.to_string()))?;
+        self.task.take();
+        result
     }
 }
 
@@ -97,6 +124,22 @@ impl Drop for ForwardHandle {
 }
 
 impl RusshClient {
+    /// Explicit cleanup of an unconfirmed remote grant on this exact transport.
+    pub async fn cancel_remote_forward(&self, address: &str, port: u16) -> Result<(), SshError> {
+        if port == 0 {
+            return Err(SshError::InvalidForwardConfig(
+                "cannot cancel an unknown allocated port".into(),
+            ));
+        }
+        self.session
+            .cancel_tcpip_forward(address.to_owned(), u32::from(port))
+            .await?;
+        self.forward_routes
+            .write()
+            .map_err(|_| SshError::ForwardTask("remote route table unavailable".into()))?
+            .remove(&(address.to_owned(), u32::from(port)));
+        Ok(())
+    }
     pub async fn start_local_forward(
         self: &Arc<Self>,
         bind: SocketAddr,
@@ -154,6 +197,17 @@ impl RusshClient {
         let limits = limits.validate()?;
         let address = remote_bind_address.into();
         validate_target(&target.host, target.port)?;
+        if remote_bind_port != 0
+            && self
+                .forward_routes
+                .read()
+                .map_err(|_| SshError::ForwardTask("remote route table unavailable".into()))?
+                .contains_key(&(address.clone(), u32::from(remote_bind_port)))
+        {
+            return Err(SshError::InvalidForwardConfig(
+                "remote forwarding address and port are already active".into(),
+            ));
+        }
         let assigned = self
             .session
             .tcpip_forward(address.clone(), u32::from(remote_bind_port))

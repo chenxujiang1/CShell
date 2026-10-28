@@ -116,6 +116,7 @@ mod tests {
 
     fn snapshot(generation: u64, shape: CursorShape, blinking: bool) -> FrameSnapshot {
         FrameSnapshot {
+            screen_start_line: 0,
             generation,
             rows: 1,
             cols: 1,

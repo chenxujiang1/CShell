@@ -47,10 +47,30 @@ macro_rules! domain_id {
 }
 
 domain_id!(ConnectionId);
+domain_id!(FolderId);
+domain_id!(ProfileId);
 domain_id!(SessionId);
 domain_id!(TargetId);
 domain_id!(TaskId);
 domain_id!(TaskRunId);
+domain_id!(WorkspaceWindowId);
+domain_id!(TabGroupId);
+domain_id!(PaneId);
+domain_id!(TabId);
+domain_id!(SyncInputGroupId);
+domain_id!(SyncInputSnapshotId);
+domain_id!(SyncInputSendId);
+domain_id!(QuickCommandId);
+domain_id!(QuickCommandFolderId);
+domain_id!(HostId);
+domain_id!(HostGroupId);
+domain_id!(HostTargetSnapshotId);
+domain_id!(TaskGateId);
+domain_id!(SftpQueueItemId);
+domain_id!(TunnelId);
+domain_id!(HostAuthorityId);
+domain_id!(TerminalPolicyId);
+domain_id!(ScriptRunId);
 
 #[cfg(test)]
 mod tests {

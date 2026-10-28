@@ -767,15 +767,28 @@ fn line_block_store_path(journal_path: &Path) -> PathBuf {
 #[derive(Clone, Debug)]
 pub struct JournalLineIndex {
     inner: Arc<RwLock<JournalLineIndexState>>,
+    recording_enabled: bool,
 }
 
 impl JournalLineIndex {
+    /// Empty, nonpersistent index for a live terminal with recording disabled.
+    /// Does not inspect, open or create the journal path or any sidecar.
+    pub fn recording_disabled(path: impl Into<PathBuf>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(JournalLineIndexState::empty(path.into()))),
+            recording_enabled: false,
+        }
+    }
+    pub fn recording_enabled(&self) -> bool {
+        self.recording_enabled
+    }
     pub(crate) fn load(path: &Path, repair_tail: bool) -> Result<(Self, u64, u64), JournalError> {
         let mut state = JournalLineIndexState::empty(path.to_owned());
         if !path.exists() {
             return Ok((
                 Self {
                     inner: Arc::new(RwLock::new(state)),
+                    recording_enabled: true,
                 },
                 0,
                 0,
@@ -877,6 +890,7 @@ impl JournalLineIndex {
         Ok((
             Self {
                 inner: Arc::new(RwLock::new(state)),
+                recording_enabled: true,
             },
             next_sequence,
             next_file_offset,
@@ -911,6 +925,7 @@ impl JournalLineIndex {
     pub(crate) fn empty_segmented(first_path: PathBuf) -> Self {
         Self {
             inner: Arc::new(RwLock::new(JournalLineIndexState::empty(first_path))),
+            recording_enabled: true,
         }
     }
 
@@ -1174,6 +1189,7 @@ impl JournalLineIndex {
             return Ok(None);
         }
         Ok(Some(Self {
+            recording_enabled: true,
             inner: Arc::new(RwLock::new(JournalLineIndexState {
                 segment_paths: paths,
                 revision,
@@ -1267,6 +1283,113 @@ impl JournalLineIndex {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_sequence
             .map_or(0, |sequence| sequence.saturating_add(1))
+    }
+
+    /// Bounded raw bytes from the authenticated session's existing index. The
+    /// entire record CRC is streamed before a fragment is delivered; no repair.
+    pub fn read_raw_slice(
+        &self,
+        sequence: u64,
+        offset: u64,
+    ) -> Result<crate::JournalRawSlice, JournalError> {
+        if !self.recording_enabled {
+            return Err(JournalError::RecordingDisabled);
+        }
+        use std::io::{Read, Seek, SeekFrom};
+        let invalid = || {
+            JournalError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "raw journal record/range invalid",
+            ))
+        };
+        let (location, path, base, total) = {
+            let state = self
+                .inner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.integrity_error.is_some() {
+                return Err(invalid());
+            }
+            let total = state.last_sequence.map_or(0, |s| s.saturating_add(1));
+            if sequence == total && offset == 0 {
+                return Ok(crate::JournalRawSlice {
+                    sequence,
+                    offset,
+                    record_bytes: 0,
+                    total_records: total,
+                    data: Vec::new(),
+                    timing: None,
+                });
+            }
+            let index = usize::try_from(sequence).map_err(|_| invalid())?;
+            let location = *state.records.get(index).ok_or_else(invalid)?;
+            let path = state
+                .segment_paths
+                .get(&location.segment_id)
+                .ok_or_else(invalid)?
+                .clone();
+            let base = state.segment_paths.get(&0).ok_or_else(invalid)?.clone();
+            (location, path, base, total)
+        };
+        if offset > location.payload_len || location.payload_len > MAX_RECORD_SIZE as u64 {
+            return Err(invalid());
+        }
+        let mut file = crate::raw_journal::open_regular(&path)?;
+        if !file.metadata()?.is_file() {
+            return Err(invalid());
+        }
+        file.seek(SeekFrom::Start(
+            location
+                .payload_file_offset
+                .checked_sub(HEADER_SIZE as u64)
+                .ok_or_else(invalid)?,
+        ))?;
+        let mut header = [0u8; HEADER_SIZE];
+        file.read_exact(&mut header)?;
+        if header[..4] != MAGIC
+            || u16::from_le_bytes(header[4..6].try_into().map_err(|_| invalid())?) != VERSION
+            || header[6..8] != [0, 0]
+            || u64::from_le_bytes(header[8..16].try_into().map_err(|_| invalid())?) != sequence
+            || u64::from(u32::from_le_bytes(
+                header[16..20].try_into().map_err(|_| invalid())?,
+            )) != location.payload_len
+        {
+            return Err(invalid());
+        }
+        let expected = u32::from_le_bytes(header[20..24].try_into().map_err(|_| invalid())?);
+        let mut remaining = location.payload_len;
+        let mut buffer = [0u8; 64 * 1024];
+        let mut crc = Hasher::new();
+        let wanted =
+            usize::try_from((location.payload_len - offset).min(crate::MAX_RAW_SLICE as u64))
+                .map_err(|_| invalid())?;
+        let mut data = Vec::with_capacity(wanted);
+        let mut position = 0u64;
+        while remaining > 0 {
+            let n = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| invalid())?;
+            file.read_exact(&mut buffer[..n])?;
+            crc.update(&buffer[..n]);
+            let start = position.max(offset);
+            let end = (position + n as u64).min(offset + wanted as u64);
+            if start < end {
+                data.extend_from_slice(
+                    &buffer[(start - position) as usize..(end - position) as usize],
+                );
+            }
+            position += n as u64;
+            remaining -= n as u64;
+        }
+        if crc.finalize() != expected {
+            return Err(invalid());
+        }
+        Ok(crate::JournalRawSlice {
+            sequence,
+            offset,
+            record_bytes: location.payload_len,
+            total_records: total,
+            data,
+            timing: crate::raw_journal::read_timing(&base, sequence),
+        })
     }
 
     pub(crate) fn flush_line_blocks(&self, durability: Durability) -> Result<(), JournalError> {
@@ -1367,6 +1490,9 @@ impl JournalLineIndex {
         rows_before: usize,
         rows_after: usize,
     ) -> Result<JournalLogPage, JournalError> {
+        if !self.recording_enabled {
+            return Err(JournalError::RecordingDisabled);
+        }
         let plan = self.page_plan(anchor_line_id, rows_before, rows_after)?;
         plan.read()
     }
@@ -1379,6 +1505,9 @@ impl JournalLineIndex {
         rows_before: usize,
         rows_after: usize,
     ) -> Result<JournalStyledLogPage, JournalError> {
+        if !self.recording_enabled {
+            return Err(JournalError::RecordingDisabled);
+        }
         let plan = self.page_plan(anchor_line_id, rows_before, rows_after)?;
         plan.read_styled()
     }

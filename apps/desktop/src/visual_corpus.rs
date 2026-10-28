@@ -23,7 +23,7 @@ pub fn log_page() -> Arc<LogPage> {
         log_row(2, "CJK 中文终端 日本語ログ 한국어 로그 檔案傳輸"),
         log_row(3, "NFD café naïve résumé | stack ā́ ê̈ ȭ"),
         log_row(4, "Emoji 😀 🚀 🔒 ⚠️ ✅ | sequences 👨‍💻 👩‍🚀 👍🏽"),
-        LogRow {
+        LogRow { soft_wrap: false,
             line_id: 5,
             text: Arc::from("red green underline inverse"),
             style_spans: Arc::from([
@@ -61,7 +61,7 @@ pub fn log_page() -> Arc<LogPage> {
         log_row(6, "Box ┌────────┬────────┐ ╔════════╦════════╗ ░▒▓█"),
     ]
     .into();
-    Arc::new(LogPage {
+    Arc::new(LogPage { first_line_id: 1,
         source_id: LogSourceId(1),
         revision: 1,
         anchor_line_id: 1,
@@ -74,6 +74,7 @@ pub fn log_page() -> Arc<LogPage> {
 
 fn log_row(line_id: u64, text: &'static str) -> LogRow {
     LogRow {
+            soft_wrap: false,
         line_id,
         text: Arc::from(text),
         style_spans: Arc::from([]),

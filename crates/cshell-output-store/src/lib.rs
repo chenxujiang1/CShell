@@ -3,13 +3,14 @@
 mod ansi;
 mod history_search;
 mod line_index;
+mod raw_journal;
 mod segmented;
+pub use raw_journal::{JournalRawSlice, JournalTiming, JournalTimingWriter, MAX_RAW_SLICE};
 
 use crc32fast::hash;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use thiserror::Error;
 
 pub use ansi::{JournalColor, JournalStyle, JournalStyleSpan, StyledLogText};
 pub use history_search::{
@@ -35,54 +36,119 @@ pub enum Durability {
     Audit,
 }
 
-#[derive(Debug, Error)]
 pub enum JournalError {
-    #[error("journal I/O failed: {0}")]
-    Io(#[from] io::Error),
-    #[error("record is {actual} bytes; limit is {limit} bytes")]
-    RecordTooLarge { actual: usize, limit: usize },
-    #[error("log line {0} is outside the indexed journal")]
+    RecordingDisabled,
+    Io(io::Error),
+    RecordTooLarge {
+        actual: usize,
+        limit: usize,
+    },
     UnknownLine(u64),
-    #[error("segment size is {actual} bytes; minimum is {minimum} bytes")]
-    InvalidSegmentSize { actual: u64, minimum: u64 },
-    #[error("journal segment {segment_id} is corrupt: {detail}")]
-    CorruptSegment { segment_id: u32, detail: String },
-    #[error(
-        "journal sequence discontinuity in segment {segment_id}: expected {expected}, found {actual}"
-    )]
+    InvalidSegmentSize {
+        actual: u64,
+        minimum: u64,
+    },
+    CorruptSegment {
+        segment_id: u32,
+        detail: String,
+    },
     SequenceGap {
         segment_id: u32,
         expected: u64,
         actual: u64,
     },
-    #[error("journal has exhausted its segment identifier space")]
     TooManySegments,
-    #[error("journal segment {segment_id} is missing from the persisted segment topology")]
-    MissingSegment { segment_id: u32 },
-    #[error("cold line-index block {block_id} is corrupt: {detail}")]
-    CorruptLineBlock { block_id: u64, detail: String },
-    #[error("journal record {sequence} was committed, but its line-index update failed: {source}")]
+    MissingSegment {
+        segment_id: u32,
+    },
+    CorruptLineBlock {
+        block_id: u64,
+        detail: String,
+    },
     PostCommitIndex {
         sequence: u64,
-        #[source]
         source: Box<JournalError>,
     },
-    #[error(
-        "journal write failed at byte {record_start}, and its partial tail could not be removed: write={write_error}; rollback={rollback_error}"
-    )]
     JournalTailRollback {
         record_start: u64,
         write_error: String,
         rollback_error: String,
     },
-    #[error("journal writer is poisoned after an unrecoverable partial write")]
     JournalWriterPoisoned,
 }
+impl std::fmt::Display for JournalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RecordingDisabled => f.write_str("output recording is disabled for this session"),
+            Self::Io(error) => write!(f, "journal I/O failed ({:?})", error.kind()),
+            Self::RecordTooLarge { actual, limit } => {
+                write!(f, "record is {actual} bytes; limit is {limit} bytes")
+            }
+            Self::UnknownLine(line) => write!(f, "log line {line} is outside the indexed journal"),
+            Self::InvalidSegmentSize { actual, minimum } => write!(
+                f,
+                "segment size is {actual} bytes; minimum is {minimum} bytes"
+            ),
+            Self::CorruptSegment { segment_id, .. } => {
+                write!(f, "journal segment {segment_id} is corrupt")
+            }
+            Self::SequenceGap {
+                segment_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "journal sequence discontinuity in segment {segment_id}: expected {expected}, found {actual}"
+            ),
+            Self::TooManySegments => {
+                f.write_str("journal has exhausted its segment identifier space")
+            }
+            Self::MissingSegment { segment_id } => write!(
+                f,
+                "journal segment {segment_id} is missing from the persisted segment topology"
+            ),
+            Self::CorruptLineBlock { block_id, .. } => {
+                write!(f, "cold line-index block {block_id} is corrupt")
+            }
+            Self::PostCommitIndex { sequence, .. } => write!(
+                f,
+                "journal record {sequence} was committed, but its line-index update failed"
+            ),
+            Self::JournalTailRollback { record_start, .. } => write!(
+                f,
+                "journal write failed at byte {record_start}; its partial tail could not be removed"
+            ),
+            Self::JournalWriterPoisoned => {
+                f.write_str("journal writer is poisoned after an unrecoverable partial write")
+            }
+        }
+    }
+}
+impl std::error::Error for JournalError {}
+impl From<io::Error> for JournalError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl std::fmt::Debug for JournalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct JournalRecord {
     pub sequence: u64,
     pub payload: Vec<u8>,
+}
+impl std::fmt::Debug for JournalRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JournalRecord")
+            .field("sequence", &self.sequence)
+            .field("payload_bytes", &self.payload.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

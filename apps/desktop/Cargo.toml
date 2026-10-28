@@ -7,7 +7,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+cshell-theme = { path = "../../crates/cshell-theme" }
+cshell-application = { path = "../../crates/cshell-application" }
+cshell-import = { path = "../../crates/cshell-import" }
+zeroize.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+rfd = "=0.17.2"
 cshell-domain = { path = "../../crates/cshell-domain" }
+cshell-script-runtime = { path = "../../crates/cshell-script-runtime" }
 cshell-ipc = { path = "../../crates/cshell-ipc" }
 cshell-render = { path = "../../crates/cshell-render" }
 cshell-terminal = { path = "../../crates/cshell-terminal" }
@@ -19,11 +28,20 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 winit.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Time", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
+prost.workspace = true
 cshell-local = { path = "../../crates/cshell-local" }
+cshell-storage = { path = "../../crates/cshell-storage" }
 cshelld = { path = "../../daemon" }
-tempfile.workspace = true
 
 [lints]
 workspace = true

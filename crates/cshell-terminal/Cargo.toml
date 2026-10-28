@@ -17,6 +17,7 @@ cshell-domain = { path = "../cshell-domain" }
 serde.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
+unicode-segmentation.workspace = true
 
 [lints]
 workspace = true

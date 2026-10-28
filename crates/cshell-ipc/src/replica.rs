@@ -211,6 +211,7 @@ mod tests {
     fn typed_terminal_replica_applies_delta_and_recovers_from_a_gap() {
         let session_id = SessionId::new();
         let mut base = FrameSnapshot {
+            screen_start_line: 0,
             generation: 3,
             rows: 2,
             cols: 3,

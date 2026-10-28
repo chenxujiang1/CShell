@@ -43,6 +43,12 @@ pub enum KeyCode {
     ArrowLeft,
     ArrowRight,
     Function(u8),
+    Home,
+    End,
+    Insert,
+    Delete,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -62,11 +68,44 @@ pub enum ControlAction {
     ClearScreen,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    None,
+    WheelUp,
+    WheelDown,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MouseEventKind {
+    Press,
+    Release,
+    Move,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MouseEvent {
+    pub row: u16,
+    pub column: u16,
+    pub button: MouseButton,
+    pub kind: MouseEventKind,
+    pub modifiers: Modifiers,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum InputAction {
     Text(String),
     Key(KeyEvent),
-    Paste { text: String, bracketed: bool },
+    Mouse(MouseEvent),
+    Paste {
+        text: String,
+        bracketed: bool,
+    },
+    /// Bracketed paste, followed by an optional Enter outside the paste markers.
+    Compose {
+        text: String,
+        append_enter: bool,
+    },
     Control(ControlAction),
 }

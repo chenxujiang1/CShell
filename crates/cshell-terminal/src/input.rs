@@ -12,6 +12,12 @@ pub struct TerminalModes {
     pub modify_other_keys: u8,
     /// Use xterm's CSI-u formatOtherKeys representation.
     pub format_other_keys: bool,
+    /// 0 disabled, 1 click, 2 button drag, 3 all cell motion.
+    #[serde(default)]
+    pub mouse_tracking: u8,
+    /// 0 legacy X10 coordinates, 1 UTF-8 (1005), 2 SGR (1006).
+    #[serde(default)]
+    pub mouse_encoding: u8,
 }
 
 impl TerminalModes {
@@ -55,6 +61,30 @@ impl InputEncoder {
                     Ok(text.as_bytes().to_vec())
                 }
             }
+            InputAction::Compose { text, append_enter } => {
+                let mut bytes = Vec::with_capacity(text.len().saturating_add(13));
+                if modes.bracketed_paste {
+                    bytes.extend_from_slice(b"\x1b[200~");
+                }
+                bytes.extend_from_slice(text.as_bytes());
+                if modes.bracketed_paste {
+                    bytes.extend_from_slice(b"\x1b[201~");
+                }
+                if *append_enter {
+                    for pressed in [true, false] {
+                        bytes.extend_from_slice(&encode_key(
+                            &KeyEvent {
+                                code: KeyCode::Enter,
+                                modifiers: Modifiers::default(),
+                                pressed,
+                                repeated: false,
+                            },
+                            modes,
+                        )?);
+                    }
+                }
+                Ok(bytes)
+            }
             InputAction::Control(control) => Ok(vec![match control {
                 ControlAction::Interrupt => 0x03,
                 ControlAction::EndOfFile => 0x04,
@@ -62,8 +92,207 @@ impl InputEncoder {
                 ControlAction::ClearScreen => 0x0c,
             }]),
             InputAction::Key(event) => encode_key(event, modes),
+            InputAction::Mouse(event) => Ok(encode_mouse(*event, modes)),
             _ => Err(InputEncodeError::UnsupportedInputAction),
         }
+    }
+}
+
+fn encode_mouse(event: cshell_domain::MouseEvent, modes: TerminalModes) -> Vec<u8> {
+    use cshell_domain::{MouseButton as B, MouseEventKind as K};
+    if modes.mouse_tracking == 0 || event.modifiers.super_key {
+        return Vec::new();
+    }
+    if event.kind == K::Move
+        && (modes.mouse_tracking < 2 || (event.button == B::None && modes.mouse_tracking < 3))
+    {
+        return Vec::new();
+    }
+    let wheel = matches!(event.button, B::WheelUp | B::WheelDown);
+    if wheel && event.kind != K::Press {
+        return Vec::new();
+    }
+    if event.button == B::None && event.kind != K::Move {
+        return Vec::new();
+    }
+    let mut code: u16 = match event.button {
+        B::Left => 0,
+        B::Middle => 1,
+        B::Right => 2,
+        B::None => 3,
+        B::WheelUp => 64,
+        B::WheelDown => 65,
+    };
+    if event.kind == K::Release && modes.mouse_encoding != 2 {
+        code = 3;
+    }
+    if event.kind == K::Move {
+        code += 32;
+    }
+    if event.modifiers.shift {
+        code += 4;
+    }
+    if event.modifiers.alt {
+        code += 8;
+    }
+    if event.modifiers.ctrl {
+        code += 16;
+    }
+    let x = u32::from(event.column) + 1;
+    let y = u32::from(event.row) + 1;
+    if modes.mouse_encoding == 2 {
+        return format!(
+            "\x1b[<{code};{x};{y}{}",
+            if event.kind == K::Release { 'm' } else { 'M' }
+        )
+        .into_bytes();
+    }
+    let limit = if modes.mouse_encoding == 1 { 2015 } else { 223 };
+    if x > limit || y > limit {
+        return Vec::new();
+    }
+    let mut bytes = b"\x1b[M".to_vec();
+    for value in [u32::from(code) + 32, x + 32, y + 32] {
+        if modes.mouse_encoding == 1 {
+            let mut buffer = [0; 4];
+            if let Some(c) = char::from_u32(value) {
+                bytes.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
+            }
+        } else {
+            bytes.push(value as u8);
+        }
+    }
+    bytes
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use cshell_domain::{MouseButton as B, MouseEvent as E, MouseEventKind as K};
+    fn event(button: B, kind: K) -> InputAction {
+        InputAction::Mouse(E {
+            row: 4,
+            column: 7,
+            button,
+            kind,
+            modifiers: Modifiers::default(),
+        })
+    }
+    #[test]
+    fn mouse_protocols_encode_exact_buttons_motion_release_and_wheel() {
+        let sgr = TerminalModes {
+            mouse_tracking: 3,
+            mouse_encoding: 2,
+            ..Default::default()
+        };
+        for (button, kind, expected) in [
+            (B::Left, K::Press, "\x1b[<0;8;5M"),
+            (B::Right, K::Release, "\x1b[<2;8;5m"),
+            (B::Left, K::Move, "\x1b[<32;8;5M"),
+            (B::None, K::Move, "\x1b[<35;8;5M"),
+            (B::WheelUp, K::Press, "\x1b[<64;8;5M"),
+            (B::WheelDown, K::Press, "\x1b[<65;8;5M"),
+        ] {
+            assert_eq!(
+                InputEncoder::encode(&event(button, kind), sgr).unwrap(),
+                expected.as_bytes()
+            );
+        }
+        let legacy = TerminalModes {
+            mouse_tracking: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            InputEncoder::encode(&event(B::Left, K::Press), legacy).unwrap(),
+            vec![0x1b, b'[', b'M', 32, 40, 37]
+        );
+        assert_eq!(
+            InputEncoder::encode(&event(B::Right, K::Release), legacy).unwrap(),
+            vec![0x1b, b'[', b'M', 35, 40, 37]
+        );
+    }
+    #[test]
+    fn disabled_and_unrequested_motion_never_emit_escape_bytes() {
+        let drag = TerminalModes {
+            mouse_tracking: 2,
+            mouse_encoding: 2,
+            ..Default::default()
+        };
+        assert!(
+            InputEncoder::encode(&event(B::Left, K::Press), TerminalModes::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            InputEncoder::encode(&event(B::None, K::Move), drag)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            InputEncoder::encode(
+                &event(B::Left, K::Move),
+                TerminalModes {
+                    mouse_tracking: 1,
+                    ..drag
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let far = InputAction::Mouse(E {
+            row: 4,
+            column: 400,
+            button: B::Left,
+            kind: K::Press,
+            modifiers: Modifiers::default(),
+        });
+        assert!(
+            InputEncoder::encode(
+                &far,
+                TerminalModes {
+                    mouse_encoding: 0,
+                    ..drag
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            InputEncoder::encode(
+                &far,
+                TerminalModes {
+                    mouse_encoding: 1,
+                    ..drag
+                }
+            )
+            .unwrap(),
+            b"\x1b[M \xc6\xb1%".to_vec()
+        );
+    }
+    #[test]
+    fn parser_tracks_mouse_mode_changes_and_stable_native_history_ids() {
+        use crate::{AlacrittyTerminalEngine, TerminalEngine};
+        let mut terminal = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(2, 8));
+        terminal.feed(b"\x1b[?1002;1006hzero\r\none\r\ntwo");
+        let snapshot = terminal.snapshot();
+        assert_eq!(
+            (
+                snapshot.terminal_modes.mouse_tracking,
+                snapshot.terminal_modes.mouse_encoding
+            ),
+            (2, 2)
+        );
+        assert_eq!(snapshot.screen_start_line, 2);
+        terminal.feed(b"\x1b[?1003h");
+        assert_eq!(terminal.modes().mouse_tracking, 3);
+        terminal.feed(b"\x1b[?1003;1006l");
+        assert_eq!(
+            (
+                terminal.modes().mouse_tracking,
+                terminal.modes().mouse_encoding
+            ),
+            (0, 0)
+        );
     }
 }
 
@@ -94,6 +323,12 @@ fn encode_key(event: &KeyEvent, modes: TerminalModes) -> Result<Vec<u8>, InputEn
         KeyCode::ArrowDown => Ok(encode_cursor(b'B', event.modifiers, modes)),
         KeyCode::ArrowRight => Ok(encode_cursor(b'C', event.modifiers, modes)),
         KeyCode::ArrowLeft => Ok(encode_cursor(b'D', event.modifiers, modes)),
+        KeyCode::Home => Ok(encode_cursor(b'H', event.modifiers, modes)),
+        KeyCode::End => Ok(encode_cursor(b'F', event.modifiers, modes)),
+        KeyCode::Insert => Ok(encode_tilde_key(2, event.modifiers)),
+        KeyCode::Delete => Ok(encode_tilde_key(3, event.modifiers)),
+        KeyCode::PageUp => Ok(encode_tilde_key(5, event.modifiers)),
+        KeyCode::PageDown => Ok(encode_tilde_key(6, event.modifiers)),
         KeyCode::Function(number) => encode_function(*number, event.modifiers),
         _ => Err(InputEncodeError::UnsupportedKeyCode),
     }
@@ -185,6 +420,12 @@ fn encode_kitty_key(
         KeyCode::ArrowDown => Ok(Some(encode_kitty_functional('B', event, modes))),
         KeyCode::ArrowRight => Ok(Some(encode_kitty_functional('C', event, modes))),
         KeyCode::ArrowLeft => Ok(Some(encode_kitty_functional('D', event, modes))),
+        KeyCode::Home => Ok(Some(encode_kitty_functional('H', event, modes))),
+        KeyCode::End => Ok(Some(encode_kitty_functional('F', event, modes))),
+        KeyCode::Insert => Ok(Some(encode_kitty_tilde(2, event, modes))),
+        KeyCode::Delete => Ok(Some(encode_kitty_tilde(3, event, modes))),
+        KeyCode::PageUp => Ok(Some(encode_kitty_tilde(5, event, modes))),
+        KeyCode::PageDown => Ok(Some(encode_kitty_tilde(6, event, modes))),
         KeyCode::Function(number) => Ok(Some(encode_kitty_function(*number, event, modes)?)),
         _ => Ok(None),
     }
@@ -212,6 +453,19 @@ fn encode_kitty_functional(
         final_character
     )
     .into_bytes()
+}
+
+fn encode_kitty_tilde(number: u8, event: &KeyEvent, modes: TerminalModes) -> Vec<u8> {
+    format!("\x1b[{number};{}~", kitty_modifier_parameter(event, modes)).into_bytes()
+}
+
+fn encode_tilde_key(number: u8, modifiers: Modifiers) -> Vec<u8> {
+    let modifier = xterm_modifier(modifiers);
+    if modifier == 1 {
+        format!("\x1b[{number}~").into_bytes()
+    } else {
+        format!("\x1b[{number};{modifier}~").into_bytes()
+    }
 }
 
 fn encode_kitty_function(

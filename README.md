@@ -1,13 +1,91 @@
 # CShell
 
-CShell 是一个首发覆盖 Windows x64、Linux x64、macOS arm64/x64 的开源 SSH/SFTP 与本地终端客户端，桌面稳定版之后再考虑其他 CPU 架构和 Android。
+CShell 是使用 Rust 开发的原生 SSH、SFTP 与本地终端客户端，提供多标签终端、分屏、连接管理和文件传输。
 
-项目目标不是复刻 Xshell 的界面，而是在 SSH/SFTP 范围内实现同等级的终端体验、会话管理与安全能力；支持本地 shell，并将 Xshell 式多标签同步输入、可靠批量执行、结果汇总和文件分发作为彼此独立的一等能力。
+**当前为早期试用版。** 欢迎通过实际使用反馈问题；建议先使用测试服务器及非关键文件，重要配置和文件请保留备份。
 
-性能关键路径采用 Rust 后台核心、原生终端模型、`winit + wgpu` GPU 视口和磁盘分段日志；`egui` 只承载非性能关键的工作台控件，不使用 WebView 或普通文本控件承担终端解析与大日志渲染。
+## 获取试用版
 
-当前仓库处于 Phase 0 架构原型实现阶段。产品与架构方案见 [docs/DESIGN.md](docs/DESIGN.md)，后续开发、任务拆分和验收统一按照 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 执行。
+目前准备 Windows 和 macOS 试用程序。请按设备架构选择下载，具体可用版本以成功构建的产物为准。
 
-Phase 0 当前正在开发；完成项、验证结果、已知阻断与下一步见 [docs/phase0/STATUS.md](docs/phase0/STATUS.md)。
+| 设备 | 包名称 | 内容 |
+| --- | --- | --- |
+| Windows x64 | `CShell-trial-windows-x64.zip` | 桌面程序、后台服务、脚本工作进程 |
+| Mac Apple Silicon（M 系列） | `CShell-trial-macos-arm64.zip` | `CShell.app`、首次使用说明 |
+| Mac Intel | `CShell-trial-macos-x64.zip` | `CShell.app`、首次使用说明 |
 
-当前明确不做：RDP、串口、TELNET、RLOGIN、自动更新、代码签名和发布流程。X11 转发预留协议边界，在桌面 v1.0 稳定后规划。
+Mac 双架构试用包由 [macOS personal trial 构建](https://github.com/chenxujiang1/CShell/actions/workflows/macos-trial.yml)生成。进入成功的构建记录，在 **Artifacts** 中下载对应架构；构建日志显示失败时，该版本不作为可用试用包。Windows 试用包由完整 [CI 构建](https://github.com/chenxujiang1/CShell/actions/workflows/ci.yml)生成。
+
+下载 Actions 产物需要登录 GitHub；解压外层 artifact 后可以找到试用 ZIP 和对应的 `.sha256` 校验文件。试用产物保留 14 天，过期后需要重新构建。本仓库当前没有承诺稳定版本或自动更新渠道。
+
+## 首次运行
+
+### Windows
+
+1. 解压试用 ZIP 到可写目录，保留全部文件。
+2. 确认 `CShell.exe`、`cshelld.exe` 和 `cshell-script-worker.exe` 位于同一目录。
+3. 双击 `CShell.exe`。程序会按需启动后台服务，用户无需安装 Rust。
+
+### macOS
+
+1. 在“苹果菜单 → 关于本机”确认芯片类型，下载对应的 arm64 或 x64 包。
+2. 解压 ZIP，将 `CShell.app` 拖入“应用程序”，从 Finder 打开。
+3. 当前 Mac 试用包只有本地 ad-hoc 签名，**没有 Developer ID 签名或 Apple 公证**。如果系统阻止打开，请核对来源和 SHA-256，再按照 [Apple 官方说明](https://support.apple.com/102445)处理；请勿关闭 Gatekeeper 或全局降低安全设置。
+
+Mac 构建运行器使用 macOS 15。更早系统的兼容性、不同硬件组合及浏览器下载后的首次启动体验仍需实际试用验证。
+
+### 建立第一个 SSH 连接
+
+1. 点击“新建 SSH”，填写主机、端口、用户名及认证方式，并保存配置。
+2. 根据认证方式设置密码、私钥及口令，或配置可用的 SSH Agent。
+3. 首次信任服务器前，通过可信渠道核对服务器 SHA-256 主机密钥指纹。
+4. 连接后检查终端输入与显示，并使用非关键文件尝试 SFTP 上传、下载及取消。
+
+## 功能范围
+
+- SSH 连接与配置管理；密码、私钥、Agent 和交互式认证。
+- 主机密钥验证、凭据存储和主密码保护。
+- 本地终端、多标签、分屏、搜索和会话日志。
+- SFTP 文件浏览、上传下载与传输队列。
+- 同步输入、批量任务和脚本工具；请先在测试目标上确认执行范围与结果。
+
+各功能仍在持续验证。当前不提供 RDP、串口、TELNET 或自动更新；X11 转发也不属于本次试用范围。Linux 在源码和 CI 中继续维护，当前这轮试用交付聚焦 Windows 与 Mac。
+
+## 已知限制与更新
+
+- 原生窗口的模拟设备丢失恢复测试不等同于真实显卡驱动故障验证。
+- Mac 的 Finder 启动、系统授权提示、钥匙串及替换新包后的行为仍需要实机反馈。
+- 格式和严格 Clippy 检查仍有待处理的问题；个人 Mac 试用构建不代表完整公开发布门禁已通过。
+- 当前通过手动替换程序更新。先正常退出桌面与相关后台，再替换整个程序目录或 app；保留已有用户数据，勿在运行中覆盖程序文件。
+
+## 反馈问题
+
+请在 [GitHub Issues](https://github.com/chenxujiang1/CShell/issues)提交问题，尽量包含：
+
+- 包内源码版本或构建记录链接，以及包的 SHA-256。
+- 操作系统版本、CPU 架构、显示缩放比例；显示问题附 GPU 信息。
+- 可重复的操作步骤、预期结果、实际结果及复现频率。
+- 必要的截图或脱敏日志；连接问题可附服务端类型及认证方式。
+
+**不要提交密码、私钥、私钥口令、验证码或未经脱敏的会话内容。**
+
+## 从源码构建
+
+需要仓库指定的 Rust 工具链及所在平台的 C/C++ 编译工具。macOS 需要 Xcode Command Line Tools；Windows 使用 MSVC 工具链及 Windows SDK。
+
+```sh
+cargo build --release --locked -p cshell-gui -p cshelld -p cshell-script-worker
+```
+
+运行 `target/release` 下的桌面程序，保持三个可执行文件在同一目录。开发检查使用：
+
+```sh
+cargo check --workspace --all-targets --all-features --locked
+cargo test --workspace --tests --all-features --locked
+```
+
+构建和测试复用默认 `target`。Mac 打包脚本为 `.github/scripts/package-trial-macos.sh`，详细交付说明见 [TRIAL.md](TRIAL.md)。
+
+## 许可
+
+项目代码采用 **MIT OR Apache-2.0**，详见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)。第三方组件沿用各自许可；内嵌 Noto Sans SC 字体的许可位于 [OFL.txt](apps/desktop/assets/fonts/OFL.txt)，vendored 组件保留其原有许可文件。

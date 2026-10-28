@@ -16,6 +16,7 @@ pub struct LogSourceId(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogRow {
+    pub soft_wrap: bool,
     pub line_id: u64,
     pub text: Arc<str>,
     pub style_spans: Arc<[LogStyleSpan]>,
@@ -30,8 +31,17 @@ pub struct LogStyleSpan {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LogDecorations {
+    pub selection_ranges: Arc<[LogSearchMatch]>,
     pub revision: u64,
+    pub highlights: Arc<[LogHighlight]>,
     pub active_search_match: Option<LogSearchMatch>,
+    pub selection: Option<(Arc<cshell_terminal::FrameSnapshot>, crate::TerminalSelection)>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogHighlight {
+    pub line_id: u64,
+    pub range: Range<u32>,
+    pub style: cshell_domain::HighlightStyle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +52,7 @@ pub struct LogSearchMatch {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogPage {
+    pub first_line_id: u64,
     pub source_id: LogSourceId,
     pub revision: u64,
     pub anchor_line_id: u64,
@@ -105,6 +116,7 @@ pub struct LogPageRequest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LogScrollbarState {
+    pub first_line_id: u64,
     pub top_line_id: u64,
     pub total_line_count: u64,
     pub viewport_rows: u16,
@@ -199,7 +211,7 @@ impl LogSurfaceModel {
         if page.total_line_count == 0 {
             return false;
         }
-        let line_id = line_id.clamp(1, page.total_line_count);
+        let line_id = line_id.clamp(page.first_line_id.max(1), page.total_line_count);
         if self
             .layout
             .as_ref()
@@ -244,7 +256,8 @@ impl LogSurfaceModel {
             return false;
         }
         let Some(layout) = self.layout.as_ref() else {
-            return false;
+            self.pending_scroll_rows=self.pending_scroll_rows.saturating_add(delta);
+            return true;
         };
         if layout.visual_rows.is_empty() {
             return false;
@@ -346,7 +359,14 @@ impl LogSurfaceModel {
                 .binary_search_by_key(&line_id, |row| row.line_id)
                 .is_err()
         {
-            return Err(LogSurfaceError::AnchorMissing(line_id));
+            // A memory history page can explicitly report that the oldest
+            // retained row has advanced. Clamp a reclaimed anchor instead of
+            // rejecting every subsequent page or showing a different row ID.
+            if let Some(first) = page.rows.first().filter(|first| !page.has_before && line_id < first.line_id) {
+                self.anchor(first.line_id, 0);
+            } else {
+                return Err(LogSurfaceError::AnchorMissing(line_id));
+            }
         }
 
         if matches!(self.mode, ScrollMode::Anchored { .. }) {
@@ -531,6 +551,7 @@ impl LogSurfaceModel {
             }
         };
         Some(LogScrollbarState {
+            first_line_id: self.page.as_ref()?.first_line_id.max(1),
             top_line_id,
             total_line_count: self.page.as_ref()?.total_line_count,
             viewport_rows,
@@ -760,6 +781,10 @@ pub enum LogSurfaceError {
 }
 
 fn validate_page(page: &LogPage) -> Result<(), LogSurfaceError> {
+    if page.total_line_count > 0 && page.first_line_id > page.total_line_count {
+        return Err(LogSurfaceError::InvalidTotal {total:page.total_line_count,page_rows:page.rows.len()});
+    }
+
     if page.rows.len() > MAX_LOG_PAGE_ROWS {
         return Err(LogSurfaceError::TooManyRows(page.rows.len()));
     }
@@ -850,6 +875,7 @@ mod tests {
     fn page(revision: u64, ids: std::ops::Range<u64>, total: u64) -> Arc<LogPage> {
         let rows: Arc<[LogRow]> = ids
             .map(|line_id| LogRow {
+            soft_wrap: false,
                 line_id,
                 text: Arc::from(format!("line {line_id}")),
                 style_spans: Arc::from([]),
@@ -857,7 +883,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .into();
-        Arc::new(LogPage {
+        Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(7),
             revision,
             anchor_line_id: rows.first().map_or(0, |row| row.line_id),
@@ -1013,6 +1039,7 @@ mod tests {
             .rows
             .iter()
             .map(|row| LogRow {
+            soft_wrap: false,
                 line_id: row.line_id,
                 text: Arc::from(format!("line {:03} {}", row.line_id, "x".repeat(48))),
                 style_spans: Arc::from([]),
@@ -1090,6 +1117,7 @@ mod tests {
     fn wrapped_scroll_anchor_uses_the_visual_segments_cell_offset() {
         let mut long_page = (*page(1, 1..2, 1)).clone();
         long_page.rows = Arc::from([LogRow {
+            soft_wrap: false,
             line_id: 1,
             text: Arc::from("abcdefghijkl"),
             style_spans: Arc::from([]),
@@ -1211,19 +1239,21 @@ mod tests {
     fn reflow_maps_logical_rows_to_bounded_visual_cell_ranges() {
         let rows: Arc<[LogRow]> = Arc::from([
             LogRow {
+            soft_wrap: false,
                 line_id: 1,
                 text: Arc::from("abcd中ef"),
                 style_spans: Arc::from([]),
                 truncated: false,
             },
             LogRow {
+            soft_wrap: false,
                 line_id: 2,
                 text: Arc::from("\tX"),
                 style_spans: Arc::from([]),
                 truncated: false,
             },
         ]);
-        let page = Arc::new(LogPage {
+        let page = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(7),
             revision: 1,
             anchor_line_id: 1,
@@ -1325,11 +1355,12 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn reflow_metadata_has_an_explicit_memory_bound() {
         let text: Arc<str> = "x".repeat(super::MAX_LOG_REFLOW_ROWS + 1).into();
-        let page = Arc::new(LogPage {
+        let page = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(7),
             revision: 1,
             anchor_line_id: 1,
             rows: Arc::from([LogRow {
+            soft_wrap: false,
                 line_id: 1,
                 text,
                 style_spans: Arc::from([]),
@@ -1371,12 +1402,14 @@ mod tests {
         let mut unordered = (*page(1, 1..4, 4)).clone();
         unordered.rows = Arc::from([
             LogRow {
+            soft_wrap: false,
                 line_id: 2,
                 text: Arc::from("two"),
                 style_spans: Arc::from([]),
                 truncated: false,
             },
             LogRow {
+            soft_wrap: false,
                 line_id: 1,
                 text: Arc::from("one"),
                 style_spans: Arc::from([]),
@@ -1390,6 +1423,7 @@ mod tests {
 
         let oversized_rows: Arc<[LogRow]> = (0..=MAX_LOG_PAGE_ROWS)
             .map(|line_id| LogRow {
+            soft_wrap: false,
                 line_id: line_id as u64,
                 text: Arc::from("x"),
                 style_spans: Arc::from([]),
@@ -1397,7 +1431,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .into();
-        let oversized = Arc::new(LogPage {
+        let oversized = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(1),
             revision: 1,
             anchor_line_id: 0,
@@ -1413,11 +1447,12 @@ mod tests {
 
         let huge_text: Arc<str> = "x".repeat(MAX_LOG_PAGE_TEXT_BYTES + 1).into();
         let text_bytes = huge_text.len();
-        let oversized_text = Arc::new(LogPage {
+        let oversized_text = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(1),
             revision: 1,
             anchor_line_id: 1,
             rows: Arc::from([LogRow {
+            soft_wrap: false,
                 line_id: 1,
                 text: huge_text,
                 style_spans: Arc::from([]),
@@ -1435,12 +1470,13 @@ mod tests {
 
     #[test]
     fn style_spans_must_be_ordered_and_end_on_grapheme_boundaries() {
-        let styled = Arc::new(LogPage {
+        let styled = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(1),
             revision: 1,
             anchor_line_id: 1,
             rows: Arc::from([LogRow {
                 line_id: 1,
+                soft_wrap: false,
                 text: Arc::from("A中e\u{301}"),
                 style_spans: Arc::from([
                     LogStyleSpan {
@@ -1470,12 +1506,13 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{error}"))
         );
 
-        let invalid = Arc::new(LogPage {
+        let invalid = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(1),
             revision: 2,
             anchor_line_id: 1,
             rows: Arc::from([LogRow {
                 line_id: 1,
+                soft_wrap: false,
                 text: Arc::from("A中e\u{301}"),
                 style_spans: Arc::from([LogStyleSpan {
                     byte_range: 2..4,
@@ -1495,11 +1532,12 @@ mod tests {
 
     #[test]
     fn embedded_line_breaks_are_rejected_from_log_rows() {
-        let invalid = Arc::new(LogPage {
+        let invalid = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(1),
             revision: 1,
             anchor_line_id: 1,
             rows: Arc::from([LogRow {
+            soft_wrap: false,
                 line_id: 1,
                 text: Arc::from("first\nsecond"),
                 style_spans: Arc::from([]),
@@ -1513,5 +1551,45 @@ mod tests {
             LogSurfaceModel::default().submit_page(invalid),
             Err(LogSurfaceError::InvalidRowText { line_id: 1 })
         );
+    }
+}
+
+#[cfg(test)]
+mod first_history_scroll_test {
+    use super::*;
+    #[test]
+    fn first_wheel_is_applied_after_page_and_reflow_are_ready() {
+        let mut surface=LogSurfaceModel::default();
+        assert!(surface.scroll_visual_rows(-3,4));
+        let rows=(1..=20).map(|i|LogRow{
+            soft_wrap: false,line_id:i,text:Arc::from(format!("line {i}")),style_spans:Arc::from([]),truncated:false}).collect::<Vec<_>>();
+        surface.submit_page(Arc::new(LogPage{ first_line_id: 1,source_id:LogSourceId(1),revision:1,anchor_line_id:20,rows:rows.into(),total_line_count:20,has_before:false,has_after:false})).unwrap();
+        let request=surface.request_reflow(80).unwrap();
+        let layout=request.execute().unwrap();
+        surface.submit_reflow(layout);
+        assert!(matches!(surface.mode(),ScrollMode::Anchored{..}));
+    }
+}
+
+#[cfg(test)]
+mod reclaimed_anchor_tests {
+    use super::*;
+    fn page(revision:u64,start:u64)->Arc<LogPage> {
+        Arc::new(LogPage { first_line_id: start,source_id:LogSourceId(1),revision,anchor_line_id:start,
+            rows:(start..start+20).map(|line_id|LogRow{
+            soft_wrap: false,line_id,text:"row".into(),style_spans:Arc::from([]),truncated:false}).collect::<Vec<_>>().into(),
+            total_line_count:start+19,has_before:false,has_after:false})
+    }
+    #[test]
+    fn evicted_anchor_is_clamped_to_oldest_retained_line_without_renaming_rows() {
+        let mut surface=LogSurfaceModel::default();
+        surface.submit_page(page(1,1)).unwrap();
+        let layout=surface.request_reflow(80).unwrap().execute().unwrap();surface.submit_reflow(layout);
+        surface.anchor(2,0);
+        surface.submit_page(page(2,10)).unwrap();
+        let layout=surface.request_reflow(80).unwrap().execute().unwrap();surface.submit_reflow(layout);
+        assert!(matches!(surface.mode(),ScrollMode::Anchored{line_id:10,..}));
+        assert!(surface.prepare_frame(4).is_some());
+        assert_eq!(surface.scrollbar_state(4).unwrap().first_line_id,10);
     }
 }

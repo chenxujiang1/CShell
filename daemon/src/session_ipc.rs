@@ -1,19 +1,23 @@
 use crate::{
-    LocalSessionError, LocalSessionInfo, LocalSessionRegistry, SessionRegistryError,
-    SubscriptionFrame, TerminalFrameSubscription,
+    LocalSessionError, LocalSessionInfo, LocalSessionRegistry, ProfileIpcService,
+    SessionRegistryError, SshSession, SshSessionError, SshSessionRegistry, SubscriptionFrame,
+    TerminalFrameSubscription,
 };
+use cshell_domain::{ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{
     Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
     LogPageCodecError, LogRow, LogStyleSpan, SessionCloseResponse, SessionCreateResponse,
-    SessionListResponse, SessionSummary, TerminalControlCodecError, TerminalControlResponse,
-    TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest, TerminalStyle, envelope,
-    read_envelope, write_envelope,
+    SessionFailureCode, SessionListResponse, SessionSummary, TerminalControlCodecError,
+    TerminalControlResponse, TerminalControlStatus, TerminalInputRequest, TerminalResizeRequest,
+    TerminalStyle, envelope, read_envelope, write_envelope,
 };
 use cshell_output_store::{JournalColor, JournalStyle};
+use cshell_ssh::{HostKeyCheck, SshError};
 use cshell_terminal::{Color, Style};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use zeroize::Zeroizing;
 
 #[derive(Debug, Error)]
 pub enum SessionIpcError {
@@ -39,6 +43,19 @@ pub enum SessionIpcError {
 #[derive(Clone, Debug)]
 pub struct SessionIpcService {
     registry: Arc<LocalSessionRegistry>,
+    pub(crate) profiles: Option<Arc<ProfileIpcService>>,
+    tasks: Option<crate::TaskIpcService>,
+    pub(crate) ssh_sessions: Arc<SshSessionRegistry>,
+    pub(crate) clipboard_policy_gate: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) clipboard_policy_restricted: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) sftp: crate::sftp_ipc::SftpIpcService,
+    tunnels: crate::tunnel_ipc::TunnelIpcService,
+    host_ca: crate::host_ca_ipc::HostCaIpcService,
+    terminal_tools: crate::terminal_tools_ipc::TerminalToolsService,
+    scripts: crate::script_control::ScriptControlService,
+    profile_batch: crate::profile_batch_ipc::ProfileBatchService,
+    terminal_policies: crate::terminal_policy_ipc::TerminalPolicyService,
+    pub(crate) known_hosts_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -47,10 +64,96 @@ struct DispatchResult {
     subscription: Option<TerminalFrameSubscription>,
 }
 
+pub(crate) struct SshLaunchFailure {
+    pub(crate) retryable_network: bool,
+    pub(crate) code: SessionFailureCode,
+    pub(crate) detail: String,
+}
+impl SshLaunchFailure {
+    pub(crate) fn new(code: SessionFailureCode, detail: impl Into<String>) -> Self {
+        Self {
+            retryable_network: false,
+            code,
+            detail: detail.into(),
+        }
+    }
+}
+impl From<String> for SshLaunchFailure {
+    fn from(detail: String) -> Self {
+        Self::new(SessionFailureCode::InvalidConfiguration, detail)
+    }
+}
+impl From<&str> for SshLaunchFailure {
+    fn from(detail: &str) -> Self {
+        Self::from(detail.to_owned())
+    }
+}
+
 impl SessionIpcService {
+    /// Called after the IPC accept loop has stopped, before the runtime is destroyed.
+    pub(crate) async fn shutdown_sessions(&self) {
+        let mut local = tokio::task::JoinSet::new();
+        for session in self.registry.list().unwrap_or_default() {
+            if local.len() >= 8 {
+                let _ = local.join_next().await;
+            }
+            let registry = self.registry.clone();
+            local.spawn_blocking(move || {
+                let _ = registry.close(session.session_id);
+            });
+        }
+        while local.join_next().await.is_some() {}
+        let mut ssh = tokio::task::JoinSet::new();
+        for session in self.ssh_sessions.list() {
+            if ssh.len() >= 8 {
+                let _ = ssh.join_next().await;
+            }
+            let registry = self.ssh_sessions.clone();
+            ssh.spawn(async move {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), session.close()).await;
+                let _ = registry.remove(session.id());
+            });
+        }
+        while ssh.join_next().await.is_some() {}
+        self.shutdown_sftp().await;
+    }
+
     #[must_use]
-    pub const fn new(registry: Arc<LocalSessionRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<LocalSessionRegistry>) -> Self {
+        Self {
+            registry,
+            profiles: None,
+            tasks: None,
+            clipboard_policy_gate: Arc::new(tokio::sync::Mutex::new(())),
+            clipboard_policy_restricted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ssh_sessions: Arc::new(SshSessionRegistry::default()),
+            sftp: crate::sftp_ipc::SftpIpcService::default(),
+            tunnels: crate::tunnel_ipc::TunnelIpcService::default(),
+            host_ca: crate::host_ca_ipc::HostCaIpcService::default(),
+            terminal_tools: crate::terminal_tools_ipc::TerminalToolsService::new(),
+            scripts: crate::script_control::ScriptControlService::default(),
+            profile_batch: crate::profile_batch_ipc::ProfileBatchService::default(),
+            terminal_policies: crate::terminal_policy_ipc::TerminalPolicyService::default(),
+            known_hosts_path: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_known_hosts_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.known_hosts_path = Some(path.into());
+        self
+    }
+
+    pub fn with_profiles(mut self, profiles: Arc<ProfileIpcService>) -> Self {
+        profiles.vault.keyboard_auth.bind_profiles(Arc::downgrade(&profiles));
+        self.profiles = Some(profiles);
+        self
+    }
+
+    pub fn with_tasks(mut self, tasks: crate::TaskIpcService) -> Self {
+        self.tasks = Some(tasks);
+        self
     }
 
     pub fn handle_request(&self, request: Envelope) -> Result<Envelope, SessionIpcError> {
@@ -63,7 +166,7 @@ impl SessionIpcService {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let request = read_envelope(stream).await?;
-        let response = self.handle_request(request)?;
+        let response = self.dispatch_observed(request,u64::MAX,stream).await?.response;
         write_envelope(stream, &response).await?;
         Ok(())
     }
@@ -73,14 +176,37 @@ impl SessionIpcService {
     /// The reader owns its half of the stream so reads are never cancelled midway
     /// through a length-prefixed frame. The writer polls a latest-only subscription;
     /// slow clients therefore coalesce generations instead of accumulating snapshots.
-    pub async fn serve_connection<S>(&self, mut stream: S) -> Result<(), SessionIpcError>
+    pub async fn serve_connection<S>(&self, stream: S) -> Result<(), SessionIpcError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let initial_request = read_envelope(&mut stream).await?;
-        let initial = self.dispatch(initial_request)?;
+        self.serve_connection_with_features(stream, u64::MAX).await
+    }
+
+    pub async fn serve_connection_with_features<S>(
+        &self,
+        mut stream: S,
+        negotiated_features: u64,
+    ) -> Result<(), SessionIpcError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let initial_request = match read_envelope(&mut stream).await {
+            Ok(request) => request,
+            Err(error) if is_client_disconnect(&error) => return Ok(()),
+            Err(error) => return Err(SessionIpcError::Transport(error)),
+        };
+        let initial = self
+            .dispatch_observed(initial_request, negotiated_features,&mut stream)
+            .await?;
         let mut subscription = initial.subscription;
-        write_envelope(&mut stream, &initial.response).await?;
+        if let Err(error) = write_envelope(&mut stream, &initial.response).await {
+            return if is_client_disconnect(&error) {
+                Ok(())
+            } else {
+                Err(SessionIpcError::Transport(error))
+            };
+        }
 
         let (mut reader, mut writer) = tokio::io::split(stream);
         let (request_sender, mut requests) = tokio::sync::mpsc::channel(8);
@@ -107,7 +233,7 @@ impl SessionIpcService {
                         Err(error) if is_client_disconnect(&error) => break Ok(()),
                         Err(error) => break Err(SessionIpcError::Transport(error)),
                     };
-                    let dispatched = match self.dispatch(request) {
+                    let dispatched = match self.dispatch_observed(request, negotiated_features,&mut writer).await {
                         Ok(dispatched) => dispatched,
                         Err(error) => break Err(error),
                     };
@@ -145,6 +271,1204 @@ impl SessionIpcService {
         result
     }
 
+    async fn dispatch_any(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
+        self.dispatch_with_features(request, u64::MAX).await
+    }
+
+    async fn dispatch_with_features(
+        &self,
+        mut request: Envelope,
+        negotiated_features: u64,
+    ) -> Result<DispatchResult, SessionIpcError> {
+        if let Some(envelope::Payload::TerminalInputRequest(input)) = request.payload.as_ref()
+            && input.compose.is_some()
+            && negotiated_features & cshell_ipc::features::COMPOSE_INPUT == 0
+        {
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::TerminalControlResponse(
+                        TerminalControlResponse::new(
+                            valid_control_session_id(&input.session_id),
+                            TerminalControlStatus::InvalidRequest,
+                        ),
+                    )),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::LogPageRequest(page)) = request.payload.as_ref() && page.terminal_history {
+            if negotiated_features & cshell_ipc::features::TERMINAL_SCROLLBACK == 0 {return Err(SessionIpcError::UnsupportedRequest);}
+            page.validate()?;
+            let id=LocalSessionRegistry::parse_session_id(&page.session_id)?;
+            let snapshots=if let Ok(session)=self.ssh_sessions.get(id){session.history_snapshots()}else{self.registry.attach(id)?.snapshots()};
+            let page=page.clone();
+            static HISTORY_READERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+            let permit = HISTORY_READERS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+                .clone().acquire_owned().await.map_err(|_| SessionIpcError::InitialFrameUnavailable)?;
+            let response=tokio::task::spawn_blocking(move|| { let _permit = permit; snapshots.history_page(&page) }).await
+                .map_err(|_|SessionIpcError::InitialFrameUnavailable)?.ok_or(SessionIpcError::InitialFrameUnavailable)?;
+            response.validate()?;
+            return Ok(DispatchResult{response:Envelope{request_id:request.request_id,payload:Some(envelope::Payload::LogPage(response)),..Default::default()},subscription:None});
+        }
+        if let Some(envelope::Payload::ZmodemRequest(command)) = request.payload.as_ref() {
+            let mut response = cshell_ipc::ZmodemResponse::default();
+            if negotiated_features & cshell_ipc::features::ZMODEM == 0 {
+                response.error = "后台未协商 ZMODEM 功能，请更新 GUI 和后台".into();
+            } else if command.operation > 3 || command.paths.len() > 128 || command.paths.iter().any(|p| p.len()>4096 || p.contains('\0')) {
+                response.error = "无效 ZMODEM 请求".into();
+            } else if command.operation != 0 {
+                match <[u8;16]>::try_from(command.session_id.as_slice()).ok()
+                    .and_then(|id| self.ssh_sessions.get(cshell_domain::SessionId::from_bytes(id)).ok()) {
+                    Some(session) => {
+                        let command = command.clone();
+                        match tokio::task::spawn_blocking(move || session.zmodem_control(&command)).await {
+                            Ok(Ok(())) => {},
+                            Ok(Err(error)) => response.error=error,
+                            Err(_) => response.error="ZMODEM 文件操作失败".into(),
+                        }
+                    }
+                    None => response.error="SSH 会话已关闭".into(),
+                }
+            }
+            if negotiated_features & cshell_ipc::features::ZMODEM != 0 {
+                response.transfers=self.ssh_sessions.list().iter().filter_map(|s|s.zmodem_status()).collect();
+            }
+            return Ok(DispatchResult { response:Envelope {
+                request_id:request.request_id, payload:Some(envelope::Payload::ZmodemResponse(response)), ..Default::default()
+            }, subscription:None });
+        }
+        if matches!(request.payload, Some(envelope::Payload::VaultRequest(_))) {
+            let Some(envelope::Payload::VaultRequest(vault_request)) = request.payload.take()
+            else {
+                unreachable!()
+            };
+            let package_operation = matches!(
+                cshell_ipc::VaultOperation::try_from(vault_request.operation),
+                Ok(cshell_ipc::VaultOperation::ExportPackage
+                    | cshell_ipc::VaultOperation::PreviewPackage
+                    | cshell_ipc::VaultOperation::CommitPackage)
+            );
+            let response = if negotiated_features & cshell_ipc::features::VAULT_CONTROL == 0
+                || (package_operation
+                    && negotiated_features & cshell_ipc::features::CREDENTIAL_PACKAGE == 0)
+            {
+                cshell_ipc::VaultResponse {
+                    status: cshell_ipc::VaultControlStatus::Unsupported as i32,
+                    ..Default::default()
+                }
+            } else if let Some(profiles) = &self.profiles {
+                profiles.handle_vault(vault_request).await
+            } else {
+                cshell_ipc::VaultResponse {
+                    status: cshell_ipc::VaultControlStatus::Unavailable as i32,
+                    ..Default::default()
+                }
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::VaultResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::ClipboardPolicyRequest(policy)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::HOST_CLIPBOARD_POLICY == 0
+                || (policy.operation == cshell_ipc::ClipboardPolicyOperation::Save as i32
+                    && negotiated_features & cshell_ipc::features::AUTOMATIC_CLIPBOARD == 0
+                    && cshell_application::decode_clipboard_policy(&policy.document_json)
+                        .is_ok_and(|document| !document.automatic.is_empty()))
+            {
+                cshell_ipc::ClipboardPolicyResponse::with_status(
+                    cshell_ipc::ClipboardPolicyStatus::Unsupported,
+                )
+            } else {
+                self.handle_clipboard_policy(policy).await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::ClipboardPolicyResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::ClipboardRequest(clipboard)) = request.payload.as_ref() {
+            let mut response = if negotiated_features & cshell_ipc::features::CLIPBOARD_CONTROL == 0
+                || (clipboard.operation == cshell_ipc::ClipboardOperation::ApproveAutomatic as i32
+                    && negotiated_features & cshell_ipc::features::AUTOMATIC_CLIPBOARD == 0)
+            {
+                cshell_ipc::ClipboardResponse::with_status(cshell_ipc::ClipboardStatus::Unsupported)
+            } else if let (Ok(session_id), Ok(operation)) = (
+                cshell_ipc::decode_id(&clipboard.session_id).map(SessionId::from_bytes),
+                cshell_ipc::ClipboardOperation::try_from(clipboard.operation),
+            ) {
+                self.handle_clipboard_decision(session_id, operation, &clipboard.token)
+                    .await
+            } else {
+                cshell_ipc::ClipboardResponse::with_status(
+                    cshell_ipc::ClipboardStatus::InvalidRequest,
+                )
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::ClipboardResponse({
+                        if negotiated_features & cshell_ipc::features::AUTOMATIC_CLIPBOARD == 0 {
+                            response.automatic = false;
+                        }
+                        response
+                    })),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::TerminalPolicyRequest(policy)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::TERMINAL_POLICIES == 0 {
+                cshell_ipc::TerminalPolicyResponse {
+                    status: cshell_ipc::TerminalPolicyStatus::Unsupported as i32,
+                    detail: "Terminal policies were not negotiated".into(),
+                    ..Default::default()
+                }
+            } else {
+                self.terminal_policies
+                    .handle(policy, self.profiles.as_ref())
+                    .await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::TerminalPolicyResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::ProfileBatchRequest(batch)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::PROFILE_BATCH == 0 {
+                cshell_ipc::ProfileBatchResponse {
+                    status: cshell_ipc::ProfileBatchStatus::Unsupported as i32,
+                    detail: "Profile batch was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else {
+                self.profile_batch
+                    .handle(batch, self.profiles.as_ref())
+                    .await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::ProfileBatchResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::ScriptControlRequest(scripts)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::SCRIPT_CONTROL == 0 {
+                cshell_ipc::ScriptControlResponse {
+                    status: cshell_ipc::ScriptControlStatus::Unsupported as i32,
+                    document_json: Vec::new(),
+                }
+            } else {
+                self.scripts
+                    .handle(
+                        scripts,
+                        &self.registry,
+                        &self.ssh_sessions,
+                        self.profiles.as_ref(),
+                        self.tasks.as_ref(),
+                        &self.terminal_tools,
+                    )
+                    .await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::ScriptControlResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::TerminalToolsRequest(tools)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::TERMINAL_TOOLS == 0 {
+                cshell_ipc::TerminalToolsResponse {
+                    status: cshell_ipc::TerminalToolsStatus::Unsupported as i32,
+                    detail: "Terminal tools were not negotiated".into(),
+                    ..Default::default()
+                }
+            } else {
+                self.terminal_tools
+                    .handle(
+                        tools,
+                        &self.registry,
+                        &self.ssh_sessions,
+                        self.profiles.as_ref(),
+                    )
+                    .await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::TerminalToolsResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SshProviderRequest(provider_request)) =
+            request.payload.as_ref()
+        {
+            let response = if negotiated_features & cshell_ipc::features::SSH_PROVIDER_CONTROL == 0
+            {
+                cshell_ipc::SshProviderResponse {
+                    status: cshell_ipc::SshProviderStatus::Unsupported as i32,
+                    detail: "SSH provider discovery was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else {
+                crate::ssh_provider_ipc::handle(provider_request)
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::SshProviderResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::CaRequest(ca_request)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::HOST_CA_CONTROL == 0 {
+                cshell_ipc::CaResponse {
+                    status: cshell_ipc::CaStatus::Unsupported as i32,
+                    detail: "Host CA management was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else {
+                self.host_ca
+                    .handle(ca_request.clone(), self.profiles.as_ref())
+                    .await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::CaResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::TunnelRequest(tunnel_request)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::TUNNEL_CONTROL == 0 {
+                cshell_ipc::TunnelResponse {
+                    status: cshell_ipc::TunnelStatus::Unsupported as i32,
+                    detail: "Tunnel management was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else {
+                self.tunnels
+                    .handle(
+                        tunnel_request.clone(),
+                        &self.ssh_sessions,
+                        self.profiles.as_ref(),
+                        negotiated_features & cshell_ipc::features::DEDICATED_TUNNELS != 0,
+                    )
+                    .await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::TunnelResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SftpRequest(sftp_request)) = request.payload.as_ref() {
+            let browser_queue = cshell_ipc::SftpOperation::try_from(sftp_request.operation)
+                .is_ok_and(|operation| {
+                    operation as i32 >= cshell_ipc::SftpOperation::LocalList as i32
+                });
+            let response = if negotiated_features & cshell_ipc::features::SFTP_CONTROL == 0
+                || sftp_request.operation >= cshell_ipc::SftpOperation::PauseTransfer as i32
+                    && negotiated_features & cshell_ipc::features::SFTP_LIVE_CONTROL == 0
+                || ((cshell_ipc::SftpOperation::RemoteBrowse as i32
+                    ..=cshell_ipc::SftpOperation::BrowseClose as i32)
+                    .contains(&sftp_request.operation)
+                    || sftp_request.operation == cshell_ipc::SftpOperation::BrowseManaged as i32)
+                    && negotiated_features & cshell_ipc::features::SFTP_DIRECTORY_CURSOR == 0
+                || sftp_request.operation >= cshell_ipc::SftpOperation::QueueAddVerified as i32
+                    && negotiated_features & cshell_ipc::features::SFTP_VERIFIED_QUEUE == 0
+                || sftp_request.operation >= cshell_ipc::SftpOperation::QueueEdit as i32
+                    && negotiated_features & cshell_ipc::features::SFTP_WORKSPACE == 0
+                || browser_queue
+                    && negotiated_features & cshell_ipc::features::SFTP_BROWSER_QUEUE == 0
+            {
+                cshell_ipc::SftpResponse::with_status(
+                    cshell_ipc::SftpStatus::Unsupported,
+                    "SFTP control was not negotiated",
+                )
+            } else if (cshell_ipc::SftpOperation::ConnectProfile as i32..=cshell_ipc::SftpOperation::ConnectionStatus as i32).contains(&sftp_request.operation) {
+                self.sftp_lifecycle(sftp_request, negotiated_features).await
+            } else {
+                self.sftp.handle(sftp_request.clone(), &self.ssh_sessions).await
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::SftpResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::WorkspaceRequest(workspace)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::WORKSPACE_CONTROL == 0 {
+                cshell_ipc::WorkspaceResponse {
+                    status: cshell_ipc::WorkspaceStatus::Unsupported as i32,
+                    detail: "Workspace control was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else if let Some(profiles) = &self.profiles {
+                profiles.handle_workspace(workspace.clone()).await
+            } else {
+                cshell_ipc::WorkspaceResponse {
+                    status: cshell_ipc::WorkspaceStatus::Unavailable as i32,
+                    detail: "Workspace storage unavailable".into(),
+                    ..Default::default()
+                }
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::WorkspaceResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::TaskRequest(task)) = request.payload.as_ref() {
+            let needs_plan = matches!(
+                cshell_ipc::TaskOperation::try_from(task.operation),
+                Ok(cshell_ipc::TaskOperation::Review | cshell_ipc::TaskOperation::Retry)
+            );
+            let needs_results = matches!(
+                cshell_ipc::TaskOperation::try_from(task.operation),
+                Ok(cshell_ipc::TaskOperation::Results | cshell_ipc::TaskOperation::Compare)
+            );
+            let needs_uploads = matches!(
+                cshell_ipc::TaskOperation::try_from(task.operation),
+                Ok(cshell_ipc::TaskOperation::UploadCreate
+                    | cshell_ipc::TaskOperation::UploadGet
+                    | cshell_ipc::TaskOperation::UploadStart
+                    | cshell_ipc::TaskOperation::UploadCancel
+                    | cshell_ipc::TaskOperation::UploadResume
+                    | cshell_ipc::TaskOperation::UploadProbe
+                    | cshell_ipc::TaskOperation::UploadCleanup
+                    | cshell_ipc::TaskOperation::UploadAdopt
+                    | cshell_ipc::TaskOperation::UploadList)
+            );
+            let needs_downloads = cshell_ipc::TaskOperation::try_from(task.operation)
+                .is_ok_and(|operation| operation.is_download());
+            let needs_mixed = cshell_ipc::TaskOperation::try_from(task.operation)
+                .is_ok_and(|operation| operation.is_mixed());
+            let needs_repair = cshell_ipc::TaskOperation::try_from(task.operation)
+                .is_ok_and(|operation| operation.is_mixed_repair());
+            let needs_workspace = cshell_ipc::TaskOperation::try_from(task.operation)
+                .is_ok_and(|operation| operation.is_output_workspace());
+            let response = if negotiated_features & cshell_ipc::features::TASK_CONTROL == 0
+                || needs_workspace
+                    && negotiated_features & cshell_ipc::features::OUTPUT_WORKSPACE == 0
+                || needs_plan && negotiated_features & cshell_ipc::features::TASK_PLAN_CONTROL == 0
+                || needs_results && negotiated_features & cshell_ipc::features::TASK_RESULTS == 0
+                || needs_uploads && negotiated_features & cshell_ipc::features::TASK_UPLOADS == 0
+                || needs_downloads
+                    && negotiated_features & cshell_ipc::features::TASK_DOWNLOADS == 0
+                || needs_mixed
+                    && negotiated_features & cshell_ipc::features::MIXED_TASK_CONTROL == 0
+                || needs_repair
+                    && negotiated_features & cshell_ipc::features::MIXED_FILE_REPAIR == 0
+            {
+                crate::task_ipc::response(cshell_ipc::TaskStatus::Unsupported)
+            } else if let Some(tasks) = &self.tasks {
+                if negotiated_features & cshell_ipc::features::FILE_PUBLICATION == 0 {
+                    match tasks.requires_publication_feature(task).await {
+                        Ok(true) => crate::task_ipc::response(cshell_ipc::TaskStatus::Unsupported),
+                        Ok(false) => tasks.handle(task).await,
+                        Err(status) => crate::task_ipc::response(status),
+                    }
+                } else {
+                    tasks.handle(task).await
+                }
+            } else {
+                crate::task_ipc::response(cshell_ipc::TaskStatus::Unavailable)
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::TaskResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::HostGroupRequest(hosts)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::HOST_GROUP_CONTROL == 0 {
+                crate::host_group_ipc::response(
+                    cshell_ipc::HostGroupStatus::Unsupported,
+                    "host control was not negotiated",
+                )
+            } else if let Some(profiles) = &self.profiles {
+                profiles.handle_host_groups(hosts.clone()).await
+            } else {
+                crate::host_group_ipc::response(
+                    cshell_ipc::HostGroupStatus::Unavailable,
+                    "host storage unavailable",
+                )
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::HostGroupResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::QuickCommandRequest(command)) = request.payload.as_ref() {
+            let response = if negotiated_features & cshell_ipc::features::QUICK_COMMAND_CONTROL == 0
+            {
+                crate::quick_command_ipc::response(cshell_ipc::QuickCommandStatus::Unsupported)
+            } else if let Some(profiles) = &self.profiles {
+                profiles
+                    .handle_quick_commands(command.clone(), negotiated_features)
+                    .await
+            } else {
+                crate::quick_command_ipc::response(cshell_ipc::QuickCommandStatus::Unavailable)
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::QuickCommandResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if matches!(
+            request.payload.as_ref(),
+            Some(envelope::Payload::ProfileRequest(_))
+        ) {
+            let Some(envelope::Payload::ProfileRequest(profile_request)) = request.payload.take()
+            else {
+                unreachable!("profile payload was matched above")
+            };
+            let response = if negotiated_features & cshell_ipc::features::PROFILE_CONTROL == 0 {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    host_key_preview: None,
+                    local_shells: Vec::new(),
+                    export_json: Vec::new(),
+                    detail: "Profile control was not negotiated".to_owned(),
+                }
+            } else if negotiated_features & cshell_ipc::features::OPENSSH_EXPORT == 0
+                && profile_request.operation == cshell_ipc::ProfileOperation::ExportOpenSsh as i32
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "OpenSSH export was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else if negotiated_features & cshell_ipc::features::THEME_TRANSFER == 0
+                && matches!(
+                    cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                    Ok(cshell_ipc::ProfileOperation::PreviewThemes
+                        | cshell_ipc::ProfileOperation::CommitThemes
+                        | cshell_ipc::ProfileOperation::ExportThemes)
+                )
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Theme transfer was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else if negotiated_features & cshell_ipc::features::PROFILE_TRANSFER == 0
+                && (profile_request.operation == cshell_ipc::ProfileOperation::ExportCatalog as i32
+                    || (matches!(
+                        cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                        Ok(cshell_ipc::ProfileOperation::PreviewImport
+                            | cshell_ipc::ProfileOperation::CommitImport)
+                    ) && cshell_application::ProfileImportDocument::parse(
+                        &profile_request.import_json,
+                    )
+                    .is_ok_and(|document| {
+                        document.version == cshell_application::PROFILE_TRANSFER_VERSION
+                    })))
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Profile transfer was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else if matches!(
+                cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                Ok(cshell_ipc::ProfileOperation::PreviewImport
+                    | cshell_ipc::ProfileOperation::CommitImport)
+            ) && cshell_application::ProfileImportDocument::parse(
+                &profile_request.import_json,
+            )
+            .is_ok_and(|document| {
+                document.version >= cshell_application::PROFILE_CONNECTION_IMPORT_VERSION
+            }) && negotiated_features
+                & (cshell_ipc::features::PROFILE_CONNECTION_IMPORT
+                    | cshell_ipc::features::SSH_PROFILE_TARGET
+                    | cshell_ipc::features::SSH_PROFILE_AUTH
+                    | cshell_ipc::features::SSH_PROFILE_ROUTE
+                    | cshell_ipc::features::LOCAL_PROFILE)
+                != (cshell_ipc::features::PROFILE_CONNECTION_IMPORT
+                    | cshell_ipc::features::SSH_PROFILE_TARGET
+                    | cshell_ipc::features::SSH_PROFILE_AUTH
+                    | cshell_ipc::features::SSH_PROFILE_ROUTE
+                    | cshell_ipc::features::LOCAL_PROFILE)
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Profile connection import was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_TARGET == 0
+                && profile_request.changes.iter().any(|change| {
+                    matches!(
+                        change.change.as_ref(),
+                        Some(cshell_ipc::profile_change::Change::UpsertSshConnection(_))
+                            | Some(cshell_ipc::profile_change::Change::RemoveSshConnection(_))
+                    )
+                })
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    host_key_preview: None,
+                    local_shells: Vec::new(),
+                    export_json: Vec::new(),
+                    detail: "SSH Profile target control was not negotiated".to_owned(),
+                }
+            } else if self
+                .profiles
+                .as_ref()
+                .is_some_and(|profiles| profiles.vault.enabled())
+                && negotiated_features & cshell_ipc::features::VAULT_CONTROL == 0
+                && matches!(
+                    cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                    Ok(cshell_ipc::ProfileOperation::SetPassword
+                        | cshell_ipc::ProfileOperation::DeletePassword
+                        | cshell_ipc::ProfileOperation::SetKeyPassphrase
+                        | cshell_ipc::ProfileOperation::DeleteKeyPassphrase)
+                )
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Vault credential mode was not negotiated".into(),
+                    ..Default::default()
+                }
+            } else if matches!(
+                cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                Ok(cshell_ipc::ProfileOperation::SetPassword
+                    | cshell_ipc::ProfileOperation::DeletePassword)
+            ) && negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    host_key_preview: None,
+                    local_shells: Vec::new(),
+                    export_json: Vec::new(),
+                    detail: "SSH Profile credentials were not negotiated".into(),
+                }
+            } else if negotiated_features & cshell_ipc::features::SSH_HOST_KEY_IMPORT == 0
+                && matches!(
+                    cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                    Ok(cshell_ipc::ProfileOperation::PreviewHostKey
+                        | cshell_ipc::ProfileOperation::ConfirmHostKey)
+                )
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "SSH host-key import was not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
+                }
+            } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_ROUTE == 0
+                && profile_request.changes.iter().any(|change| {
+                    matches!(
+                        &change.change,
+                        Some(
+                            cshell_ipc::profile_change::Change::UpsertSshConnection(_)
+                                | cshell_ipc::profile_change::Change::RemoveSshConnection(_)
+                        )
+                    )
+                })
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "SSH Profile routes were not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
+                }
+            } else if negotiated_features & cshell_ipc::features::SSH_PROFILE_AUTH == 0
+                && (matches!(
+                    cshell_ipc::ProfileOperation::try_from(profile_request.operation),
+                    Ok(cshell_ipc::ProfileOperation::SetKeyPassphrase
+                        | cshell_ipc::ProfileOperation::DeleteKeyPassphrase)
+                ) || profile_request.changes.iter().any(|change| {
+                    matches!(
+                        change.change.as_ref(),
+                        Some(cshell_ipc::profile_change::Change::UpsertSshConnection(value))
+                            if value.auth_method != 0
+                                || value.private_key_path.is_some()
+                                || value.certificate_path.is_some()
+                                || value.agent_backend != 0
+                                || value.agent_identity.is_some()
+                    )
+                }))
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    host_key_preview: None,
+                    local_shells: Vec::new(),
+                    export_json: Vec::new(),
+                    detail: "SSH Profile authentication was not negotiated".into(),
+                }
+            } else if negotiated_features & cshell_ipc::features::LOCAL_PROFILE == 0
+                && (profile_request.operation
+                    == cshell_ipc::ProfileOperation::DiscoverLocalShells as i32
+                    || profile_request.changes.iter().any(|change| {
+                        matches!(
+                            &change.change,
+                            Some(
+                                cshell_ipc::profile_change::Change::UpsertLocalConnection(_)
+                                    | cshell_ipc::profile_change::Change::RemoveLocalConnection(_)
+                            )
+                        )
+                    }))
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Local Profile control was not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
+                }
+            } else if negotiated_features & cshell_ipc::features::LOCAL_LAUNCH_OPTIONS == 0
+                && profile_request.changes.iter().any(|change| {
+                    matches!(
+                        &change.change,
+                        Some(cshell_ipc::profile_change::Change::UpsertLocalConnection(_))
+                    )
+                })
+            {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unsupported as i32,
+                    detail: "Local launch options were not negotiated".into(),
+                    ..cshell_ipc::ProfileResponse::default()
+                }
+            } else if let Some(profiles) = &self.profiles {
+                profiles.handle(profile_request).await
+            } else {
+                cshell_ipc::ProfileResponse {
+                    status: cshell_ipc::ProfileStatus::Unavailable as i32,
+                    revision: 0,
+                    catalog: None,
+                    preview: None,
+                    host_key_preview: None,
+                    local_shells: Vec::new(),
+                    export_json: Vec::new(),
+                    detail: "Profile storage is unavailable".to_owned(),
+                }
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::ProfileResponse(response)),
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::TerminalContextLaunchRequest(create)) = &request.payload {
+            let outcome = async {
+                if negotiated_features & cshell_ipc::features::TERMINAL_CONTEXT_LAUNCH == 0 {
+                    return Err(SshLaunchFailure::new(
+                        SessionFailureCode::Unsupported,
+                        "Terminal context launch was not negotiated",
+                    ));
+                }
+                if !create.confirmed {
+                    return Err(SshLaunchFailure::from(
+                        "Explicit launch confirmation required",
+                    ));
+                }
+                let report =
+                    cshell_application::decode_terminal_resolution_report(&create.report_json)
+                        .map_err(SshLaunchFailure::from)?;
+                self.spawn_profile(
+                    report.context.profile_id.as_uuid().as_bytes(),
+                    create.rows,
+                    create.cols,
+                    None,
+                    negotiated_features,
+                    Some(&report),
+                )
+                .await
+            }
+            .await;
+            let response = match outcome {
+                Ok((session, Some(report))) => cshell_ipc::TerminalContextLaunchResponse {
+                    result: Some(SessionCreateResponse {
+                        session: Some(session),
+                        detail: String::new(),
+                        failure_code: SessionFailureCode::None as i32,
+                    }),
+                    report_json: serde_json::to_vec(&report).unwrap_or_default(),
+                },
+                Ok(_) => cshell_ipc::TerminalContextLaunchResponse {
+                    result: Some(SessionCreateResponse {
+                        session: None,
+                        detail: "Terminal context receipt unavailable; creation outcome unknown"
+                            .into(),
+                        failure_code: SessionFailureCode::StorageUnavailable as i32,
+                    }),
+                    ..Default::default()
+                },
+                Err(error) => cshell_ipc::TerminalContextLaunchResponse {
+                    result: Some(SessionCreateResponse {
+                        session: None,
+                        detail: error.detail,
+                        failure_code: error.code as i32,
+                    }),
+                    ..Default::default()
+                },
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::TerminalContextLaunchResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
+            && create.source_ssh_session_id.is_some()
+        {
+            let result = self.spawn_ssh_channel(create, negotiated_features).await;
+            let (session, detail, failure_code) = match result {
+                Ok(session) => (Some(session), String::new(), SessionFailureCode::None),
+                Err(error) => (None, error.detail, error.code),
+            };
+            return Ok(DispatchResult {
+                response: Envelope { request_id: request.request_id,
+                    payload: Some(envelope::Payload::SessionCreateResponse(SessionCreateResponse {session, detail, failure_code:failure_code as i32})),
+                    ..Default::default() }, subscription:None,
+            });
+        }
+        if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
+            && create.profile_id.is_none()
+            && create.local_launch.is_some()
+        {
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::SessionCreateResponse(
+                        SessionCreateResponse {
+                            session: None,
+                            detail: "Local launch overrides require a saved Profile".into(),
+                            failure_code: SessionFailureCode::InvalidConfiguration as i32,
+                        },
+                    )),
+                    ..Envelope::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
+            && let Some(profile_id) = &create.profile_id
+        {
+            let result = self
+                .spawn_profile(
+                    profile_id,
+                    create.rows,
+                    create.cols,
+                    create.local_launch.as_ref(),
+                    negotiated_features,
+                    None,
+                )
+                .await;
+            let (session, detail, failure_code) = match result {
+                Ok((session, _)) => (Some(session), String::new(), SessionFailureCode::None),
+                Err(error) => (None, error.detail, error.code),
+            };
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    deadline_unix_ms: 0,
+                    payload: Some(envelope::Payload::SessionCreateResponse(
+                        SessionCreateResponse {
+                            session,
+                            detail,
+                            failure_code: failure_code as i32,
+                        },
+                    )),
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SnapshotRequest(snapshot)) = &request.payload {
+            let id = LocalSessionRegistry::parse_session_id(&snapshot.session_id)?;
+            if self.ssh_sessions.contains(id) {
+                let session = self
+                    .ssh_sessions
+                    .get(id)
+                    .map_err(|_| SessionIpcError::UnsupportedRequest)?;
+                let mut subscription = session.subscribe();
+                let Some(SubscriptionFrame::Full(frame)) = subscription.poll() else {
+                    return Err(SessionIpcError::InitialFrameUnavailable);
+                };
+                return Ok(DispatchResult {
+                    response: Envelope {
+                        request_id: request.request_id,
+                        deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::FullFrame(frame)),
+                    },
+                    subscription: Some(subscription),
+                });
+            }
+        }
+        if let Some(envelope::Payload::SessionCloseRequest(close)) = &request.payload {
+            if close.apply_view_policy
+                && negotiated_features & cshell_ipc::features::LOCAL_LAUNCH_OPTIONS == 0
+            {
+                return Err(SessionIpcError::UnsupportedRequest);
+            }
+            let id = LocalSessionRegistry::parse_session_id(&close.session_id)?;
+            if close.apply_view_policy {
+                if self.ssh_sessions.contains(id) {
+                    // View close preserves this terminal. Explicit close releases its own channel;
+                    // other terminal and SFTP consumers keep shared SSH alive.
+                } else {
+                    let registry = Arc::clone(&self.registry);
+                    tokio::task::spawn_blocking(move || registry.close_view(id))
+                        .await
+                        .map_err(|_| SessionIpcError::UnsupportedRequest)??;
+                }
+                return Ok(DispatchResult {
+                    response: Envelope {
+                        request_id: request.request_id,
+                        deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::SessionCloseResponse(
+                            SessionCloseResponse {
+                                session_id: close.session_id.clone(),
+                            },
+                        )),
+                    },
+                    subscription: None,
+                });
+            }
+            if self.ssh_sessions.contains(id) {
+                let session = self
+                    .ssh_sessions
+                    .remove(id)
+                    .map_err(|_| SessionIpcError::UnsupportedRequest)?;
+                session
+                    .close()
+                    .await
+                    .map_err(|_| SessionIpcError::UnsupportedRequest)?;
+                return Ok(DispatchResult {
+                    response: Envelope {
+                        request_id: request.request_id,
+                        deadline_unix_ms: 0,
+                        payload: Some(envelope::Payload::SessionCloseResponse(
+                            SessionCloseResponse {
+                                session_id: close.session_id.clone(),
+                            },
+                        )),
+                    },
+                    subscription: None,
+                });
+            }
+        }
+        self.dispatch(request)
+    }
+
+    async fn spawn_ssh_channel(&self, request:&cshell_ipc::SessionCreateRequest, features:u64) -> Result<SessionSummary,SshLaunchFailure> {
+        if features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
+            return Err(SshLaunchFailure::new(SessionFailureCode::Unsupported, "SSH 渠道复制未协商"));
+        }
+        if request.profile_id.is_some() || request.local_launch.is_some() {return Err("复制渠道不能同时指定新配置或本地参数".into());}
+        let source = request.source_ssh_session_id.as_deref().ok_or("未指定原 SSH 会话")?;
+        let source = SessionId::from_bytes(source.try_into().map_err(|_| "无效的原 SSH 会话标识")?);
+        let source = self.ssh_sessions.get(source).map_err(|_| "原 SSH 会话不存在或不是 SSH 会话")?;
+        if let Some(peer)=source.clipboard_trust(){cshell_ssh::connection_progress::peer(0,&peer.host.host,peer.host.port);}
+        cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::ReusingTransport);
+        let rows = u16::try_from(request.rows).ok().filter(|v| *v > 0 && *v <= cshell_terminal::MAX_TERMINAL_ROWS).ok_or("无效的终端行数")?;
+        let cols = u16::try_from(request.cols).ok().filter(|v| *v > 0 && *v <= cshell_terminal::MAX_TERMINAL_COLUMNS).ok_or("无效的终端列数")?;
+        if usize::from(rows)*usize::from(cols)>cshell_terminal::MAX_TERMINAL_CELLS {return Err("终端尺寸超出限制".into());}
+        let id=SessionId::new();
+        let journal=self.registry.journal_path(id);
+        let session=tokio::time::timeout(std::time::Duration::from_secs(15),source.duplicate_channel(id,TerminalSize::cells(rows,cols),&journal)).await
+            .map_err(|_|SshLaunchFailure::new(SessionFailureCode::ProtocolRejected,"新 SSH 渠道打开超时，未重新认证；原会话仍可使用"))?
+            .map_err(ssh_launch_failure)?;
+        let _gate=self.clipboard_policy_gate.lock().await;
+        let policy=self.load_launch_clipboard_policy().await.map_err(|_|"无法读取剪贴板策略")?;
+        session.set_clipboard_policy(&policy.document);
+        if self.clipboard_policy_restricted.load(std::sync::atomic::Ordering::Acquire) {session.set_host_clipboard_blocked(true);}
+        Ok(self.ssh_sessions.insert(session).summary())
+    }
+
+    async fn spawn_profile(
+        &self,
+        bytes: &[u8],
+        rows: u32,
+        cols: u32,
+        local_launch: Option<&cshell_ipc::LocalLaunchOptions>,
+        negotiated_features: u64,
+        review: Option<&cshell_application::TerminalResolutionReport>,
+    ) -> Result<
+        (
+            SessionSummary,
+            Option<cshell_application::TerminalResolutionReport>,
+        ),
+        SshLaunchFailure,
+    > {
+        let profile_id = ProfileId::from_bytes(bytes.try_into().map_err(|_| "invalid Profile ID")?);
+        let profiles = self.profiles.as_ref().ok_or_else(|| {
+            SshLaunchFailure::new(
+                SessionFailureCode::StorageUnavailable,
+                "Profile storage unavailable",
+            )
+        })?;
+        let (plan, resolution) =
+            if negotiated_features & cshell_ipc::features::TERMINAL_CONTEXT_LAUNCH != 0 {
+                let (plan, report) = profiles.session_plan_context(profile_id, review).await?;
+                (plan, Some(report))
+            } else {
+                (profiles.session_plan(profile_id).await?, None)
+            };
+        let logging = resolution.as_ref().is_none_or(|r| r.settings.logging.value);
+        let terminal_type = resolution
+            .as_ref()
+            .map_or("xterm-256color", |r| {
+                r.settings.terminal_type.value.as_str()
+            })
+            .to_owned();
+        let rows = u16::try_from(rows)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or("invalid terminal rows")?;
+        let cols = u16::try_from(cols)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or("invalid terminal columns")?;
+        if rows > cshell_terminal::MAX_TERMINAL_ROWS || cols > cshell_terminal::MAX_TERMINAL_COLUMNS || usize::from(rows) * usize::from(cols) > cshell_terminal::MAX_TERMINAL_CELLS {
+            return Err("terminal dimensions exceed the limit".into());
+        }
+        let plan = match plan {
+            crate::profile_ipc::SavedSessionPlan::Local(mut profile, close_policy) => {
+                if negotiated_features & cshell_ipc::features::LOCAL_PROFILE == 0 {
+                    return Err(SshLaunchFailure::new(
+                        SessionFailureCode::Unsupported,
+                        "Local Profile sessions were not negotiated",
+                    ));
+                }
+                if let Some(overrides) = local_launch {
+                    if resolution.is_some()
+                        && overrides.env_overrides.iter().any(|(key, value)| {
+                            key.eq_ignore_ascii_case("TERM") && value != &terminal_type
+                        })
+                    {
+                        return Err("Local launch TERM conflicts with resolved terminal settings; use a temporary terminal context".into());
+                    }
+                    if negotiated_features & cshell_ipc::features::LOCAL_LAUNCH_OPTIONS == 0 {
+                        return Err(SshLaunchFailure::new(
+                            SessionFailureCode::Unsupported,
+                            "Local launch options were not negotiated",
+                        ));
+                    }
+                    // Validate the launch layer independently, then the combined layer.
+                    // Windows environment names are case insensitive.
+                    let mut merged = cshell_domain::LocalConnectionRecord {
+                        profile_id,
+                        program: profile.program.to_string_lossy().into_owned(),
+                        args: profile.args.clone(),
+                        cwd: overrides.cwd_path.as_ref().map_or(
+                            cshell_domain::LocalWorkingDirectory::Inherit,
+                            |path| cshell_domain::LocalWorkingDirectory::Explicit {
+                                path: path.clone(),
+                            },
+                        ),
+                        env_overrides: overrides.env_overrides.clone(),
+                        close_policy,
+                    };
+                    cshell_application::validate_local_connection(&merged)
+                        .map_err(|_| "invalid Local launch overrides")?;
+                    for (key, value) in &overrides.env_overrides {
+                        #[cfg(windows)]
+                        profile
+                            .env_overrides
+                            .retain(|existing, _| !existing.eq_ignore_ascii_case(key));
+                        profile.env_overrides.insert(key.clone(), value.clone());
+                    }
+                    merged.env_overrides.clone_from(&profile.env_overrides);
+                    cshell_application::validate_local_connection(&merged)
+                        .map_err(|_| "invalid Local launch overrides")?;
+                    if let Some(path) = &overrides.cwd_path {
+                        profile.cwd_policy =
+                            cshell_local::WorkingDirectoryPolicy::Explicit(path.into());
+                    }
+                }
+                if resolution.is_some() {
+                    // The terminal context is authoritative for TERM in this launch.
+                    profile
+                        .env_overrides
+                        .retain(|key, _| !key.eq_ignore_ascii_case("TERM"));
+                    profile.env_overrides.insert("TERM".into(), terminal_type);
+                    if profile.env_overrides.len() > 128
+                        || profile
+                            .env_overrides
+                            .iter()
+                            .map(|(key, value)| key.len() + value.len())
+                            .sum::<usize>()
+                            > 64 * 1024
+                    {
+                        return Err("Local environment with resolved TERM exceeds the limit".into());
+                    }
+                }
+                let registry = Arc::clone(&self.registry);
+                return tokio::task::spawn_blocking(move || {
+                    registry.spawn_saved_local_configured(
+                        profile_id,
+                        &profile,
+                        TerminalSize::cells(rows, cols),
+                        close_policy,
+                        logging,
+                    )
+                })
+                .await
+                .map_err(|_| {
+                    SshLaunchFailure::new(
+                        SessionFailureCode::InvalidConfiguration,
+                        "Local Profile worker failed",
+                    )
+                })?
+                .map(|info| (SessionSummary::from(info), resolution))
+                .map_err(|error| {
+                    SshLaunchFailure::new(
+                        SessionFailureCode::InvalidConfiguration,
+                        error.to_string(),
+                    )
+                });
+            }
+            crate::profile_ipc::SavedSessionPlan::Ssh(plan) => {
+                if local_launch.is_some() {
+                    return Err("Local launch overrides require a Local Profile".into());
+                }
+                if negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
+                    return Err(SshLaunchFailure::new(
+                        SessionFailureCode::Unsupported,
+                        "SSH Profile sessions were not negotiated",
+                    ));
+                }
+                plan
+            }
+        };
+        let known_hosts_path = self
+            .known_hosts_path
+            .clone()
+            .map_or_else(default_known_hosts_path, Ok)?;
+        let vault = &self
+            .profiles
+            .as_ref()
+            .ok_or("Profile storage is unavailable")?
+            .vault;
+        if vault.enabled() && negotiated_features & cshell_ipc::features::VAULT_CONTROL == 0 {
+            return Err(SshLaunchFailure::new(
+                SessionFailureCode::Unsupported,
+                "Vault control must be negotiated for saved SSH sessions",
+            ));
+        }
+        cshell_ssh::connection_progress::peer(0,&plan.target.host,plan.target.port);
+        cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::Credentials);
+        vault.prepare_connection(format!("{}@{}:{}",plan.target.username,plan.target.host,plan.target.port)).await.map_err(|error|ssh_launch_failure(SshSessionError::Ssh(error)))?;
+        let mut cancellation = vault.cancellation();
+        let epoch = *cancellation.borrow();
+        let launch = async {
+            let connection =
+                crate::ssh_route::connect_profile(&plan, &known_hosts_path, vault).await?;
+            let id = SessionId::new();
+            let size = TerminalSize::cells(rows, cols);
+            SshSession::from_connection_configured(
+                id,
+                plan.title.clone(),
+                connection,
+                size,
+                &self.registry.journal_path(id),
+                256,
+                &terminal_type,
+                logging,
+                Some(((*plan).clone(), known_hosts_path.clone(), Arc::clone(vault))),
+            )
+            .await
+            .map_err(ssh_launch_failure)
+        };
+        let session = tokio::select! {
+            biased;
+            _ = cancellation.changed() => return Err(SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, "Vault was locked during SSH creation")),
+            result = launch => result?,
+        };
+        let host = cshell_domain::ClipboardHost::new(&plan.target.host, plan.target.port)
+            .ok_or("invalid clipboard host identity")?;
+        let _guard = self.clipboard_policy_gate.lock().await;
+        let policy = self
+            .load_launch_clipboard_policy()
+            .await
+            .map_err(|_| SshLaunchFailure::from("Clipboard policy storage unavailable"))?;
+        let session = session
+            .with_profile_id(profile_id)
+            .with_clipboard_host(host.clone())
+            .with_clipboard_trust(&plan)
+            .map_err(|_| SshLaunchFailure::from("Clipboard identity unavailable"))?;
+        session.set_clipboard_policy(&policy.document);
+        if self
+            .clipboard_policy_restricted
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            session.set_host_clipboard_blocked(true);
+        }
+        let session = vault
+            .commit_auth(epoch, || self.ssh_sessions.insert(session))
+            .map_err(|_| {
+                SshLaunchFailure::new(
+                    SessionFailureCode::CredentialUnavailable,
+                    "Vault was locked during SSH creation",
+                )
+            })?;
+        Ok((session.summary(), resolution))
+    }
+
     fn dispatch(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
         let request_id = request.request_id;
         let (payload, subscription) = match request.payload {
@@ -161,6 +1485,12 @@ impl SessionIpcService {
                     .list()?
                     .into_iter()
                     .map(SessionSummary::from)
+                    .chain(
+                        self.ssh_sessions
+                            .list()
+                            .into_iter()
+                            .map(|session| session.summary()),
+                    )
                     .collect();
                 (
                     envelope::Payload::SessionListResponse(SessionListResponse { sessions }),
@@ -174,6 +1504,8 @@ impl SessionIpcService {
                 (
                     envelope::Payload::SessionCreateResponse(SessionCreateResponse {
                         session: Some(SessionSummary::from(session)),
+                        detail: String::new(),
+                        failure_code: SessionFailureCode::None as i32,
                     }),
                     None,
                 )
@@ -195,6 +1527,7 @@ impl SessionIpcService {
                     .rows
                     .into_iter()
                     .map(|row| LogRow {
+            soft_wrap: false,
                         line_id: row.line_id,
                         text: row.text,
                         style_spans: row
@@ -210,6 +1543,7 @@ impl SessionIpcService {
                     })
                     .collect();
                 let response = LogPage {
+                    first_line_id: 1,
                     session_id,
                     revision: page.revision,
                     anchor_line_id: page.anchor_line_id,
@@ -285,6 +1619,21 @@ impl SessionIpcService {
                 );
             }
         };
+        if self.ssh_sessions.contains(session_id) {
+            let result = self
+                .ssh_sessions
+                .get(session_id)
+                .map_err(|error| ssh_control_status(&error))
+                .and_then(|session| {
+                    session
+                        .send_input_observed(&action, request.observed_generation)
+                        .map_err(|error| ssh_control_status(&error))
+                });
+            return TerminalControlResponse::new(
+                response_session_id,
+                result.err().unwrap_or(TerminalControlStatus::Accepted),
+            );
+        }
         let result = self
             .registry
             .attach(session_id)
@@ -320,6 +1669,21 @@ impl SessionIpcService {
                 );
             }
         };
+        if self.ssh_sessions.contains(session_id) {
+            let result = self
+                .ssh_sessions
+                .get(session_id)
+                .map_err(|error| ssh_control_status(&error))
+                .and_then(|session| {
+                    session
+                        .resize(size)
+                        .map_err(|error| ssh_control_status(&error))
+                });
+            return TerminalControlResponse::new(
+                response_session_id,
+                result.err().unwrap_or(TerminalControlStatus::Accepted),
+            );
+        }
         let result = self
             .registry
             .attach(session_id)
@@ -336,6 +1700,116 @@ impl SessionIpcService {
     }
 }
 
+pub(crate) async fn read_ssh_auth_file(
+    path: &str,
+    label: &str,
+) -> Result<Zeroizing<String>, String> {
+    const MAX_AUTH_FILE_BYTES: u64 = 1024 * 1024;
+    let path = std::path::Path::new(path);
+    if !path.is_absolute() {
+        return Err(format!("{label} reference must be an absolute path"));
+    }
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| format!("{label} file is unavailable"))?;
+    if !metadata.is_file() || metadata.len() > MAX_AUTH_FILE_BYTES {
+        return Err(format!("{label} must be a file no larger than 1 MiB"));
+    }
+    let bytes = Zeroizing::new(
+        tokio::fs::read(path)
+            .await
+            .map_err(|_| format!("{label} file cannot be read"))?,
+    );
+    if bytes.len() as u64 > MAX_AUTH_FILE_BYTES {
+        return Err(format!("{label} file exceeds 1 MiB"));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map(Zeroizing::new)
+        .map_err(|_| format!("{label} file is not UTF-8"))
+}
+
+pub(crate) fn ssh_launch_failure(error: SshSessionError) -> SshLaunchFailure {
+    if let SshSessionError::ChannelReuse(detail)=&error {return SshLaunchFailure::new(SessionFailureCode::ProtocolRejected,*detail);}
+    if let SshSessionError::Ssh(SshError::ProviderUnsupported(refusals)) = &error {
+        return SshLaunchFailure::new(
+            SessionFailureCode::InvalidConfiguration,
+            format!("SSH provider requirements unsupported: {refusals:?}"),
+        );
+    }
+    let (code, detail) = match error {
+        SshSessionError::Ssh(SshError::CredentialUnavailable(detail)) => return SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable,detail),
+        SshSessionError::Ssh(SshError::ProxyRejected(detail)) => {
+            (SessionFailureCode::ProxyRejected, detail)
+        }
+        SshSessionError::Ssh(SshError::HostKeyRejected(HostKeyCheck::Unknown)) => (
+            SessionFailureCode::HostKeyUnknown,
+            "Unknown SSH host key. Preview and confirm its fingerprint in the Profile editor.",
+        ),
+        SshSessionError::Ssh(SshError::HostKeyRejected(HostKeyCheck::Changed)) => (
+            SessionFailureCode::HostKeyChanged,
+            "SSH host key changed. Verify the change with the server administrator.",
+        ),
+        SshSessionError::Ssh(SshError::HostKeyRejected(HostKeyCheck::Revoked)) => (
+            SessionFailureCode::HostKeyRevoked,
+            "SSH host key is revoked. Contact the server administrator.",
+        ),
+        SshSessionError::Ssh(SshError::AuthenticationRejected) => (
+            SessionFailureCode::AuthenticationRejected,
+            "SSH authentication rejected. Check the saved username and authentication settings.",
+        ),
+        SshSessionError::Ssh(SshError::InteractiveAuthenticationRequired) => (
+            SessionFailureCode::CredentialUnavailable,
+            "缺少登录账号或密码，请在桌面连接弹框中填写，或先保存凭据后再运行后台任务。",
+        ),
+        SshSessionError::Ssh(SshError::AuthenticationCancelled) => (
+            SessionFailureCode::AuthenticationCancelled,
+            "SSH 验证已取消，连接未建立。",
+        ),
+        SshSessionError::Ssh(SshError::KeyboardInteractiveTimeout) => (
+            SessionFailureCode::AuthenticationRejected,
+            "SSH 验证输入已超时，请重新连接后填写新的验证码。",
+        ),
+        SshSessionError::Ssh(error) if error.is_transport_failure() => (
+            SessionFailureCode::NetworkUnavailable,
+            "SSH network connection failed or timed out. Check the host, port and network, then retry manually.",
+        ),
+        SshSessionError::Ssh(
+            SshError::Agent(_)
+            | SshError::AgentAuthentication(_)
+            | SshError::AgentIdentityUnavailable
+            | SshError::AgentBackendUnsupported { .. }
+            | SshError::AgentBackendsUnavailable(_)
+            | SshError::PrivateKey(_)
+            | SshError::LegacyPem(_)
+            | SshError::Certificate(_)
+            | SshError::CertificateKeyMismatch,
+        ) => (
+            SessionFailureCode::CredentialUnavailable,
+            "SSH key, certificate or agent credential is unavailable. Check the Profile authentication settings.",
+        ),
+        SshSessionError::Pipeline(_) => (
+            SessionFailureCode::StorageUnavailable,
+            "SSH terminal output storage could not be opened.",
+        ),
+        _ => (
+            SessionFailureCode::ProtocolRejected,
+            "SSH negotiation or terminal request failed. Check server SSH compatibility and shell access.",
+        ),
+    };
+    SshLaunchFailure::new(code, detail)
+}
+
+pub(crate) fn default_known_hosts_path() -> Result<std::path::PathBuf, String> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    let home = home.ok_or("cannot locate the user home directory for known_hosts")?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".ssh")
+        .join("known_hosts"))
+}
+
 fn valid_control_session_id(session_id: &[u8]) -> Vec<u8> {
     if session_id.len() == 16 {
         session_id.to_vec()
@@ -349,6 +1823,15 @@ fn registry_control_status(error: &SessionRegistryError) -> TerminalControlStatu
         SessionRegistryError::InvalidSessionIdLength(_) => TerminalControlStatus::InvalidRequest,
         SessionRegistryError::UnknownSession(_) => TerminalControlStatus::UnknownSession,
         SessionRegistryError::Session(error) => local_control_status(error),
+        _ => TerminalControlStatus::Failed,
+    }
+}
+
+fn ssh_control_status(error: &SshSessionError) -> TerminalControlStatus {
+    match error {
+        SshSessionError::Backpressure => TerminalControlStatus::Backpressure,
+        SshSessionError::Closed => TerminalControlStatus::SessionClosed,
+        SshSessionError::Unknown(_) => TerminalControlStatus::UnknownSession,
         _ => TerminalControlStatus::Failed,
     }
 }
@@ -383,31 +1866,118 @@ fn terminal_color(color: JournalColor) -> Color {
 impl From<LocalSessionInfo> for SessionSummary {
     fn from(info: LocalSessionInfo) -> Self {
         Self {
+            can_duplicate_ssh_channel: false,
+            reconnecting: false,
             session_id: info.session_id.as_uuid().as_bytes().to_vec(),
             title: info.title,
             running: info.running,
             generation: info.generation,
+            profile_id: info.profile_id.map(|id| id.as_uuid().as_bytes().to_vec()),
+            terminal_detail: if info.running {
+                info.launch_detail.unwrap_or_default()
+            } else {
+                "Local terminal exited".into()
+            },
         }
     }
 }
 
 fn is_client_disconnect(error: &IpcError) -> bool {
-    matches!(
-        error,
-        IpcError::Io(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::UnexpectedEof
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-            )
-    )
+    let IpcError::Io(error) = error else {
+        return false;
+    };
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    ) {
+        return true;
+    }
+    // Windows can report a retiring named pipe as ERROR_NO_DATA or
+    // ERROR_PIPE_NOT_CONNECTED instead of one of the portable error kinds.
+    #[cfg(windows)]
+    if error.raw_os_error().is_some_and(|code| {
+        code == windows_sys::Win32::Foundation::ERROR_NO_DATA as i32
+            || code == windows_sys::Win32::Foundation::ERROR_PIPE_NOT_CONNECTED as i32
+    }) {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[tokio::test]
+    async fn authenticated_peer_can_retire_before_its_first_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let service = SessionIpcService::new(registry);
+        let (client, server) = tokio::io::duplex(64);
+        drop(client);
+        assert!(service.serve_connection(server).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn authenticated_peer_can_retire_before_its_first_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let service = SessionIpcService::new(registry);
+        let (mut client, server) = tokio::io::duplex(4096);
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 1,
+                payload: Some(envelope::Payload::SessionListRequest(SessionListRequest {})),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        drop(client);
+        assert!(service.serve_connection(server).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn malformed_first_frame_is_still_rejected_when_peer_retires() {
+        use tokio::io::AsyncWriteExt;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(directory.path(), 32).unwrap());
+        let service = SessionIpcService::new(registry);
+        let (mut client, server) = tokio::io::duplex(64);
+        client.write_all(&[0, 0, 0, 1, 0xff]).await.unwrap();
+        drop(client);
+        assert!(matches!(
+            service.serve_connection(server).await,
+            Err(super::SessionIpcError::Transport(
+                cshell_ipc::IpcError::Decode(_)
+            ))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_retirement_is_distinct_from_other_transport_failures() {
+        use cshell_ipc::IpcError;
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED,
+        };
+        for code in [ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED] {
+            assert!(super::is_client_disconnect(&IpcError::Io(
+                std::io::Error::from_raw_os_error(code as i32)
+            )));
+        }
+        assert!(!super::is_client_disconnect(&IpcError::Io(
+            std::io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32)
+        )));
+        assert!(!super::is_client_disconnect(&IpcError::FrameTooLarge {
+            actual: 17,
+            limit: 16
+        }));
+    }
+
     use super::{SessionIpcService, terminal_style};
     use crate::LocalSessionRegistry;
     use cshell_domain::{InputAction, TerminalSize};
@@ -468,6 +2038,687 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn sftp_requests_require_negotiated_feature() {
+        use cshell_ipc::{SftpOperation, SftpRequest, SftpStatus, features};
+        let temp = tempfile::tempdir().unwrap();
+        let registry =
+            Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16).unwrap());
+        let service = SessionIpcService::new(registry);
+        let request = Envelope {
+            request_id: 42,
+            payload: Some(envelope::Payload::SftpRequest(SftpRequest {
+                operation: SftpOperation::List as i32,
+                session_id: cshell_domain::SessionId::new()
+                    .as_uuid()
+                    .as_bytes()
+                    .to_vec(),
+                remote_path: "/".into(),
+                max_entries: 16,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let denied = service
+            .dispatch_with_features(request.clone(), 0)
+            .await
+            .unwrap();
+        let Some(envelope::Payload::SftpResponse(denied)) = denied.response.payload else {
+            panic!("expected SFTP response");
+        };
+        assert_eq!(denied.status, SftpStatus::Unsupported as i32);
+        let accepted = service
+            .dispatch_with_features(request, features::SFTP_CONTROL)
+            .await
+            .unwrap();
+        assert_eq!(accepted.response.request_id, 42);
+        let Some(envelope::Payload::SftpResponse(accepted)) = accepted.response.payload else {
+            panic!("expected SFTP response");
+        };
+        assert_eq!(accepted.status, SftpStatus::Unavailable as i32);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_ssh_clipboard_consent_over_authenticated_ipc_is_one_shot() {
+        use crate::SshSession;
+        use crate::ssh_session::{SshAuthentication, SshConnect, tests::EchoServer};
+        use cshell_application::{ClipboardPolicyDocument, encode_clipboard_policy};
+        use cshell_domain::{ClipboardHost, InputAction, SessionId, TerminalSize};
+        use cshell_ipc::{
+            ClipboardOperation, ClipboardPolicyOperation, ClipboardPolicyRequest,
+            ClipboardPolicyResponse, ClipboardPolicyStatus, ClipboardRequest, ClipboardResponse,
+            ClipboardStatus, Handshake, HandshakePolicy, client_handshake, features, read_envelope,
+            server_handshake, write_envelope,
+        };
+        use cshell_ssh::KnownHostsVerifier;
+        use russh::keys::ssh_key::{Algorithm, PrivateKey};
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let public = key.public_key().to_openssh().unwrap();
+        let mut config = russh::server::Config::default();
+        config.keys.push(key);
+        config.auth_rejection_time = std::time::Duration::from_millis(1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let ssh_server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let server = russh::server::run_stream(Arc::new(config), stream, EchoServer::default())
+                .await
+                .unwrap();
+            let _ = server.await;
+        });
+        let verifier = KnownHostsVerifier::parse(
+            &format!("[127.0.0.1]:{} {public}\n", address.port()),
+            "127.0.0.1",
+            address.port(),
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let session = SshSession::connect(
+            id,
+            "clipboard test".into(),
+            SshConnect {
+                username: "cshell".into(),
+                verifier,
+                authentication: SshAuthentication::Password("phase1".into()),
+            },
+            TerminalSize::cells(24, 80),
+            &temp.path().join("clipboard.csjr"),
+            16,
+        )
+        .await
+        .unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(temp.path().join("local"), 16).unwrap());
+        let database = temp.path().join("policies.sqlite");
+        let repository = cshell_storage::SqliteProfileRepository::open(&database)
+            .await
+            .unwrap();
+        let service = SessionIpcService::new(registry)
+            .with_profiles(Arc::new(crate::ProfileIpcService::new(repository)));
+        let host = ClipboardHost::new("127.0.0.1", address.port()).unwrap();
+        let clipboard_plan = crate::ssh_route::SshConnectionPlan {
+            title: "clipboard test".into(),
+            jumps: Vec::new(),
+            target: cshell_domain::SshConnectionRecord {
+                options: Default::default(),
+                profile_id: cshell_domain::ProfileId::new(),
+                host: "127.0.0.1".into(),
+                port: address.port(),
+                username: "cshell".into(),
+                auth_method: cshell_domain::SshAuthMethod::Password,
+                private_key_path: None,
+                certificate_path: None,
+                agent_backend: Default::default(),
+                agent_identity: None,
+                route: cshell_domain::SshRoute::Direct,
+            },
+        };
+        let session = service.ssh_sessions.insert(
+            session
+                .with_clipboard_host(host.clone())
+                .with_clipboard_trust(&clipboard_plan)
+                .unwrap(),
+        );
+        let identity = session.clipboard_trust().unwrap().clone();
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let ipc_server = tokio::spawn(async move {
+            let policy = HandshakePolicy::with_instance_id(
+                [2; 32],
+                [1; 16],
+                features::CLIPBOARD_CONTROL
+                    | features::HOST_CLIPBOARD_POLICY
+                    | features::AUTOMATIC_CLIPBOARD,
+            );
+            let negotiated = server_handshake(&mut server, &policy).await.unwrap();
+            service
+                .serve_connection_with_features(server, negotiated.feature_bits)
+                .await
+                .unwrap();
+        });
+        let mut handshake = Handshake::new(vec![1; 16], vec![2; 32]);
+        handshake.feature_bits = features::CLIPBOARD_CONTROL
+            | features::HOST_CLIPBOARD_POLICY
+            | features::AUTOMATIC_CLIPBOARD;
+        client_handshake(&mut client, 1, handshake).await.unwrap();
+        async fn control(
+            client: &mut tokio::io::DuplexStream,
+            id: SessionId,
+            operation: ClipboardOperation,
+            token: &[u8],
+        ) -> ClipboardResponse {
+            write_envelope(
+                client,
+                &Envelope {
+                    request_id: 42,
+                    payload: Some(envelope::Payload::ClipboardRequest(ClipboardRequest {
+                        session_id: id.as_uuid().as_bytes().to_vec(),
+                        operation: operation as i32,
+                        token: token.to_vec(),
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let response = read_envelope(client).await.unwrap();
+            assert_eq!(response.request_id, 42);
+            let Some(envelope::Payload::ClipboardResponse(response)) = response.payload else {
+                panic!("expected clipboard response");
+            };
+            response
+        }
+        async fn policy_control(
+            client: &mut tokio::io::DuplexStream,
+            id: SessionId,
+            revision: u64,
+            document: &ClipboardPolicyDocument,
+        ) -> ClipboardPolicyResponse {
+            write_envelope(
+                client,
+                &Envelope {
+                    request_id: 43,
+                    payload: Some(envelope::Payload::ClipboardPolicyRequest(
+                        ClipboardPolicyRequest {
+                            operation: ClipboardPolicyOperation::Save as i32,
+                            expected_revision: revision,
+                            document_json: encode_clipboard_policy(document).unwrap(),
+                            selected_session_id: id.as_uuid().as_bytes().to_vec(),
+                        },
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let response = read_envelope(client).await.unwrap();
+            assert_eq!(response.request_id, 43);
+            let Some(envelope::Payload::ClipboardPolicyResponse(response)) = response.payload
+            else {
+                panic!("expected policy response");
+            };
+            response
+        }
+        async fn pending_write(
+            client: &mut tokio::io::DuplexStream,
+            session: &SshSession,
+        ) -> ClipboardResponse {
+            tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+            session
+                .send_input(&InputAction::Text("\x1b]52;c;aGVsbG8=\x07\n".into()))
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let response =
+                        control(client, session.id(), ClipboardOperation::Poll, &[]).await;
+                    if !response.token.is_empty() {
+                        break response;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap()
+        }
+        session
+            .send_input(&InputAction::Text("\x1b]52;c;?\x07QUERY-DONE\n".into()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if session.generation() > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .token
+                .is_empty()
+        );
+        session
+            .send_input(&InputAction::Text("\x1b]52;c;aGVsbG8=\x1b\\\n".into()))
+            .unwrap();
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let response = control(&mut client, id, ClipboardOperation::Poll, &[]).await;
+                if !response.token.is_empty() {
+                    break response;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(pending.text.is_empty());
+        assert_eq!(pending.byte_count, 5);
+        assert_eq!(
+            control(
+                &mut client,
+                SessionId::new(),
+                ClipboardOperation::Approve,
+                &pending.token
+            )
+            .await
+            .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &[0; 16])
+                .await
+                .status,
+            ClipboardStatus::Stale as i32
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .text,
+            "hello"
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Stale as i32
+        );
+        let pending = pending_write(&mut client, &session).await;
+        let blocked = ClipboardPolicyDocument {
+            blocked_hosts: vec![host.clone()],
+            ..Default::default()
+        };
+        let saved = policy_control(&mut client, id, 0, &blocked).await;
+        assert_eq!(saved.status, ClipboardPolicyStatus::Ok as i32);
+        assert_eq!(saved.revision, 1);
+        assert_eq!(saved.selected_host, host.host);
+        assert_eq!(saved.selected_port, u32::from(host.port));
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        let empty = ClipboardPolicyDocument::default();
+        assert_eq!(
+            policy_control(&mut client, id, 0, &empty).await.status,
+            ClipboardPolicyStatus::Conflict as i32
+        );
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        assert_eq!(policy_control(&mut client, id, 1, &empty).await.revision, 2);
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Stale as i32
+        );
+        assert!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .token
+                .is_empty()
+        );
+        let automatic = ClipboardPolicyDocument {
+            version: 2,
+            automatic: vec![identity.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            policy_control(&mut client, id, 2, &automatic)
+                .await
+                .revision,
+            3
+        );
+        let mut forged = automatic.clone();
+        forged.automatic[0].username = "other-account".into();
+        assert_eq!(
+            policy_control(&mut client, id, 3, &forged).await.status,
+            ClipboardPolicyStatus::Invalid as i32
+        );
+        let pending = pending_write(&mut client, &session).await;
+        assert!(pending.automatic);
+        assert_eq!(
+            control(
+                &mut client,
+                id,
+                ClipboardOperation::ApproveAutomatic,
+                &pending.token
+            )
+            .await
+            .text,
+            "hello"
+        );
+        let pending = pending_write(&mut client, &session).await;
+        assert_eq!(policy_control(&mut client, id, 3, &empty).await.revision, 4);
+        assert_eq!(
+            control(
+                &mut client,
+                id,
+                ClipboardOperation::ApproveAutomatic,
+                &pending.token
+            )
+            .await
+            .status,
+            ClipboardStatus::Stale as i32
+        );
+        let pending = pending_write(&mut client, &session).await;
+        // Loss of policy storage must clear pending payloads before an old client can approve.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&database))
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE clipboard_policy_state")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Approve, &pending.token)
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        pool.close().await;
+        session.close().await.unwrap();
+        assert_eq!(
+            control(&mut client, id, ClipboardOperation::Poll, &[])
+                .await
+                .status,
+            ClipboardStatus::Unavailable as i32
+        );
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(5), ipc_server)
+            .await
+            .unwrap()
+            .unwrap();
+        ssh_server.abort();
+    }
+
+    #[tokio::test]
+    async fn clipboard_policy_requires_capability_and_refuses_stale_or_malformed_writes() {
+        use cshell_application::{ClipboardPolicyDocument, encode_clipboard_policy};
+        use cshell_domain::ClipboardHost;
+        use cshell_ipc::{
+            ClipboardPolicyOperation, ClipboardPolicyRequest, ClipboardPolicyStatus, features,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let repository =
+            cshell_storage::SqliteProfileRepository::open(temp.path().join("policy.db"))
+                .await
+                .unwrap();
+        let service = SessionIpcService::new(Arc::new(
+            LocalSessionRegistry::new(temp.path().join("journals"), 8).unwrap(),
+        ))
+        .with_profiles(Arc::new(crate::ProfileIpcService::new(repository)));
+        let document = ClipboardPolicyDocument {
+            blocked_hosts: vec![ClipboardHost::new("example.test", 22).unwrap()],
+            ..Default::default()
+        };
+        let save = ClipboardPolicyRequest {
+            operation: ClipboardPolicyOperation::Save as i32,
+            document_json: encode_clipboard_policy(&document).unwrap(),
+            ..Default::default()
+        };
+        for (request, bits, expected) in [
+            (save.clone(), 0, ClipboardPolicyStatus::Unsupported),
+            (
+                ClipboardPolicyRequest {
+                    selected_session_id: vec![1],
+                    ..save.clone()
+                },
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Invalid,
+            ),
+            (
+                ClipboardPolicyRequest {
+                    document_json: b"{\"secret\":\"private\"}".to_vec(),
+                    ..save.clone()
+                },
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Invalid,
+            ),
+            (
+                save.clone(),
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Ok,
+            ),
+            (
+                save,
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Conflict,
+            ),
+            (
+                ClipboardPolicyRequest {
+                    expected_revision: 1,
+                    ..Default::default()
+                },
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Invalid,
+            ),
+            (
+                ClipboardPolicyRequest::default(),
+                features::HOST_CLIPBOARD_POLICY,
+                ClipboardPolicyStatus::Ok,
+            ),
+        ] {
+            let response = service
+                .dispatch_with_features(
+                    Envelope {
+                        request_id: 99,
+                        payload: Some(envelope::Payload::ClipboardPolicyRequest(request)),
+                        ..Default::default()
+                    },
+                    bits,
+                )
+                .await
+                .unwrap()
+                .response;
+            assert_eq!(response.request_id, 99);
+            let Some(envelope::Payload::ClipboardPolicyResponse(response)) = response.payload
+            else {
+                panic!("expected policy response");
+            };
+            assert_eq!(response.status, expected as i32);
+            if expected == ClipboardPolicyStatus::Conflict {
+                assert!(
+                    service
+                        .clipboard_policy_restricted
+                        .load(std::sync::atomic::Ordering::Acquire)
+                );
+            }
+            if expected == ClipboardPolicyStatus::Ok {
+                assert_eq!(response.revision, 1);
+                assert!(response.selected_host.is_empty());
+                assert!(
+                    !service
+                        .clipboard_policy_restricted
+                        .load(std::sync::atomic::Ordering::Acquire)
+                );
+            }
+        }
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(temp.path().join("policy.db")),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER deny_policy_update BEFORE UPDATE ON clipboard_policy_state BEGIN SELECT RAISE(FAIL, 'injected failure'); END")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = service
+            .handle_clipboard_policy(&ClipboardPolicyRequest {
+                operation: ClipboardPolicyOperation::Save as i32,
+                expected_revision: 1,
+                document_json: encode_clipboard_policy(&ClipboardPolicyDocument::default())
+                    .unwrap(),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(response.status, ClipboardPolicyStatus::Unavailable as i32);
+        assert_eq!(
+            service
+                .profiles
+                .as_ref()
+                .unwrap()
+                .load_clipboard_policy()
+                .await
+                .unwrap()
+                .document,
+            document
+        );
+        assert!(
+            service
+                .clipboard_policy_restricted
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let poll = service
+            .handle_clipboard_decision(
+                cshell_domain::SessionId::new(),
+                cshell_ipc::ClipboardOperation::Poll,
+                &[],
+            )
+            .await;
+        assert_eq!(poll.status, cshell_ipc::ClipboardStatus::Unavailable as i32);
+        assert!(
+            service
+                .clipboard_policy_restricted
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let refreshed = service
+            .handle_clipboard_policy(&ClipboardPolicyRequest::default())
+            .await;
+        assert_eq!(refreshed.status, ClipboardPolicyStatus::Ok as i32);
+        assert!(
+            !service
+                .clipboard_policy_restricted
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn clipboard_control_requires_capability_and_valid_session() {
+        use cshell_ipc::{ClipboardRequest, ClipboardStatus, features};
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(LocalSessionRegistry::new(temp.path(), 8).unwrap());
+        let service = SessionIpcService::new(registry);
+        let request = Envelope {
+            request_id: 8,
+            payload: Some(envelope::Payload::ClipboardRequest(ClipboardRequest {
+                session_id: vec![],
+                operation: 0,
+                token: vec![],
+            })),
+            ..Default::default()
+        };
+        for (features, expected) in [
+            (0, ClipboardStatus::Unsupported),
+            (features::CLIPBOARD_CONTROL, ClipboardStatus::InvalidRequest),
+        ] {
+            let response = service
+                .dispatch_with_features(request.clone(), features)
+                .await
+                .unwrap()
+                .response;
+            let Some(envelope::Payload::ClipboardResponse(response)) = response.payload else {
+                panic!("expected clipboard response");
+            };
+            assert_eq!(response.status, expected as i32);
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_control_round_trip_refuses_stale_and_unnegotiated_writes_without_launching()
+    {
+        use cshell_application::{decode_workspace, encode_workspace};
+        use cshell_domain::WorkspaceDocument;
+        use cshell_ipc::{WorkspaceOperation, WorkspaceRequest, WorkspaceStatus, features};
+        let temp = tempfile::tempdir().unwrap();
+        let repository =
+            cshell_storage::SqliteProfileRepository::open(temp.path().join("workspace.db"))
+                .await
+                .unwrap();
+        let registry =
+            Arc::new(LocalSessionRegistry::new(temp.path().join("journals"), 16).unwrap());
+        let service = SessionIpcService::new(Arc::clone(&registry)).with_profiles(Arc::new(
+            crate::profile_ipc::ProfileIpcService::new(repository),
+        ));
+        let request = |request_id, operation, expected_revision, document_json| Envelope {
+            request_id,
+            payload: Some(envelope::Payload::WorkspaceRequest(WorkspaceRequest {
+                operation: operation as i32,
+                expected_revision,
+                document_json,
+            })),
+            ..Default::default()
+        };
+        let doc = WorkspaceDocument::default();
+        let save = request(
+            10,
+            WorkspaceOperation::Save,
+            0,
+            encode_workspace(&doc).unwrap(),
+        );
+        let denied = service
+            .dispatch_with_features(save.clone(), 0)
+            .await
+            .unwrap()
+            .response;
+        let Some(envelope::Payload::WorkspaceResponse(denied)) = denied.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(denied.status, WorkspaceStatus::Unsupported as i32);
+        let result = service
+            .dispatch_with_features(save.clone(), features::WORKSPACE_CONTROL)
+            .await
+            .unwrap()
+            .response;
+        assert_eq!(result.request_id, 10);
+        let Some(envelope::Payload::WorkspaceResponse(saved)) = result.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(saved.status, WorkspaceStatus::Ok as i32);
+        assert_eq!(saved.revision, 1);
+        assert_eq!(decode_workspace(&saved.document_json).unwrap(), doc);
+        let stale = service.dispatch_any(save).await.unwrap().response;
+        let Some(envelope::Payload::WorkspaceResponse(stale)) = stale.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(stale.status, WorkspaceStatus::Conflict as i32);
+        let mut future = doc.clone();
+        future.version += 1;
+        let invalid = service
+            .dispatch_any(request(
+                12,
+                WorkspaceOperation::Save,
+                1,
+                serde_json::to_vec(&future).unwrap(),
+            ))
+            .await
+            .unwrap()
+            .response;
+        let Some(envelope::Payload::WorkspaceResponse(invalid)) = invalid.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(invalid.status, WorkspaceStatus::Invalid as i32);
+        let loaded = service
+            .dispatch_any(request(13, WorkspaceOperation::Load, 0, vec![]))
+            .await
+            .unwrap()
+            .response;
+        let Some(envelope::Payload::WorkspaceResponse(loaded)) = loaded.payload else {
+            panic!("workspace reply")
+        };
+        assert_eq!(loaded.revision, 1);
+        assert_eq!(decode_workspace(&loaded.document_json).unwrap(), doc);
+        assert_eq!(registry.len(), 0);
+    }
+
     #[test]
     fn journal_style_maps_losslessly_to_terminal_style() {
         assert_eq!(
@@ -515,7 +2766,13 @@ mod tests {
                 request_id: 2,
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
-                    cshell_ipc::SessionCreateRequest { rows: 24, cols: 80 },
+                    cshell_ipc::SessionCreateRequest {connection_diagnostics:false,
+                        source_ssh_session_id: None,
+                        local_launch: None,
+                        rows: 24,
+                        cols: 80,
+                        profile_id: None,
+                    },
                 )),
             })
             .unwrap();
@@ -532,6 +2789,7 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCloseRequest(
                     cshell_ipc::SessionCloseRequest {
+                        apply_view_policy: false,
                         session_id: session.session_id.clone(),
                     },
                 )),
@@ -626,11 +2884,14 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::TerminalInputRequest(
                     TerminalInputRequest {
+            mouse: None,
+                        observed_generation: None,
                         session_id: missing_session.as_uuid().as_bytes().to_vec(),
                         key: None,
                         text: None,
                         paste: None,
                         control: None,
+                        compose: None,
                     },
                 )),
             })
@@ -700,6 +2961,7 @@ mod tests {
         loop {
             let page = registry
                 .fulfill_log_page_request(&LogPageRequest {
+                    terminal_history: false,
                     session_id: session_id.as_uuid().as_bytes().to_vec(),
                     anchor_line_id: None,
                     cell_offset: 0,
@@ -860,11 +3122,14 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::TerminalInputRequest(
                     TerminalInputRequest {
+            mouse: None,
+                        observed_generation: None,
                         session_id: vec![0; 16],
                         key: None,
                         text: None,
                         paste: None,
                         control: None,
+                        compose: None,
                     },
                 )),
             },
@@ -998,6 +3263,7 @@ mod tests {
                     request_id: 101,
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::LogPageRequest(LogPageRequest {
+                        terminal_history: false,
                         session_id: session_id.as_uuid().as_bytes().to_vec(),
                         anchor_line_id: None,
                         cell_offset: 0,
@@ -1097,6 +3363,7 @@ mod tests {
                     request_id: 102,
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::LogPageRequest(LogPageRequest {
+                        terminal_history: false,
                         session_id: session_id.as_uuid().as_bytes().to_vec(),
                         anchor_line_id: None,
                         cell_offset: 0,
@@ -1127,3 +3394,7 @@ mod tests {
         registry.close(session_id).unwrap();
     }
 }
+
+#[cfg(test)]
+mod memory_history_tests;
+mod connection_diagnostics;

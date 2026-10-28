@@ -125,6 +125,7 @@ mod tests {
         worker.submit(TerminalSearchRequest {
             revision: 7,
             snapshot: Arc::new(FrameSnapshot {
+            screen_start_line: 0,
                 generation: 11,
                 rows: 1,
                 cols: 4,

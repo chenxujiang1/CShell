@@ -45,6 +45,7 @@ pub struct SubscriptionStats {
 pub struct TerminalFrameSubscription {
     session_id: SessionId,
     snapshots: LatestSnapshot,
+    _activity: std::sync::Arc<crate::SnapshotActivity>,
     last_delivered: Option<FrameSnapshot>,
     max_delta_generation_gap: u64,
     stats: SubscriptionStats,
@@ -53,7 +54,9 @@ pub struct TerminalFrameSubscription {
 impl TerminalFrameSubscription {
     #[must_use]
     pub fn new(session_id: SessionId, snapshots: LatestSnapshot) -> Self {
+        let activity = snapshots.activity();
         Self {
+            _activity: activity,
             session_id,
             snapshots,
             last_delivered: None,
@@ -130,6 +133,7 @@ mod tests {
         let mut cells = vec![Cell::default(); 12];
         cells[5].character = character;
         FrameSnapshot {
+            screen_start_line: 0,
             generation,
             rows: 3,
             cols: 4,

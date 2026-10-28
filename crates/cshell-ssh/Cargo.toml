@@ -13,9 +13,23 @@ legacy-crypto = ["russh/des", "russh/dsa"]
 x11-forwarding = []
 
 [dependencies]
+argon2.workspace = true
+crypto-bigint.workspace = true
+cshell-domain = { path = "../cshell-domain" }
+cshell-application = { path = "../cshell-application" }
 cshell-sftp = { path = "../cshell-sftp" }
+hmac.workspace = true
+md5 = "=0.8.1"
+pkcs8 = { version = "=0.11.0", features = ["std"] }
 russh.workspace = true
 serde.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+ring.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+ssh-cipher = { workspace = true, features = ["tdes"] }
+ssh-encoding.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
@@ -23,6 +37,7 @@ tokio.workspace = true
 futures.workspace = true
 rand.workspace = true
 russh-sftp.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

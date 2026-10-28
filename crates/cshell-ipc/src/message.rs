@@ -9,9 +9,10 @@ use prost::{Enumeration, Message};
 use std::collections::HashSet;
 use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
+use zeroize::Zeroize;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 8;
+pub const PROTOCOL_MINOR: u32 = 77;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -23,15 +24,75 @@ pub const MAX_HISTORY_SEARCH_SCAN_LINES: usize = 4096;
 pub const MAX_HISTORY_SEARCH_MATCHES: usize = 4096;
 
 pub mod features {
+    pub const TERMINAL_SCROLLBACK: u64 = 1 << 63;
+    pub const ZMODEM: u64 = 1 << 62;
     pub const FULL_FRAME_RECOVERY: u64 = 1 << 0;
     pub const CANCELLATION: u64 = 1 << 1;
     pub const PRIORITY_STREAMS: u64 = 1 << 2;
     pub const LOG_PAGING: u64 = 1 << 3;
     pub const TERMINAL_CONTROL: u64 = 1 << 4;
     pub const HISTORY_SEARCH: u64 = 1 << 5;
+    pub const PROFILE_CONTROL: u64 = 1 << 6;
+    pub const SSH_PROFILE_TARGET: u64 = 1 << 7;
+    pub const SSH_PROFILE_SESSION: u64 = 1 << 8;
+    pub const SSH_PROFILE_AUTH: u64 = 1 << 9;
+    pub const SSH_HOST_KEY_IMPORT: u64 = 1 << 10;
+    pub const SSH_SESSION_STATUS: u64 = 1 << 11;
+    pub const SSH_PROFILE_ROUTE: u64 = 1 << 12;
+    pub const LOCAL_PROFILE: u64 = 1 << 13;
+    pub const LOCAL_LAUNCH_OPTIONS: u64 = 1 << 14;
+    pub const WORKSPACE_CONTROL: u64 = 1 << 15;
+    pub const SFTP_CONTROL: u64 = 1 << 16;
+    pub const CLIPBOARD_CONTROL: u64 = 1 << 17;
+    pub const HOST_CLIPBOARD_POLICY: u64 = 1 << 18;
+    pub const VAULT_CONTROL: u64 = 1 << 19;
+    pub const AUTOMATIC_CLIPBOARD: u64 = 1 << 20;
+    pub const PROFILE_CONNECTION_IMPORT: u64 = 1 << 21;
+    pub const PROFILE_TRANSFER: u64 = 1 << 22;
+    pub const THEME_TRANSFER: u64 = 1 << 23;
+    pub const CREDENTIAL_PACKAGE: u64 = 1 << 24;
+    pub const OPENSSH_EXPORT: u64 = 1 << 25;
+    pub const COMPOSE_INPUT: u64 = 1 << 26;
+    pub const QUICK_COMMAND_CONTROL: u64 = 1 << 27;
+    pub const HOST_GROUP_CONTROL: u64 = 1 << 28;
+    pub const TASK_CONTROL: u64 = 1 << 29;
+    pub const TASK_PLAN_CONTROL: u64 = 1 << 30;
+    pub const VAULT_SESSION_STATE: u64 = 1 << 31;
+    pub const TASK_RESULTS: u64 = 1 << 32;
+    pub const TASK_UPLOADS: u64 = 1 << 33;
+    pub const TASK_DOWNLOADS: u64 = 1 << 34;
+    pub const MIXED_TASK_CONTROL: u64 = 1 << 35;
+    pub const MIXED_FILE_REPAIR: u64 = 1 << 36;
+    pub const MIXED_RESULTS: u64 = 1 << 37;
+    pub const TASK_OUTPUT_ANALYSIS: u64 = 1 << 38;
+    pub const TASK_OUTPUT_SEARCH: u64 = 1 << 39;
+    pub const TASK_OUTPUT_MERGE: u64 = 1 << 40;
+    pub const TASK_OUTPUT_ARCHIVE: u64 = 1 << 41;
+    pub const MIXED_TASK_RETRY: u64 = 1 << 42;
+    pub const MIXED_ROLLOUT: u64 = 1 << 43;
+    pub const QUICK_TASK_TEMPLATES: u64 = 1 << 44;
+    pub const OUTPUT_WORKSPACE: u64 = 1 << 45;
+    pub const FILE_PUBLICATION: u64 = 1 << 46;
+    pub const SFTP_BROWSER_QUEUE: u64 = 1 << 47;
+    pub const SFTP_DIRECTORY_CURSOR: u64 = 1 << 48;
+    pub const SFTP_VERIFIED_QUEUE: u64 = 1 << 49;
+    pub const SFTP_WORKSPACE: u64 = 1 << 50;
+    pub const TUNNEL_CONTROL: u64 = 1 << 51;
+    pub const DEDICATED_TUNNELS: u64 = 1 << 52;
+    pub const HOST_CA_CONTROL: u64 = 1 << 53;
+    pub const SSH_PROVIDER_CONTROL: u64 = 1 << 54;
+    pub const TERMINAL_TOOLS: u64 = 1 << 55;
+    pub const PROFILE_BATCH: u64 = 1 << 56;
+    pub const TERMINAL_POLICIES: u64 = 1 << 57;
+    pub const TERMINAL_CONTEXT_LAUNCH: u64 = 1 << 58;
+    pub const SCRIPT_CONTROL: u64 = 1 << 59;
+    pub const SFTP_LIVE_CONTROL: u64 = 1 << 60;
+    /// Dedicated authenticated connection retaining a desktop-managed daemon.
+    pub const DESKTOP_LIFETIME: u64 = 1 << 61;
 }
 
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct Handshake {
     #[prost(fixed32, tag = "1")]
     pub magic: u32,
@@ -45,6 +106,24 @@ pub struct Handshake {
     pub daemon_instance_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "6")]
     pub instance_token: Vec<u8>,
+}
+
+impl Drop for Handshake {
+    fn drop(&mut self) {
+        self.instance_token.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Handshake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Handshake")
+            .field("protocol_major", &self.protocol_major)
+            .field("protocol_minor", &self.protocol_minor)
+            .field("feature_bits", &self.feature_bits)
+            .field("instance_token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -95,6 +174,12 @@ pub struct TerminalFramePayload {
     pub modify_other_keys: u32,
     #[prost(bool, tag = "12")]
     pub format_other_keys: bool,
+    #[prost(uint32, tag = "13")]
+    pub mouse_tracking: u32,
+    #[prost(uint32, tag = "14")]
+    pub mouse_encoding: u32,
+    #[prost(fixed64, tag = "15")]
+    pub screen_start_line: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -109,6 +194,8 @@ pub struct TerminalCell {
     pub width: i32,
     #[prost(string, tag = "5")]
     pub hyperlink_uri: String,
+    #[prost(bool, tag = "6")]
+    pub soft_wrap: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -226,6 +313,9 @@ impl FullFrame {
             kitty_keyboard_flags: u32::from(snapshot.terminal_modes.kitty_keyboard_flags),
             modify_other_keys: u32::from(snapshot.terminal_modes.modify_other_keys),
             format_other_keys: snapshot.terminal_modes.format_other_keys,
+            mouse_tracking: u32::from(snapshot.terminal_modes.mouse_tracking),
+            mouse_encoding: u32::from(snapshot.terminal_modes.mouse_encoding),
+            screen_start_line: snapshot.screen_start_line,
         };
         Self {
             session_id: session_id.as_uuid().as_bytes().to_vec(),
@@ -278,6 +368,7 @@ impl FullFrame {
         }
 
         Ok(FrameSnapshot {
+            screen_start_line: payload.screen_start_line,
             generation: self.generation,
             rows: payload.rows as u16,
             cols: payload.cols as u16,
@@ -300,6 +391,8 @@ impl FullFrame {
                     )) as u8,
                 modify_other_keys: payload.modify_other_keys.min(3) as u8,
                 format_other_keys: payload.format_other_keys,
+            mouse_tracking: payload.mouse_tracking.min(3) as u8,
+            mouse_encoding: payload.mouse_encoding.min(2) as u8,
             },
             cells: payload
                 .cells
@@ -360,6 +453,7 @@ impl From<&Cell> for TerminalCell {
             } as i32,
             style: Some(TerminalStyle::from(cell.style)),
             hyperlink_uri: cell.hyperlink_uri().unwrap_or_default().to_owned(),
+            soft_wrap: cell.soft_wrap(),
         }
     }
 }
@@ -405,7 +499,7 @@ impl TryFrom<TerminalCell> for Cell {
                 maximum: MAX_TERMINAL_HYPERLINK_URI_BYTES,
             });
         }
-        let mut decoded = Self::with_zerowidth(character, zerowidth, width, style);
+        let mut decoded = Self::with_zerowidth(character, zerowidth, width, style).with_soft_wrap(cell.soft_wrap);
         if !cell.hyperlink_uri.is_empty() {
             decoded = decoded.with_hyperlink_uri(cell.hyperlink_uri);
         }
@@ -523,6 +617,12 @@ pub struct TerminalDeltaPayload {
     pub modify_other_keys: u32,
     #[prost(bool, tag = "12")]
     pub format_other_keys: bool,
+    #[prost(uint32, tag = "13")]
+    pub mouse_tracking: u32,
+    #[prost(uint32, tag = "14")]
+    pub mouse_encoding: u32,
+    #[prost(fixed64, tag = "15")]
+    pub screen_start_line: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -615,6 +715,9 @@ impl FrameDelta {
             kitty_keyboard_flags: u32::from(current.terminal_modes.kitty_keyboard_flags),
             modify_other_keys: u32::from(current.terminal_modes.modify_other_keys),
             format_other_keys: current.terminal_modes.format_other_keys,
+            mouse_tracking: u32::from(current.terminal_modes.mouse_tracking),
+            mouse_encoding: u32::from(current.terminal_modes.mouse_encoding),
+            screen_start_line: current.screen_start_line,
         };
         Ok(Self {
             session_id: session_id.as_uuid().as_bytes().to_vec(),
@@ -680,6 +783,7 @@ impl FrameDelta {
             snapshot.cells[start..start + cols].clone_from_slice(&decoded);
         }
         snapshot.generation = self.generation;
+        snapshot.screen_start_line = payload.screen_start_line;
         snapshot.cursor_row = payload.cursor_row as u16;
         snapshot.cursor_col = payload.cursor_col as u16;
         snapshot.cursor_appearance = payload.cursor_appearance.map_or_else(
@@ -699,6 +803,8 @@ impl FrameDelta {
                 )) as u8,
             modify_other_keys: payload.modify_other_keys.min(3) as u8,
             format_other_keys: payload.format_other_keys,
+            mouse_tracking: payload.mouse_tracking.min(3) as u8,
+            mouse_encoding: payload.mouse_encoding.min(2) as u8,
         };
         Ok(snapshot)
     }
@@ -731,26 +837,80 @@ pub struct SessionSummary {
     pub running: bool,
     #[prost(fixed64, tag = "4")]
     pub generation: u64,
+    #[prost(bytes = "vec", optional, tag = "5")]
+    pub profile_id: Option<Vec<u8>>,
+    #[prost(string, tag = "6")]
+    pub terminal_detail: String,
+    #[prost(bool, tag = "7")]
+    pub reconnecting: bool,
+    #[prost(bool, tag = "8")]
+    pub can_duplicate_ssh_channel: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SessionCreateRequest {
+    #[prost(bool,tag="6")]
+    pub connection_diagnostics:bool,
     #[prost(uint32, tag = "1")]
     pub rows: u32,
     #[prost(uint32, tag = "2")]
     pub cols: u32,
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub profile_id: Option<Vec<u8>>,
+    #[prost(message, optional, tag = "4")]
+    pub local_launch: Option<LocalLaunchOptions>,
+    /// Open a fresh PTY on this live authenticated SSH transport. Mutually
+    /// exclusive with profile_id and local_launch. Never replays authentication.
+    #[prost(bytes = "vec", optional, tag = "5")]
+    pub source_ssh_session_id: Option<Vec<u8>>,
+}
+
+/// Transient overrides for one saved Local Profile launch. Never persisted.
+#[derive(Clone, PartialEq, Message)]
+pub struct LocalLaunchOptions {
+    #[prost(string, optional, tag = "1")]
+    pub cwd_path: Option<String>,
+    #[prost(btree_map = "string, string", tag = "2")]
+    pub env_overrides: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SessionCreateResponse {
     #[prost(message, optional, tag = "1")]
     pub session: Option<SessionSummary>,
+    #[prost(string, tag = "2")]
+    pub detail: String,
+    #[prost(enumeration = "SessionFailureCode", tag = "3")]
+    pub failure_code: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum SessionFailureCode {
+    None = 0,
+    InvalidConfiguration = 1,
+    CredentialUnavailable = 2,
+    HostKeyUnknown = 3,
+    HostKeyChanged = 4,
+    HostKeyRevoked = 5,
+    HostKeyDataInvalid = 6,
+    NetworkUnavailable = 7,
+    AuthenticationRejected = 8,
+    ProtocolRejected = 9,
+    StorageUnavailable = 10,
+    Unsupported = 11,
+    ProxyRejected = 12,
+    AuthenticationCancelled = 13,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SessionCloseRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub session_id: Vec<u8>,
+    /// Explicit view close applies the policy captured when the session was created.
+    /// False remains the existing explicit process termination operation.
+    #[prost(bool, tag = "2")]
+    pub apply_view_policy: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -760,6 +920,7 @@ pub struct SessionCloseResponse {
 }
 
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct TerminalInputRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub session_id: Vec<u8>,
@@ -771,9 +932,82 @@ pub struct TerminalInputRequest {
     pub paste: Option<TerminalPaste>,
     #[prost(enumeration = "TerminalControlAction", optional, tag = "5")]
     pub control: Option<i32>,
+    #[prost(message, optional, tag = "6")]
+    pub compose: Option<TerminalCompose>,
+    /// Snapshot visible when input was queued; fences input from older shells.
+    #[prost(fixed64, optional, tag = "7")]
+    pub observed_generation: Option<u64>,
+    #[prost(message, optional, tag = "8")]
+    pub mouse: Option<TerminalMouseEvent>,
 }
 
 #[derive(Clone, PartialEq, Message)]
+pub struct TerminalMouseEvent {
+    #[prost(uint32, tag = "1")]
+    pub row: u32,
+    #[prost(uint32, tag = "2")]
+    pub column: u32,
+    #[prost(uint32, tag = "3")]
+    pub button: u32,
+    #[prost(uint32, tag = "4")]
+    pub kind: u32,
+    #[prost(uint32, tag = "5")]
+    pub modifiers: u32,
+}
+
+impl From<cshell_domain::MouseEvent> for TerminalMouseEvent {
+    fn from(event: cshell_domain::MouseEvent) -> Self {
+        use cshell_domain::{MouseButton as B, MouseEventKind as K};
+        Self { row: u32::from(event.row), column: u32::from(event.column),
+            button: match event.button { B::Left=>0,B::Middle=>1,B::Right=>2,B::None=>3,B::WheelUp=>4,B::WheelDown=>5 },
+            kind: match event.kind { K::Press=>0,K::Release=>1,K::Move=>2 },
+            modifiers: u32::from(event.modifiers.shift) | (u32::from(event.modifiers.alt)<<1) | (u32::from(event.modifiers.ctrl)<<2) | (u32::from(event.modifiers.super_key)<<3) }
+    }
+}
+impl TryFrom<&TerminalMouseEvent> for cshell_domain::MouseEvent {
+    type Error = TerminalControlCodecError;
+    fn try_from(event: &TerminalMouseEvent) -> Result<Self, Self::Error> {
+        use cshell_domain::{MouseButton as B, MouseEventKind as K};
+        let bad = || TerminalControlCodecError::InvalidKeyPayload;
+        let button = match event.button { 0=>B::Left,1=>B::Middle,2=>B::Right,3=>B::None,4=>B::WheelUp,5=>B::WheelDown,_=>return Err(bad()) };
+        let kind = match event.kind { 0=>K::Press,1=>K::Release,2=>K::Move,_=>return Err(bad()) };
+        if event.modifiers > 15 || (matches!(button,B::WheelUp|B::WheelDown) && kind != K::Press) || (button==B::None && kind!=K::Move) { return Err(bad()); }
+        Ok(Self { row:event.row.try_into().map_err(|_|bad())?,column:event.column.try_into().map_err(|_|bad())?,button,kind,
+            modifiers:cshell_domain::Modifiers { shift:event.modifiers&1!=0,alt:event.modifiers&2!=0,ctrl:event.modifiers&4!=0,super_key:event.modifiers&8!=0 } })
+    }
+}
+
+#[cfg(test)]
+mod mouse_wire_tests {
+    use super::*;
+    #[test]
+    fn mouse_input_roundtrips_and_rejects_ambiguous_or_invalid_events() {
+        let session=SessionId::new();
+        let action=InputAction::Mouse(cshell_domain::MouseEvent{row:400,column:800,button:cshell_domain::MouseButton::Left,
+            kind:cshell_domain::MouseEventKind::Press,modifiers:cshell_domain::Modifiers{ctrl:true,..Default::default()}});
+        let request=TerminalInputRequest::from_action(session,&action).unwrap();
+        let mut decoded=TerminalInputRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded.decode_action().unwrap(),action);
+        decoded.text=Some("must not coexist".into());assert_eq!(decoded.decode_action().unwrap_err(),TerminalControlCodecError::InvalidActionCount);
+        decoded.text=None;decoded.mouse.as_mut().unwrap().row=65536;assert!(decoded.decode_action().is_err());
+        decoded.mouse.as_mut().unwrap().row=1;decoded.mouse.as_mut().unwrap().modifiers=16;assert!(decoded.decode_action().is_err());
+    }
+    #[test]
+    fn mouse_modes_and_screen_identity_survive_full_and_delta_frames() {
+        use cshell_terminal::{AlacrittyTerminalEngine,TerminalEngine};
+        let id=SessionId::new();let mut engine=AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(2,8));
+        let base=engine.snapshot();
+        engine.feed(b"\x1b[?1002;1006hfirst\r\nsecond\r\nthird");
+        let next=engine.snapshot();
+        let full=FullFrame::from_terminal_snapshot(id,&next).decode_terminal_snapshot().unwrap();
+        assert_eq!(full,next);
+        let delta=FrameDelta::between_terminal_snapshots(id,&base,&next).unwrap().apply_terminal_delta(&base).unwrap();
+        assert_eq!(delta,next);
+    }
+}
+
+#[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct TerminalKeyEvent {
     #[prost(enumeration = "TerminalKeyKind", tag = "1")]
     pub kind: i32,
@@ -796,11 +1030,75 @@ pub struct TerminalKeyEvent {
 }
 
 #[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
 pub struct TerminalPaste {
     #[prost(string, tag = "1")]
     pub text: String,
     #[prost(bool, tag = "2")]
     pub bracketed: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+#[prost(skip_debug)]
+pub struct TerminalCompose {
+    #[prost(string, tag = "1")]
+    pub text: String,
+    #[prost(bool, tag = "2")]
+    pub append_enter: bool,
+}
+
+impl std::fmt::Debug for TerminalInputRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalInputRequest")
+            .field("session_id", &self.session_id)
+            .field("input", &"[REDACTED]")
+            .finish()
+    }
+}
+impl std::fmt::Debug for TerminalKeyEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalKeyEvent")
+            .field("key", &"[REDACTED]")
+            .finish()
+    }
+}
+impl std::fmt::Debug for TerminalPaste {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalPaste")
+            .field("text", &"[REDACTED]")
+            .field("bracketed", &self.bracketed)
+            .finish()
+    }
+}
+impl std::fmt::Debug for TerminalCompose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalCompose")
+            .field("text", &"[REDACTED]")
+            .field("append_enter", &self.append_enter)
+            .finish()
+    }
+}
+impl Drop for TerminalInputRequest {
+    fn drop(&mut self) {
+        if let Some(text) = &mut self.text {
+            text.zeroize();
+        }
+    }
+}
+impl Drop for TerminalKeyEvent {
+    fn drop(&mut self) {
+        self.character.zeroize();
+    }
+}
+impl Drop for TerminalPaste {
+    fn drop(&mut self) {
+        self.text.zeroize();
+    }
+}
+impl Drop for TerminalCompose {
+    fn drop(&mut self) {
+        self.text.zeroize();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -816,6 +1114,12 @@ pub enum TerminalKeyKind {
     ArrowLeft = 7,
     ArrowRight = 8,
     Function = 9,
+    Home = 10,
+    End = 11,
+    Insert = 12,
+    Delete = 13,
+    PageUp = 14,
+    PageDown = 15,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -912,10 +1216,14 @@ impl TerminalInputRequest {
             text: None,
             paste: None,
             control: None,
+            compose: None,
+            observed_generation: None,
+            mouse: None,
         };
         match action {
             InputAction::Text(text) => request.text = Some(text.clone()),
             InputAction::Key(event) => request.key = Some(TerminalKeyEvent::try_from(event)?),
+            InputAction::Mouse(event) => request.mouse = Some((*event).into()),
             InputAction::Paste { text, bracketed } => {
                 request.paste = Some(TerminalPaste {
                     text: text.clone(),
@@ -924,6 +1232,12 @@ impl TerminalInputRequest {
             }
             InputAction::Control(control) => {
                 request.control = Some(TerminalControlAction::from(*control) as i32);
+            }
+            InputAction::Compose { text, append_enter } => {
+                request.compose = Some(TerminalCompose {
+                    text: text.clone(),
+                    append_enter: *append_enter,
+                });
             }
             _ => return Err(TerminalControlCodecError::UnsupportedInputAction),
         }
@@ -937,10 +1251,12 @@ impl TerminalInputRequest {
             + usize::from(self.text.is_some())
             + usize::from(self.paste.is_some())
             + usize::from(self.control.is_some());
+        let action_count = action_count + usize::from(self.compose.is_some()) + usize::from(self.mouse.is_some());
         if action_count != 1 {
             return Err(TerminalControlCodecError::InvalidActionCount);
         }
         self.validate_input_size()?;
+        if let Some(mouse) = &self.mouse { return Ok(InputAction::Mouse(mouse.try_into()?)); }
         if let Some(key) = &self.key {
             return Ok(InputAction::Key(key.try_into()?));
         }
@@ -951,6 +1267,12 @@ impl TerminalInputRequest {
             return Ok(InputAction::Paste {
                 text: paste.text.clone(),
                 bracketed: paste.bracketed,
+            });
+        }
+        if let Some(compose) = &self.compose {
+            return Ok(InputAction::Compose {
+                text: compose.text.clone(),
+                append_enter: compose.append_enter,
             });
         }
         let control = self
@@ -969,7 +1291,12 @@ impl TerminalInputRequest {
             .as_ref()
             .map_or(0, |key| key.character.len())
             .saturating_add(self.text.as_ref().map_or(0, String::len))
-            .saturating_add(self.paste.as_ref().map_or(0, |paste| paste.text.len()));
+            .saturating_add(self.paste.as_ref().map_or(0, |paste| paste.text.len()))
+            .saturating_add(
+                self.compose
+                    .as_ref()
+                    .map_or(0, |compose| compose.text.len()),
+            );
         if actual > MAX_TERMINAL_INPUT_BYTES {
             Err(TerminalControlCodecError::TooManyInputBytes {
                 actual,
@@ -995,6 +1322,12 @@ impl TryFrom<&KeyEvent> for TerminalKeyEvent {
             KeyCode::ArrowDown => (TerminalKeyKind::ArrowDown, String::new(), 0),
             KeyCode::ArrowLeft => (TerminalKeyKind::ArrowLeft, String::new(), 0),
             KeyCode::ArrowRight => (TerminalKeyKind::ArrowRight, String::new(), 0),
+            KeyCode::Home => (TerminalKeyKind::Home, String::new(), 0),
+            KeyCode::End => (TerminalKeyKind::End, String::new(), 0),
+            KeyCode::Insert => (TerminalKeyKind::Insert, String::new(), 0),
+            KeyCode::Delete => (TerminalKeyKind::Delete, String::new(), 0),
+            KeyCode::PageUp => (TerminalKeyKind::PageUp, String::new(), 0),
+            KeyCode::PageDown => (TerminalKeyKind::PageDown, String::new(), 0),
             KeyCode::Function(number) => {
                 (TerminalKeyKind::Function, String::new(), u32::from(*number))
             }
@@ -1055,6 +1388,24 @@ impl TryFrom<&TerminalKeyEvent> for KeyEvent {
             TerminalKeyKind::ArrowRight if event.character.is_empty() && event.function == 0 => {
                 KeyCode::ArrowRight
             }
+            TerminalKeyKind::Home if event.character.is_empty() && event.function == 0 => {
+                KeyCode::Home
+            }
+            TerminalKeyKind::End if event.character.is_empty() && event.function == 0 => {
+                KeyCode::End
+            }
+            TerminalKeyKind::Insert if event.character.is_empty() && event.function == 0 => {
+                KeyCode::Insert
+            }
+            TerminalKeyKind::Delete if event.character.is_empty() && event.function == 0 => {
+                KeyCode::Delete
+            }
+            TerminalKeyKind::PageUp if event.character.is_empty() && event.function == 0 => {
+                KeyCode::PageUp
+            }
+            TerminalKeyKind::PageDown if event.character.is_empty() && event.function == 0 => {
+                KeyCode::PageDown
+            }
             _ => return Err(TerminalControlCodecError::InvalidKeyPayload),
         };
         Ok(Self {
@@ -1094,7 +1445,8 @@ impl TerminalResizeRequest {
                 cols: self.cols,
             });
         };
-        if usize::from(rows).saturating_mul(usize::from(cols)) > 1_000_000 {
+        if rows > cshell_terminal::MAX_TERMINAL_ROWS || cols > cshell_terminal::MAX_TERMINAL_COLUMNS
+            || usize::from(rows).saturating_mul(usize::from(cols)) > cshell_terminal::MAX_TERMINAL_CELLS {
             return Err(TerminalControlCodecError::InvalidSize {
                 rows: self.rows,
                 cols: self.cols,
@@ -1156,6 +1508,9 @@ impl From<TerminalControlAction> for ControlAction {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct LogPageRequest {
+    /// Read terminal RAM history without requiring disk recording.
+    #[prost(bool, tag = "6")]
+    pub terminal_history: bool,
     #[prost(bytes = "vec", tag = "1")]
     pub session_id: Vec<u8>,
     /// Missing means "follow the current tail".
@@ -1171,6 +1526,9 @@ pub struct LogPageRequest {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct LogPage {
+    /// Earliest retained line; zero in older peers means one.
+    #[prost(fixed64, tag = "8")]
+    pub first_line_id: u64,
     #[prost(bytes = "vec", tag = "1")]
     pub session_id: Vec<u8>,
     #[prost(fixed64, tag = "2")]
@@ -1197,6 +1555,8 @@ pub struct LogRow {
     pub style_spans: Vec<LogStyleSpan>,
     #[prost(bool, tag = "4")]
     pub truncated: bool,
+    #[prost(bool, tag = "5")]
+    pub soft_wrap: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1259,6 +1619,9 @@ impl LogPage {
             return Err(LogPageCodecError::InvalidSessionIdLength(
                 self.session_id.len(),
             ));
+        }
+        if self.first_line_id > 0 && self.rows.first().is_some_and(|row| row.line_id < self.first_line_id) {
+            return Err(LogPageCodecError::UnorderedRows);
         }
         if self.rows.len() > MAX_LOG_PAGE_ROWS {
             return Err(LogPageCodecError::TooManyRows(self.rows.len()));
@@ -1521,7 +1884,7 @@ pub struct Envelope {
     pub deadline_unix_ms: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1533,10 +1896,49 @@ pub mod envelope {
         SessionCreateResponse, SessionListRequest, SessionListResponse, SnapshotRequest,
         TerminalControlResponse, TerminalInputRequest, TerminalResizeRequest,
     };
+    use crate::{ProfileRequest, ProfileResponse};
     use prost::Oneof;
 
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Payload {
+        #[prost(message,tag="67")]
+        ConnectionDiagnosticUpdate(crate::ConnectionDiagnosticUpdate),
+        #[prost(message, tag = "65")]
+        ZmodemRequest(crate::ZmodemRequest),
+        #[prost(message, tag = "66")]
+        ZmodemResponse(crate::ZmodemResponse),
+        #[prost(message, tag = "63")]
+        ScriptControlRequest(crate::ScriptControlRequest),
+        #[prost(message, tag = "64")]
+        ScriptControlResponse(crate::ScriptControlResponse),
+        #[prost(message, tag = "59")]
+        TerminalPolicyRequest(crate::TerminalPolicyRequest),
+        #[prost(message, tag = "60")]
+        TerminalPolicyResponse(crate::TerminalPolicyResponse),
+        #[prost(message, tag = "61")]
+        TerminalContextLaunchRequest(crate::TerminalContextLaunchRequest),
+        #[prost(message, tag = "62")]
+        TerminalContextLaunchResponse(crate::TerminalContextLaunchResponse),
+        #[prost(message, tag = "57")]
+        ProfileBatchRequest(crate::ProfileBatchRequest),
+        #[prost(message, tag = "58")]
+        ProfileBatchResponse(crate::ProfileBatchResponse),
+        #[prost(message, tag = "55")]
+        TerminalToolsRequest(crate::TerminalToolsRequest),
+        #[prost(message, tag = "56")]
+        TerminalToolsResponse(crate::TerminalToolsResponse),
+        #[prost(message, tag = "53")]
+        SshProviderRequest(crate::SshProviderRequest),
+        #[prost(message, tag = "54")]
+        SshProviderResponse(crate::SshProviderResponse),
+        #[prost(message, tag = "51")]
+        CaRequest(crate::CaRequest),
+        #[prost(message, tag = "52")]
+        CaResponse(crate::CaResponse),
+        #[prost(message, tag = "49")]
+        TunnelRequest(crate::TunnelRequest),
+        #[prost(message, tag = "50")]
+        TunnelResponse(crate::TunnelResponse),
         #[prost(message, tag = "10")]
         Handshake(Handshake),
         #[prost(bytes, tag = "11")]
@@ -1579,6 +1981,42 @@ pub mod envelope {
         HistorySearchRequest(HistorySearchRequest),
         #[prost(message, tag = "30")]
         HistorySearchResult(HistorySearchResult),
+        #[prost(message, tag = "31")]
+        ProfileRequest(ProfileRequest),
+        #[prost(message, tag = "32")]
+        ProfileResponse(ProfileResponse),
+        #[prost(message, tag = "33")]
+        WorkspaceRequest(crate::WorkspaceRequest),
+        #[prost(message, tag = "34")]
+        WorkspaceResponse(crate::WorkspaceResponse),
+        #[prost(message, tag = "35")]
+        SftpRequest(crate::SftpRequest),
+        #[prost(message, tag = "36")]
+        SftpResponse(crate::SftpResponse),
+        #[prost(message, tag = "37")]
+        ClipboardRequest(crate::ClipboardRequest),
+        #[prost(message, tag = "38")]
+        ClipboardResponse(crate::ClipboardResponse),
+        #[prost(message, tag = "39")]
+        ClipboardPolicyRequest(crate::ClipboardPolicyRequest),
+        #[prost(message, tag = "40")]
+        ClipboardPolicyResponse(crate::ClipboardPolicyResponse),
+        #[prost(message, tag = "41")]
+        VaultRequest(crate::VaultRequest),
+        #[prost(message, tag = "42")]
+        VaultResponse(crate::VaultResponse),
+        #[prost(message, tag = "43")]
+        QuickCommandRequest(crate::QuickCommandRequest),
+        #[prost(message, tag = "44")]
+        QuickCommandResponse(crate::QuickCommandResponse),
+        #[prost(message, tag = "45")]
+        HostGroupRequest(crate::HostGroupRequest),
+        #[prost(message, tag = "46")]
+        HostGroupResponse(crate::HostGroupResponse),
+        #[prost(message, tag = "47")]
+        TaskRequest(crate::TaskRequest),
+        #[prost(message, tag = "48")]
+        TaskResponse(crate::TaskResponse),
     }
 }
 
@@ -1598,6 +2036,135 @@ mod tests {
         Cell, CellWidth, Color, CursorAppearance, CursorShape, FrameSnapshot, Style, TerminalModes,
     };
     use prost::Message;
+
+    #[test]
+    fn terminal_cell_soft_wrap_roundtrips_and_missing_field_defaults_false() {
+        let cell = cshell_terminal::Cell::default().with_soft_wrap(true);
+        let encoded = super::TerminalCell::from(&cell).encode_to_vec();
+        let wire = super::TerminalCell::decode(encoded.as_slice()).unwrap();
+        assert!(cshell_terminal::Cell::try_from(wire).unwrap().soft_wrap());
+        let legacy = super::TerminalCell {
+            soft_wrap: false, scalar: u32::from('a'), ..Default::default() };
+        assert!(!cshell_terminal::Cell::try_from(legacy).unwrap().soft_wrap());
+    }
+
+    #[test]
+    fn compose_roundtrips_and_all_input_bodies_are_redacted_in_envelopes() {
+        let marker = "PRIVATE_INPUT_BODY";
+        for action in [
+            InputAction::Text(marker.into()),
+            InputAction::Paste {
+                text: marker.into(),
+                bracketed: true,
+            },
+            InputAction::Compose {
+                text: marker.into(),
+                append_enter: true,
+            },
+            InputAction::Key(KeyEvent {
+                code: KeyCode::Character(marker.into()),
+                modifiers: Modifiers::default(),
+                pressed: true,
+                repeated: false,
+            }),
+        ] {
+            let request = TerminalInputRequest::from_action(SessionId::new(), &action).unwrap();
+            let encoded = request.encode_to_vec();
+            let decoded = TerminalInputRequest::decode(encoded.as_slice()).unwrap();
+            assert_eq!(decoded.decode_action().unwrap(), action);
+            assert!(!format!("{decoded:?}").contains(marker));
+            let envelope = Envelope {
+                request_id: 1,
+                payload: Some(envelope::Payload::TerminalInputRequest(decoded)),
+                ..Default::default()
+            };
+            assert!(!format!("{envelope:?}").contains(marker));
+        }
+        let mut request = TerminalInputRequest::from_action(
+            SessionId::new(),
+            &InputAction::Compose {
+                text: "x".into(),
+                append_enter: false,
+            },
+        )
+        .unwrap();
+        request.text = Some("mixed".into());
+        assert!(request.decode_action().is_err());
+        let large = InputAction::Compose {
+            text: "x".repeat(MAX_TERMINAL_INPUT_BYTES + 1),
+            append_enter: false,
+        };
+        assert!(TerminalInputRequest::from_action(SessionId::new(), &large).is_err());
+    }
+
+    #[test]
+    fn credential_and_handshake_debug_output_redacts_secret_bytes() {
+        let mut request = crate::ProfileRequest::default();
+        request.operation = crate::ProfileOperation::SetPassword as i32;
+        request.credential_secret = b"credential-unique-marker".to_vec();
+        request.host_key_token = b"host-token-unique-marker".to_vec();
+        let request_debug = format!("{request:?}");
+        assert!(request_debug.contains("[REDACTED]"));
+        assert!(!request_debug.contains("credential-unique-marker"));
+        assert!(!request_debug.contains("host-token-unique-marker"));
+        let envelope_debug = format!(
+            "{:?}",
+            Envelope {
+                request_id: 1,
+                deadline_unix_ms: 0,
+                payload: Some(envelope::Payload::ProfileRequest(request)),
+            }
+        );
+        assert!(!envelope_debug.contains("credential-unique-marker"));
+
+        let handshake =
+            super::Handshake::new(vec![1; 16], b"instance-token-unique-marker".to_vec());
+        let handshake_debug = format!("{handshake:?}");
+        assert!(handshake_debug.contains("[REDACTED]"));
+        assert!(!handshake_debug.contains("instance-token-unique-marker"));
+    }
+
+    #[test]
+    fn host_key_preview_debug_redacts_token_and_peer_text_through_nested_envelopes() {
+        let marker = "SECRET-PREVIEW-MARKER";
+        let preview = crate::HostKeyPreviewData {
+            token: marker.as_bytes().to_vec(),
+            host: marker.into(),
+            algorithm: marker.into(),
+            fingerprint: marker.into(),
+            public_key_line: marker.into(),
+            port: 22,
+            profile_id: vec![],
+            expires_unix_seconds: 0,
+        };
+        let response = Envelope {
+            request_id: 42,
+            payload: Some(envelope::Payload::ProfileResponse(crate::ProfileResponse {
+                detail: marker.into(),
+                export_json: marker.as_bytes().to_vec(),
+                catalog: Some(crate::ProfileCatalogData {
+                    local_connections: vec![crate::LocalConnectionData {
+                        program: marker.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                host_key_preview: Some(Box::new(preview)),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let diagnostic = format!("{response:?}");
+        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(!diagnostic.contains(marker));
+        assert!(!diagnostic.contains("83, 69, 67"));
+        let decoded = Envelope::decode(response.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded, response);
+        let Some(envelope::Payload::ProfileResponse(response)) = decoded.payload else {
+            panic!("expected Profile response");
+        };
+        assert_eq!(response.host_key_preview.unwrap().token, marker.as_bytes());
+    }
 
     #[test]
     fn terminal_control_round_trip_preserves_typed_input_and_bounded_resize() {
@@ -1638,6 +2205,7 @@ mod tests {
     fn terminal_full_frame_round_trip_preserves_cells_styles_cursor_and_modes() {
         let session_id = SessionId::new();
         let snapshot = FrameSnapshot {
+            screen_start_line: 0,
             generation: 42,
             rows: 2,
             cols: 2,
@@ -1649,6 +2217,8 @@ mod tests {
                 color: Some(Color::Rgb(10, 20, 30)),
             },
             terminal_modes: TerminalModes {
+            mouse_tracking: 0,
+            mouse_encoding: 0,
                 application_cursor: true,
                 bracketed_paste: true,
                 kitty_keyboard_flags: TerminalModes::KITTY_DISAMBIGUATE
@@ -1685,6 +2255,9 @@ mod tests {
     #[test]
     fn terminal_full_frame_defaults_cursor_appearance_when_the_field_is_absent() {
         let payload = TerminalFramePayload {
+            screen_start_line: 0,
+            mouse_tracking: 0,
+            mouse_encoding: 0,
             schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
             rows: 1,
             cols: 1,
@@ -1702,6 +2275,7 @@ mod tests {
                 zerowidth_scalars: Vec::new(),
                 width: TerminalCellWidth::Single as i32,
                 hyperlink_uri: String::new(),
+                soft_wrap: false,
             }],
         };
         let frame = FullFrame {
@@ -1719,6 +2293,9 @@ mod tests {
     #[test]
     fn malformed_terminal_full_frame_is_rejected_before_use() {
         let payload = TerminalFramePayload {
+            screen_start_line: 0,
+            mouse_tracking: 0,
+            mouse_encoding: 0,
             schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
             rows: 24,
             cols: 80,
@@ -1753,6 +2330,9 @@ mod tests {
             session_id: vec![0; 16],
             generation: 1,
             payload: TerminalFramePayload {
+            screen_start_line: 0,
+            mouse_tracking: 0,
+            mouse_encoding: 0,
                 schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
                 rows: 1,
                 cols: 1,
@@ -1769,6 +2349,7 @@ mod tests {
             .encode_to_vec(),
         };
         let excessive = frame_for(TerminalCell {
+            soft_wrap: false,
             scalar: u32::from('e'),
             style: None,
             zerowidth_scalars: vec![0x301; 65],
@@ -1784,6 +2365,7 @@ mod tests {
         ));
 
         let unknown_width = frame_for(TerminalCell {
+            soft_wrap: false,
             scalar: u32::from('A'),
             style: None,
             zerowidth_scalars: Vec::new(),
@@ -1796,6 +2378,7 @@ mod tests {
         ));
 
         let nonzero_combining = frame_for(TerminalCell {
+            soft_wrap: false,
             scalar: u32::from('A'),
             style: None,
             zerowidth_scalars: vec![u32::from('X')],
@@ -1809,6 +2392,7 @@ mod tests {
         ));
 
         let oversized_hyperlink = frame_for(TerminalCell {
+            soft_wrap: false,
             scalar: u32::from('A'),
             style: None,
             zerowidth_scalars: Vec::new(),
@@ -1827,6 +2411,9 @@ mod tests {
             session_id: vec![0; 16],
             generation: 1,
             payload: TerminalFramePayload {
+            screen_start_line: 0,
+            mouse_tracking: 0,
+            mouse_encoding: 0,
                 schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
                 rows: 1,
                 cols: 1,
@@ -1843,6 +2430,7 @@ mod tests {
                 modify_other_keys: 0,
                 format_other_keys: false,
                 cells: vec![TerminalCell {
+            soft_wrap: false,
                     scalar: u32::from('A'),
                     style: None,
                     zerowidth_scalars: Vec::new(),
@@ -1862,6 +2450,7 @@ mod tests {
     fn terminal_delta_contains_only_changed_rows_and_applies_to_its_base() {
         let session_id = SessionId::new();
         let base = FrameSnapshot {
+            screen_start_line: 0,
             generation: 7,
             rows: 3,
             cols: 4,
@@ -1906,12 +2495,13 @@ mod tests {
     #[test]
     fn bounded_log_page_round_trip_preserves_unicode_and_styles() {
         let session_id = SessionId::new();
-        let page = LogPage {
+        let page = LogPage { first_line_id: 1,
             session_id: session_id.as_uuid().as_bytes().to_vec(),
             revision: 77,
             anchor_line_id: 9,
             rows: vec![LogRow {
                 line_id: 9,
+                soft_wrap: false,
                 text: "A中e\u{301}".to_owned(),
                 style_spans: vec![LogStyleSpan {
                     start: 1,
@@ -1995,6 +2585,7 @@ mod tests {
     #[test]
     fn log_page_rejects_unbounded_requests_and_split_grapheme_styles() {
         let request = LogPageRequest {
+            terminal_history: false,
             session_id: vec![1; 16],
             anchor_line_id: None,
             cell_offset: 0,
@@ -2006,11 +2597,12 @@ mod tests {
             Err(LogPageCodecError::TooManyRows(_))
         ));
 
-        let page = LogPage {
+        let page = LogPage { first_line_id: 1,
             session_id: vec![1; 16],
             revision: 1,
             anchor_line_id: 1,
             rows: vec![LogRow {
+            soft_wrap: false,
                 line_id: 1,
                 text: "A中e\u{301}".to_owned(),
                 style_spans: vec![LogStyleSpan {

@@ -1,13 +1,15 @@
 //! Cross-platform local terminal profiles and portable-pty adapter.
 
-use cshell_domain::TerminalSize;
+use cshell_domain::{TerminalSize, reserved_local_environment_name as reserved_environment_name};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use thiserror::Error;
+
+mod discovery;
+pub use discovery::discover_shells;
 
 #[cfg(unix)]
 mod unix_guardian;
@@ -31,7 +33,7 @@ pub enum WorkingDirectoryPolicy {
     Explicit(PathBuf),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LocalProfile {
     pub name: String,
     pub program: PathBuf,
@@ -40,20 +42,22 @@ pub struct LocalProfile {
     pub env_overrides: BTreeMap<String, String>,
 }
 
+impl std::fmt::Debug for LocalProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalProfile")
+            .field("argument_count", &self.args.len())
+            .field("environment_count", &self.env_overrides.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl LocalProfile {
     #[must_use]
     pub fn platform_default() -> Self {
         #[cfg(windows)]
-        let (name, program) = find_on_path("pwsh.exe").map_or_else(
-            || {
-                (
-                    "Command Prompt".to_owned(),
-                    std::env::var_os("COMSPEC")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| PathBuf::from("cmd.exe")),
-                )
-            },
-            |path| ("PowerShell 7".to_owned(), path),
+        let (name, program) = discover_shells().into_iter().next().map_or_else(
+            || ("Command Prompt".to_owned(), PathBuf::from("cmd.exe")),
+            |profile| (profile.name, profile.program),
         );
 
         #[cfg(not(windows))]
@@ -73,28 +77,47 @@ impl LocalProfile {
             name,
             program,
             args: Vec::new(),
-            cwd_policy: WorkingDirectoryPolicy::Inherit,
+            cwd_policy: WorkingDirectoryPolicy::Home,
             env_overrides: BTreeMap::new(),
         }
     }
 }
 
-#[derive(Debug, Error)]
 pub enum LocalPtyError {
-    #[error("cannot open local PTY: {0}")]
+    InvalidProfile(&'static str),
     Open(String),
-    #[error("cannot spawn local command: {0}")]
     Spawn(String),
-    #[error("local PTY I/O failed: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("cannot resize local PTY: {0}")]
+    Io(std::io::Error),
     Resize(String),
-    #[error("local PTY output reader was already taken")]
     ReaderAlreadyTaken,
-    #[error("local PTY input is already closed")]
     InputClosed,
-    #[error("cannot supervise local process tree: {0}")]
     ProcessTree(std::io::Error),
+}
+impl std::fmt::Display for LocalPtyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidProfile(_) => "invalid local profile",
+            Self::Open(_) => "cannot open local PTY",
+            Self::Spawn(_) => "cannot spawn local command",
+            Self::Io(_) => "local PTY I/O failed",
+            Self::Resize(_) => "cannot resize local PTY",
+            Self::ReaderAlreadyTaken => "local PTY output reader was already taken",
+            Self::InputClosed => "local PTY input is already closed",
+            Self::ProcessTree(_) => "cannot supervise local process tree",
+        })
+    }
+}
+impl std::error::Error for LocalPtyError {}
+impl From<std::io::Error> for LocalPtyError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl std::fmt::Debug for LocalPtyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 pub struct PtySession {
@@ -136,6 +159,40 @@ impl PtySession {
         #[cfg(unix)] guardian_executable: Option<&std::path::Path>,
         #[cfg(windows)] _guardian_executable: Option<&std::path::Path>,
     ) -> Result<Self, LocalPtyError> {
+        if profile.program.as_os_str().is_empty()
+            || profile.program.as_os_str().to_string_lossy().contains('\0')
+            || profile.args.iter().any(|arg| arg.contains('\0'))
+            || profile.env_overrides.iter().any(|(key, value)| {
+                key.is_empty()
+                    || key.contains(['=', '\0'])
+                    || reserved_environment_name(key)
+                    || value.contains('\0')
+            })
+        {
+            return Err(LocalPtyError::InvalidProfile(
+                "program, arguments or environment are invalid",
+            ));
+        }
+        let cwd = match &profile.cwd_policy {
+            WorkingDirectoryPolicy::Inherit => std::env::current_dir()?,
+            WorkingDirectoryPolicy::Home => home_directory().ok_or(
+                LocalPtyError::InvalidProfile("home directory is unavailable"),
+            )?,
+            WorkingDirectoryPolicy::Explicit(path) => path.clone(),
+        };
+        let cwd = if cwd.is_absolute() {
+            cwd
+        } else {
+            std::env::current_dir()?.join(cwd)
+        };
+        if !cwd.is_dir() {
+            return Err(LocalPtyError::InvalidProfile(
+                "working directory does not exist",
+            ));
+        }
+        let program = resolve_program(profile, &cwd)?;
+        #[cfg(windows)]
+        let program = windows_command_path(program);
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: size.rows,
@@ -148,7 +205,7 @@ impl PtySession {
         #[cfg(unix)]
         let mut command = guardian_executable.map_or_else(
             || {
-                let mut command = CommandBuilder::new(&profile.program);
+                let mut command = CommandBuilder::new(&program);
                 command.args(&profile.args);
                 command
             },
@@ -156,23 +213,28 @@ impl PtySession {
                 let mut command = CommandBuilder::new(guardian);
                 command.arg(PTY_GUARDIAN_MODE_ARG);
                 command.arg(std::process::id().to_string());
-                command.arg(&profile.program);
+                command.arg(&program);
                 command.args(&profile.args);
                 command
             },
         );
         #[cfg(windows)]
         let mut command = {
-            let mut command = CommandBuilder::new(&profile.program);
+            let mut command = CommandBuilder::new(&program);
             command.args(&profile.args);
             command
         };
+        // CommandBuilder captures the system environment. Strip CShell's private
+        // daemon/IPC controls before applying validated child-only overrides.
+        for (key, _) in std::env::vars_os() {
+            if reserved_environment_name(&key.to_string_lossy()) {
+                command.env_remove(key);
+            }
+        }
         for (key, value) in &profile.env_overrides {
             command.env(key, value);
         }
-        if let WorkingDirectoryPolicy::Explicit(path) = &profile.cwd_policy {
-            command.cwd(path);
-        }
+        command.cwd(cwd);
 
         let mut child = pair
             .slave
@@ -265,6 +327,98 @@ impl Drop for PtySession {
     }
 }
 
+/// Legacy Windows PowerShell treats a verbatim executable path as its app base
+/// and fails during .NET initialization. Use the ordinary spelling only when
+/// canonicalization proves it resolves to the same executable. Keep long paths
+/// and names whose Win32 normalization would change their target untouched.
+#[cfg(windows)]
+fn windows_command_path(program: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(prefix)) = program.components().next() else {
+        return program;
+    };
+    let Some(text) = program.to_str() else {
+        return program;
+    };
+    let ordinary = match prefix.kind() {
+        Prefix::VerbatimDisk(_) => text.strip_prefix(r"\\?\").map(PathBuf::from),
+        Prefix::VerbatimUNC(_, _) => text
+            .strip_prefix(r"\\?\UNC\")
+            .map(|tail| PathBuf::from(format!(r"\\{tail}"))),
+        _ => None,
+    };
+    let Some(ordinary) = ordinary else {
+        return program;
+    };
+    if ordinary.as_os_str().len() >= 260 {
+        return program;
+    }
+    match (
+        std::fs::canonicalize(&program),
+        std::fs::canonicalize(&ordinary),
+    ) {
+        (Ok(original), Ok(normalized)) if original == normalized => ordinary,
+        _ => program,
+    }
+}
+
+fn resolve_program(
+    profile: &LocalProfile,
+    cwd: &std::path::Path,
+) -> Result<PathBuf, LocalPtyError> {
+    let executable = |candidate: PathBuf| -> Option<PathBuf> {
+        if discovery::executable_file(&candidate) {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        if candidate.extension().is_none() {
+            let candidate = candidate.with_extension("exe");
+            if discovery::executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    };
+    if profile.program.is_absolute() || profile.program.components().count() > 1 {
+        return executable(cwd.join(&profile.program)).ok_or(LocalPtyError::InvalidProfile(
+            "configured program is missing or not executable",
+        ));
+    }
+    let path = profile
+        .env_overrides
+        .iter()
+        .find(|(key, _)| {
+            #[cfg(windows)]
+            {
+                key.eq_ignore_ascii_case("PATH")
+            }
+            #[cfg(unix)]
+            {
+                key.as_str() == "PATH"
+            }
+        })
+        .map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"));
+    if let Some(path) = path {
+        for directory in std::env::split_paths(&path) {
+            if let Some(program) = executable(cwd.join(directory).join(&profile.program)) {
+                return Ok(program);
+            }
+        }
+    }
+    Err(LocalPtyError::InvalidProfile(
+        "configured program was not found on PATH",
+    ))
+}
+
+pub fn home_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let path = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    #[cfg(unix)]
+    let path = std::env::var_os("HOME").map(PathBuf::from);
+    path.filter(|path| path.is_absolute() && path.is_dir())
+}
+
 #[cfg(windows)]
 fn find_on_path(program: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
@@ -290,6 +444,54 @@ mod tests {
         let profile = LocalProfile::platform_default();
         assert!(!profile.name.is_empty());
         assert!(!profile.program.as_os_str().is_empty());
+        assert_eq!(profile.cwd_policy, WorkingDirectoryPolicy::Home);
+    }
+
+    #[test]
+    fn default_pty_starts_in_the_current_users_home() {
+        let home = super::home_directory().expect("test user has a home directory");
+        let mut profile = LocalProfile::platform_default();
+        #[cfg(windows)]
+        {
+            profile.program = PathBuf::from("cmd.exe");
+            profile.args = vec!["/D".into(), "/C".into(), "cd".into()];
+        }
+        #[cfg(unix)]
+        {
+            profile.program = PathBuf::from("/bin/pwd");
+            profile.args = vec!["-P".into()];
+        }
+        let size = TerminalSize::cells(24, 512);
+        let mut session = PtySession::spawn(&profile, size).unwrap();
+        let mut reader = session.take_reader().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 || sender.send(buffer[..count].to_vec()).is_err() { break; }
+            }
+        });
+        let mut terminal = AlacrittyTerminalEngine::new(size);
+        let expected = std::fs::canonicalize(home).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            for chunk in receiver.try_iter() {
+                for response in terminal.feed(&chunk).terminal_responses {
+                    session.write_all(&response).unwrap();
+                }
+            }
+            if let Some(status) = session.try_wait().unwrap() {
+                assert!(status.success(), "directory command failed: {status}");
+                let snapshot = terminal.snapshot();
+                let found = (0..snapshot.rows).any(|row| {
+                    let text: String = snapshot.row(row).unwrap().iter().flat_map(cshell_terminal::Cell::characters).collect();
+                    std::fs::canonicalize(text.trim()).ok().as_ref() == Some(&expected)
+                });
+                if found { break; }
+            }
+            assert!(std::time::Instant::now() < deadline, "cwd probe did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -394,9 +596,9 @@ mod tests {
             ],
             cwd_policy: WorkingDirectoryPolicy::Inherit,
             env_overrides: BTreeMap::from([
-                ("CSHELL_PROCESS_TREE_HELPER".to_owned(), "parent".to_owned()),
+                ("TEST_PROCESS_TREE_HELPER".to_owned(), "parent".to_owned()),
                 (
-                    "CSHELL_PROCESS_TREE_HEARTBEAT".to_owned(),
+                    "TEST_PROCESS_TREE_HEARTBEAT".to_owned(),
                     heartbeat.to_string_lossy().into_owned(),
                 ),
             ]),
@@ -454,10 +656,10 @@ mod tests {
     #[test]
     #[ignore = "invoked as a subprocess by the process-tree test"]
     fn process_tree_helper() {
-        let Some(mode) = std::env::var_os("CSHELL_PROCESS_TREE_HELPER") else {
+        let Some(mode) = std::env::var_os("TEST_PROCESS_TREE_HELPER") else {
             return;
         };
-        let heartbeat = std::env::var_os("CSHELL_PROCESS_TREE_HEARTBEAT").unwrap();
+        let heartbeat = std::env::var_os("TEST_PROCESS_TREE_HEARTBEAT").unwrap();
         if mode == "parent" {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -466,8 +668,8 @@ mod tests {
                     "tests::process_tree_helper",
                     "--nocapture",
                 ])
-                .env("CSHELL_PROCESS_TREE_HELPER", "descendant")
-                .env("CSHELL_PROCESS_TREE_HEARTBEAT", &heartbeat)
+                .env("TEST_PROCESS_TREE_HELPER", "descendant")
+                .env("TEST_PROCESS_TREE_HEARTBEAT", &heartbeat)
                 .spawn()
                 .unwrap();
             println!("CSHELL_DESCENDANT_STARTED={}", child.id());

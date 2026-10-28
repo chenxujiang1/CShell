@@ -1,0 +1,1047 @@
+//! Transactional, storage independent profile catalog use cases.
+
+use cshell_domain::{
+    FolderId, LocalConnectionRecord, LocalWorkingDirectory, ProfileFolder, ProfileId, ProfileKind,
+    ProfileRecord, ResolvedField, ResolvedTerminalSettings, SettingSource, SshAuthMethod,
+    SshConnectionRecord, TerminalDefaults, TerminalOverrides,
+};
+use std::collections::BTreeSet;
+use thiserror::Error;
+
+const MAX_NAME_BYTES: usize = 128;
+const MAX_TAG_BYTES: usize = 64;
+const MAX_TAGS: usize = 64;
+const MAX_BATCH_CHANGES: usize = 2048;
+const MAX_SEARCH_RESULTS: usize = 256;
+const MAX_SSH_HOST_BYTES: usize = 255;
+const MAX_SSH_USERNAME_BYTES: usize = 128;
+const MAX_SSH_REFERENCE_BYTES: usize = 4096;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CatalogSnapshot {
+    pub themes: Vec<cshell_domain::ThemeRecord>,
+    pub revision: u64,
+    pub defaults: TerminalDefaults,
+    pub folders: Vec<ProfileFolder>,
+    pub profiles: Vec<ProfileRecord>,
+    pub ssh_connections: Vec<SshConnectionRecord>,
+    pub local_connections: Vec<LocalConnectionRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogChange {
+    UpsertTheme(cshell_domain::ThemeRecord),
+    UpsertFolder(ProfileFolder),
+    RemoveFolder(FolderId),
+    UpsertProfile(ProfileRecord),
+    RemoveProfile(ProfileId),
+    UpsertSshConnection(SshConnectionRecord),
+    RemoveSshConnection(ProfileId),
+    UpsertLocalConnection(LocalConnectionRecord),
+    RemoveLocalConnection(ProfileId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChangeOutcome {
+    ThemeCreated,
+    ThemeUpdated,
+    FolderCreated(FolderId),
+    FolderUpdated(FolderId),
+    FolderRemoved(FolderId),
+    ProfileCreated(ProfileId),
+    ProfileUpdated(ProfileId),
+    ProfileRemoved(ProfileId),
+    SshConnectionCreated(ProfileId),
+    SshConnectionUpdated(ProfileId),
+    SshConnectionRemoved(ProfileId),
+    LocalConnectionCreated(ProfileId),
+    LocalConnectionUpdated(ProfileId),
+    LocalConnectionRemoved(ProfileId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogPreview {
+    pub base_revision: u64,
+    pub outcomes: Vec<ChangeOutcome>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileQuery {
+    pub text: String,
+    pub folder_id: Option<FolderId>,
+    pub tag: Option<String>,
+    pub kind: Option<ProfileKind>,
+    pub favorites_only: bool,
+    pub limit: usize,
+}
+
+impl Default for ProfileQuery {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            folder_id: None,
+            tag: None,
+            kind: None,
+            favorites_only: false,
+            limit: 100,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum CatalogError {
+    #[error(
+        "Theme names must be unique lowercase ASCII references, exclude builtins, and total at most 128"
+    )]
+    InvalidTheme,
+    #[error("catalog revision changed: expected {expected}, actual {actual}")]
+    StaleRevision { expected: u64, actual: u64 },
+    #[error("catalog revision is exhausted")]
+    RevisionExhausted,
+    #[error("unknown folder {0}")]
+    UnknownFolder(FolderId),
+    #[error("unknown profile {0}")]
+    UnknownProfile(ProfileId),
+    #[error("folder ancestry contains a cycle")]
+    FolderCycle,
+    #[error("name or terminal setting is empty, too long, or contains control characters")]
+    InvalidText,
+    #[error("sibling names must be unique without regard to case")]
+    DuplicateName,
+    #[error("tag is empty, too long, or contains control characters")]
+    InvalidTag,
+    #[error("too many tags")]
+    TooManyTags,
+    #[error("SSH connection target is invalid")]
+    InvalidSshTarget,
+    #[error(
+        "jump Profiles must have SSH targets, form an acyclic route, and contain at most eight jumps"
+    )]
+    InvalidJumpProfile,
+    #[error("SSH connection belongs to a non-SSH Profile {0}")]
+    InvalidSshProfile(ProfileId),
+    #[error("SSH connection target is duplicated for Profile {0}")]
+    DuplicateSshConnection(ProfileId),
+    #[error("unknown SSH connection for Profile {0}")]
+    UnknownSshConnection(ProfileId),
+    #[error("local program, arguments, working directory or environment overrides are invalid")]
+    InvalidLocalConfiguration,
+    #[error("local connection belongs to a non-local or duplicate Profile {0}")]
+    InvalidLocalProfile(ProfileId),
+    #[error("unknown local configuration for Profile {0}")]
+    UnknownLocalConnection(ProfileId),
+    #[error("batch exceeds the change limit")]
+    TooManyChanges,
+    #[error("search limit must be between 1 and 256")]
+    InvalidSearchLimit,
+}
+
+/// Persistence boundary. Implementations must commit the entire next snapshot in one
+/// transaction and compare the stored revision with expected_revision.
+#[async_trait::async_trait]
+pub trait ProfileRepository: std::fmt::Debug + Send + Sync {
+    async fn load(&self) -> Result<CatalogSnapshot, ProfileRepositoryError>;
+
+    async fn commit(
+        &self,
+        expected_revision: u64,
+        next: CatalogSnapshot,
+    ) -> Result<(), ProfileRepositoryError>;
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ProfileRepositoryError {
+    #[error("profile catalog changed concurrently")]
+    Conflict,
+    #[error("profile catalog is unavailable")]
+    Unavailable,
+    #[error("stored profile catalog failed validation")]
+    Corrupt,
+}
+
+#[derive(Debug, Error)]
+pub enum ProfileServiceError {
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+    #[error(transparent)]
+    Repository(#[from] ProfileRepositoryError),
+}
+
+#[derive(Debug)]
+pub struct ProfileService<R: ProfileRepository> {
+    repository: R,
+}
+
+impl<R: ProfileRepository> ProfileService<R> {
+    pub fn new(repository: R) -> Self {
+        Self { repository }
+    }
+
+    pub fn repository(&self) -> &R {
+        &self.repository
+    }
+
+    pub fn into_repository(self) -> R {
+        self.repository
+    }
+
+    pub async fn load(&self) -> Result<ProfileCatalog, ProfileServiceError> {
+        Ok(ProfileCatalog::from_snapshot(
+            self.repository.load().await?,
+        )?)
+    }
+
+    pub async fn preview_batch(
+        &self,
+        changes: &[CatalogChange],
+    ) -> Result<CatalogPreview, ProfileServiceError> {
+        Ok(self.load().await?.preview_batch(changes)?)
+    }
+
+    pub async fn apply_batch(
+        &self,
+        expected_revision: u64,
+        changes: &[CatalogChange],
+    ) -> Result<CatalogPreview, ProfileServiceError> {
+        let mut catalog = self.load().await?;
+        let preview = catalog.apply_batch(expected_revision, changes)?;
+        if !changes.is_empty() {
+            self.repository
+                .commit(expected_revision, catalog.snapshot())
+                .await?;
+        }
+        Ok(preview)
+    }
+
+    pub async fn search(
+        &self,
+        query: &ProfileQuery,
+    ) -> Result<Vec<ProfileRecord>, ProfileServiceError> {
+        Ok(self.load().await?.search(query)?)
+    }
+
+    pub async fn resolve(
+        &self,
+        id: ProfileId,
+    ) -> Result<ResolvedTerminalSettings, ProfileServiceError> {
+        Ok(self.load().await?.resolve(id)?)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileCatalog {
+    snapshot: CatalogSnapshot,
+}
+
+impl ProfileCatalog {
+    pub fn from_snapshot(snapshot: CatalogSnapshot) -> Result<Self, CatalogError> {
+        validate(&snapshot)?;
+        Ok(Self { snapshot })
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> CatalogSnapshot {
+        self.snapshot.clone()
+    }
+
+    pub fn preview_batch(&self, changes: &[CatalogChange]) -> Result<CatalogPreview, CatalogError> {
+        let (_, preview) = self.prepare(changes)?;
+        Ok(preview)
+    }
+
+    pub fn apply_batch(
+        &mut self,
+        expected_revision: u64,
+        changes: &[CatalogChange],
+    ) -> Result<CatalogPreview, CatalogError> {
+        if self.snapshot.revision != expected_revision {
+            return Err(CatalogError::StaleRevision {
+                expected: expected_revision,
+                actual: self.snapshot.revision,
+            });
+        }
+        let (mut next, preview) = self.prepare(changes)?;
+        if !changes.is_empty() {
+            next.revision = next
+                .revision
+                .checked_add(1)
+                .ok_or(CatalogError::RevisionExhausted)?;
+            self.snapshot = next;
+        }
+        Ok(preview)
+    }
+
+    /// Folder filtering is exact; callers can request each descendant explicitly.
+    pub fn search(&self, query: &ProfileQuery) -> Result<Vec<ProfileRecord>, CatalogError> {
+        if !(1..=MAX_SEARCH_RESULTS).contains(&query.limit) {
+            return Err(CatalogError::InvalidSearchLimit);
+        }
+        let needle = query.text.trim().to_lowercase();
+        let tag = query.tag.as_ref().map(|value| value.to_lowercase());
+        let mut matches: Vec<_> = self
+            .snapshot
+            .profiles
+            .iter()
+            .filter(|profile| {
+                query
+                    .folder_id
+                    .is_none_or(|id| profile.folder_id == Some(id))
+                    && query.kind.is_none_or(|kind| profile.kind == kind)
+                    && (!query.favorites_only || profile.favorite)
+                    && tag.as_ref().is_none_or(|value| {
+                        profile
+                            .tags
+                            .iter()
+                            .any(|candidate| candidate.to_lowercase() == *value)
+                    })
+                    && (needle.is_empty()
+                        || profile.name.to_lowercase().contains(&needle)
+                        || profile
+                            .tags
+                            .iter()
+                            .any(|candidate| candidate.to_lowercase().contains(&needle)))
+            })
+            .cloned()
+            .collect();
+        matches.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then(left.id.cmp(&right.id))
+        });
+        matches.truncate(query.limit);
+        Ok(matches)
+    }
+
+    pub(crate) fn snapshot_ref(&self) -> &CatalogSnapshot {
+        &self.snapshot
+    }
+    pub fn resolve(&self, id: ProfileId) -> Result<ResolvedTerminalSettings, CatalogError> {
+        let mut resolved = self.resolve_folder_defaults(id)?;
+        let profile = self
+            .snapshot
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or(CatalogError::UnknownProfile(id))?;
+        merge_settings(&mut resolved, &profile.terminal, SettingSource::Profile(id));
+        Ok(resolved)
+    }
+
+    pub fn resolve_folder_defaults(
+        &self,
+        id: ProfileId,
+    ) -> Result<ResolvedTerminalSettings, CatalogError> {
+        let profile = self
+            .snapshot
+            .profiles
+            .iter()
+            .find(|record| record.id == id)
+            .ok_or(CatalogError::UnknownProfile(id))?;
+        let mut resolved = ResolvedTerminalSettings {
+            terminal_type: ResolvedField {
+                value: self.snapshot.defaults.terminal_type.clone(),
+                source: SettingSource::Global,
+            },
+            theme: ResolvedField {
+                value: self.snapshot.defaults.theme.clone(),
+                source: SettingSource::Global,
+            },
+            logging: ResolvedField {
+                value: self.snapshot.defaults.logging,
+                source: SettingSource::Global,
+            },
+        };
+        let mut lineage = Vec::new();
+        let mut cursor = profile.folder_id;
+        while let Some(folder_id) = cursor {
+            let folder = self
+                .snapshot
+                .folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+                .ok_or(CatalogError::UnknownFolder(folder_id))?;
+            lineage.push(folder);
+            cursor = folder.parent_id;
+        }
+        for folder in lineage.into_iter().rev() {
+            merge_settings(
+                &mut resolved,
+                &folder.terminal,
+                SettingSource::Folder(folder.id),
+            );
+        }
+        Ok(resolved)
+    }
+
+    fn prepare(
+        &self,
+        changes: &[CatalogChange],
+    ) -> Result<(CatalogSnapshot, CatalogPreview), CatalogError> {
+        if changes.len() > MAX_BATCH_CHANGES {
+            return Err(CatalogError::TooManyChanges);
+        }
+        let mut next = self.snapshot.clone();
+        let mut outcomes = Vec::with_capacity(changes.len());
+        for change in changes {
+            let outcome = match change {
+                CatalogChange::UpsertTheme(theme) => {
+                    if let Some(existing) =
+                        next.themes.iter_mut().find(|item| item.name == theme.name)
+                    {
+                        *existing = theme.clone();
+                        ChangeOutcome::ThemeUpdated
+                    } else {
+                        next.themes.push(theme.clone());
+                        ChangeOutcome::ThemeCreated
+                    }
+                }
+                CatalogChange::UpsertFolder(folder) => {
+                    if let Some(existing) =
+                        next.folders.iter_mut().find(|item| item.id == folder.id)
+                    {
+                        *existing = folder.clone();
+                        ChangeOutcome::FolderUpdated(folder.id)
+                    } else {
+                        next.folders.push(folder.clone());
+                        ChangeOutcome::FolderCreated(folder.id)
+                    }
+                }
+                CatalogChange::RemoveFolder(id) => {
+                    let old_len = next.folders.len();
+                    next.folders.retain(|folder| folder.id != *id);
+                    if next.folders.len() == old_len {
+                        return Err(CatalogError::UnknownFolder(*id));
+                    }
+                    ChangeOutcome::FolderRemoved(*id)
+                }
+                CatalogChange::UpsertProfile(profile) => {
+                    if let Some(existing) =
+                        next.profiles.iter_mut().find(|item| item.id == profile.id)
+                    {
+                        *existing = profile.clone();
+                        ChangeOutcome::ProfileUpdated(profile.id)
+                    } else {
+                        next.profiles.push(profile.clone());
+                        ChangeOutcome::ProfileCreated(profile.id)
+                    }
+                }
+                CatalogChange::RemoveProfile(id) => {
+                    let old_len = next.profiles.len();
+                    next.profiles.retain(|profile| profile.id != *id);
+                    if next.profiles.len() == old_len {
+                        return Err(CatalogError::UnknownProfile(*id));
+                    }
+                    next.ssh_connections
+                        .retain(|connection| connection.profile_id != *id);
+                    next.local_connections
+                        .retain(|connection| connection.profile_id != *id);
+                    ChangeOutcome::ProfileRemoved(*id)
+                }
+                CatalogChange::UpsertLocalConnection(connection) => {
+                    if let Some(existing) = next
+                        .local_connections
+                        .iter_mut()
+                        .find(|item| item.profile_id == connection.profile_id)
+                    {
+                        *existing = connection.clone();
+                        ChangeOutcome::LocalConnectionUpdated(connection.profile_id)
+                    } else {
+                        next.local_connections.push(connection.clone());
+                        ChangeOutcome::LocalConnectionCreated(connection.profile_id)
+                    }
+                }
+                CatalogChange::RemoveLocalConnection(id) => {
+                    let old_len = next.local_connections.len();
+                    next.local_connections.retain(|item| item.profile_id != *id);
+                    if next.local_connections.len() == old_len {
+                        return Err(CatalogError::UnknownLocalConnection(*id));
+                    }
+                    ChangeOutcome::LocalConnectionRemoved(*id)
+                }
+                CatalogChange::UpsertSshConnection(connection) => {
+                    if let Some(existing) = next
+                        .ssh_connections
+                        .iter_mut()
+                        .find(|item| item.profile_id == connection.profile_id)
+                    {
+                        *existing = connection.clone();
+                        ChangeOutcome::SshConnectionUpdated(connection.profile_id)
+                    } else {
+                        next.ssh_connections.push(connection.clone());
+                        ChangeOutcome::SshConnectionCreated(connection.profile_id)
+                    }
+                }
+                CatalogChange::RemoveSshConnection(id) => {
+                    let old_len = next.ssh_connections.len();
+                    next.ssh_connections.retain(|item| item.profile_id != *id);
+                    if next.ssh_connections.len() == old_len {
+                        return Err(CatalogError::UnknownSshConnection(*id));
+                    }
+                    ChangeOutcome::SshConnectionRemoved(*id)
+                }
+            };
+            outcomes.push(outcome);
+        }
+        validate(&next)?;
+        Ok((
+            next,
+            CatalogPreview {
+                base_revision: self.snapshot.revision,
+                outcomes,
+            },
+        ))
+    }
+}
+
+pub(crate) fn merge_settings(
+    resolved: &mut ResolvedTerminalSettings,
+    overrides: &TerminalOverrides,
+    source: SettingSource,
+) {
+    if let Some(value) = &overrides.terminal_type {
+        resolved.terminal_type = ResolvedField {
+            value: value.clone(),
+            source,
+        };
+    }
+    if let Some(value) = &overrides.theme {
+        resolved.theme = ResolvedField {
+            value: value.clone(),
+            source,
+        };
+    }
+    if let Some(value) = overrides.logging {
+        resolved.logging = ResolvedField { value, source };
+    }
+}
+
+fn valid_text(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_NAME_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
+    crate::validate_themes(&snapshot.themes)?;
+    if !valid_text(&snapshot.defaults.terminal_type) || !valid_text(&snapshot.defaults.theme) {
+        return Err(CatalogError::InvalidText);
+    }
+    let mut folder_names = BTreeSet::new();
+    let mut folder_ids = BTreeSet::new();
+    for folder in &snapshot.folders {
+        if !valid_text(&folder.name) {
+            return Err(CatalogError::InvalidText);
+        }
+        validate_overrides(&folder.terminal)?;
+        if !folder_ids.insert(folder.id)
+            || !folder_names.insert((folder.parent_id, folder.name.to_lowercase()))
+        {
+            return Err(CatalogError::DuplicateName);
+        }
+    }
+    for folder in &snapshot.folders {
+        let mut visited = BTreeSet::from([folder.id]);
+        let mut cursor = folder.parent_id;
+        while let Some(id) = cursor {
+            if !visited.insert(id) {
+                return Err(CatalogError::FolderCycle);
+            }
+            let parent = snapshot
+                .folders
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .ok_or(CatalogError::UnknownFolder(id))?;
+            cursor = parent.parent_id;
+        }
+    }
+    let mut profile_names = BTreeSet::new();
+    let mut profile_ids = BTreeSet::new();
+    for profile in &snapshot.profiles {
+        if !valid_text(&profile.name) {
+            return Err(CatalogError::InvalidText);
+        }
+        validate_overrides(&profile.terminal)?;
+        if profile.tags.len() > MAX_TAGS {
+            return Err(CatalogError::TooManyTags);
+        }
+        if profile.tags.iter().any(|tag| {
+            tag.trim().is_empty() || tag.len() > MAX_TAG_BYTES || tag.chars().any(char::is_control)
+        }) {
+            return Err(CatalogError::InvalidTag);
+        }
+        if let Some(folder_id) = profile.folder_id
+            && !folder_ids.contains(&folder_id)
+        {
+            return Err(CatalogError::UnknownFolder(folder_id));
+        }
+        if !profile_ids.insert(profile.id)
+            || !profile_names.insert((profile.folder_id, profile.name.to_lowercase()))
+        {
+            return Err(CatalogError::DuplicateName);
+        }
+    }
+    let mut local_ids = BTreeSet::new();
+    for connection in &snapshot.local_connections {
+        if !local_ids.insert(connection.profile_id)
+            || !snapshot.profiles.iter().any(|profile| {
+                profile.id == connection.profile_id && profile.kind == ProfileKind::Local
+            })
+        {
+            return Err(CatalogError::InvalidLocalProfile(connection.profile_id));
+        }
+        validate_local_connection(connection)?;
+    }
+    let mut connection_ids = BTreeSet::new();
+    for connection in &snapshot.ssh_connections {
+        match &connection.route {
+            cshell_domain::SshRoute::Socks5 { host, port }
+            | cshell_domain::SshRoute::HttpConnect { host, port }
+                if *port == 0 || !valid_target_field(host, MAX_SSH_HOST_BYTES) =>
+            {
+                return Err(CatalogError::InvalidSshTarget);
+            }
+            cshell_domain::SshRoute::Jump { .. } => {
+                cshell_domain::ssh_jump_chain(connection, &snapshot.ssh_connections)
+                    .map_err(|_| CatalogError::InvalidJumpProfile)?;
+            }
+            _ => {}
+        }
+        if !connection_ids.insert(connection.profile_id) {
+            return Err(CatalogError::DuplicateSshConnection(connection.profile_id));
+        }
+        let profile = snapshot
+            .profiles
+            .iter()
+            .find(|profile| profile.id == connection.profile_id)
+            .ok_or(CatalogError::UnknownProfile(connection.profile_id))?;
+        if profile.kind != ProfileKind::Ssh {
+            return Err(CatalogError::InvalidSshProfile(connection.profile_id));
+        }
+        if !connection.options.is_valid()
+            || connection.port == 0
+            || !valid_target_field(&connection.host, MAX_SSH_HOST_BYTES)
+            || (!connection.username.is_empty() && !valid_target_field(&connection.username, MAX_SSH_USERNAME_BYTES))
+            || connection
+                .private_key_path
+                .as_deref()
+                .is_some_and(|value| !valid_reference(value))
+            || connection
+                .certificate_path
+                .as_deref()
+                .is_some_and(|value| !valid_reference(value))
+            || connection.agent_identity.as_deref().is_some_and(|value| {
+                !value.starts_with("SHA256:") || !valid_target_field(value, 128)
+            })
+            || (connection.uses_private_key() && connection.private_key_path.is_none())
+            || (connection.authentication_steps().contains(&cshell_domain::SshAuthStep::Certificate) && connection.certificate_path.is_none())
+            || (connection.options.authentication_order.is_empty() && match connection.auth_method {
+                SshAuthMethod::Password | SshAuthMethod::Agent => false,
+                SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
+                    connection.private_key_path.is_none()
+                }
+            })
+            || (connection.options.authentication_order.is_empty() && connection.auth_method == SshAuthMethod::Certificate
+                && connection.certificate_path.is_none())
+        {
+            return Err(CatalogError::InvalidSshTarget);
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_local_connection(connection: &LocalConnectionRecord) -> Result<(), CatalogError> {
+    let bounded = |value: &str, limit: usize| value.len() <= limit && !value.contains('\0');
+    let valid_env_name = |key: &str| {
+        let mut chars = key.chars();
+        chars
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+            && key.len() <= 128
+    };
+    let env_bytes: usize = connection
+        .env_overrides
+        .iter()
+        .map(|(key, value)| key.len() + value.len())
+        .sum();
+    if !valid_reference(&connection.program)
+        || connection.args.len() > 256
+        || connection.args.iter().any(|value| !bounded(value, 4096))
+        || connection.args.iter().map(String::len).sum::<usize>() > 64 * 1024
+        || matches!(&connection.cwd, LocalWorkingDirectory::Explicit { path } if !valid_reference(path))
+        || connection.env_overrides.len() > 128
+        || env_bytes > 64 * 1024
+        || connection.env_overrides.iter().any(|(key, value)| {
+            !valid_env_name(key)
+                || cshell_domain::reserved_local_environment_name(key)
+                || !bounded(value, 16 * 1024)
+        })
+        || connection
+            .env_overrides
+            .keys()
+            .map(|key| key.to_ascii_uppercase())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != connection.env_overrides.len()
+    {
+        return Err(CatalogError::InvalidLocalConfiguration);
+    }
+    Ok(())
+}
+
+fn valid_target_field(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SSH_REFERENCE_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn validate_overrides(overrides: &TerminalOverrides) -> Result<(), CatalogError> {
+    if overrides
+        .terminal_type
+        .as_deref()
+        .is_some_and(|value| !valid_text(value))
+        || overrides
+            .theme
+            .as_deref()
+            .is_some_and(|value| !valid_text(value))
+    {
+        return Err(CatalogError::InvalidText);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(name: &str, parent_id: Option<FolderId>) -> ProfileFolder {
+        ProfileFolder {
+            id: FolderId::new(),
+            name: name.into(),
+            parent_id,
+            terminal: TerminalOverrides::default(),
+        }
+    }
+
+    fn profile(name: &str, folder_id: Option<FolderId>) -> ProfileRecord {
+        ProfileRecord {
+            id: ProfileId::new(),
+            name: name.into(),
+            kind: ProfileKind::Ssh,
+            folder_id,
+            tags: BTreeSet::new(),
+            favorite: false,
+            terminal: TerminalOverrides::default(),
+        }
+    }
+
+    #[test]
+    fn batch_is_atomic_and_preview_does_not_commit() -> Result<(), CatalogError> {
+        let mut catalog = ProfileCatalog::from_snapshot(CatalogSnapshot::default())?;
+        let folder = folder("Production", None);
+        let record = profile("web-01", Some(folder.id));
+        let batch = vec![
+            CatalogChange::UpsertFolder(folder.clone()),
+            CatalogChange::UpsertProfile(record.clone()),
+        ];
+        let preview = catalog.preview_batch(&batch)?;
+        assert_eq!(preview.base_revision, 0);
+        assert!(catalog.snapshot().profiles.is_empty());
+        catalog.apply_batch(0, &batch)?;
+        assert_eq!(catalog.snapshot().revision, 1);
+        assert_eq!(catalog.search(&ProfileQuery::default())?, vec![record]);
+
+        let broken = vec![
+            CatalogChange::RemoveFolder(folder.id),
+            CatalogChange::UpsertProfile(profile("web-02", Some(FolderId::new()))),
+        ];
+        assert!(matches!(
+            catalog.apply_batch(1, &broken),
+            Err(CatalogError::UnknownFolder(_))
+        ));
+        assert_eq!(catalog.snapshot().revision, 1);
+        assert_eq!(catalog.snapshot().folders, vec![folder]);
+        assert!(matches!(
+            catalog.apply_batch(0, &[]),
+            Err(CatalogError::StaleRevision { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn inheritance_tracks_the_source_of_each_setting() -> Result<(), CatalogError> {
+        let mut root = folder("Root", None);
+        root.terminal.theme = Some("dark".into());
+        let mut child = folder("Child", Some(root.id));
+        child.terminal.logging = Some(true);
+        let mut record = profile("shell", Some(child.id));
+        record.terminal.terminal_type = Some("screen-256color".into());
+        let catalog = ProfileCatalog::from_snapshot(CatalogSnapshot {
+            folders: vec![root.clone(), child.clone()],
+            profiles: vec![record.clone()],
+            ..CatalogSnapshot::default()
+        })?;
+        let result = catalog.resolve(record.id)?;
+        assert_eq!(
+            result.terminal_type.source,
+            SettingSource::Profile(record.id)
+        );
+        assert_eq!(result.theme.source, SettingSource::Folder(root.id));
+        assert_eq!(result.logging.source, SettingSource::Folder(child.id));
+        assert!(result.logging.value);
+        Ok(())
+    }
+
+    #[test]
+    fn search_filters_case_insensitively_and_has_a_limit() -> Result<(), CatalogError> {
+        let mut first = profile("Prod SSH", None);
+        first.tags.insert("Critical".into());
+        first.favorite = true;
+        let second = profile("dev", None);
+        let catalog = ProfileCatalog::from_snapshot(CatalogSnapshot {
+            profiles: vec![second, first.clone()],
+            ..CatalogSnapshot::default()
+        })?;
+        let result = catalog.search(&ProfileQuery {
+            text: "CRIT".into(),
+            favorites_only: true,
+            limit: 1,
+            ..ProfileQuery::default()
+        })?;
+        assert_eq!(result, vec![first]);
+        assert_eq!(
+            catalog.search(&ProfileQuery {
+                limit: 0,
+                ..ProfileQuery::default()
+            }),
+            Err(CatalogError::InvalidSearchLimit)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_cycles_and_duplicate_siblings() {
+        let mut first = folder("Ops", None);
+        let mut second = folder("ops", Some(first.id));
+        first.parent_id = Some(second.id);
+        assert!(matches!(
+            ProfileCatalog::from_snapshot(CatalogSnapshot {
+                folders: vec![first.clone(), second.clone()],
+                ..CatalogSnapshot::default()
+            }),
+            Err(CatalogError::FolderCycle)
+        ));
+        second.parent_id = None;
+        first.parent_id = None;
+        assert!(matches!(
+            ProfileCatalog::from_snapshot(CatalogSnapshot {
+                folders: vec![first, folder("OPS", None)],
+                ..CatalogSnapshot::default()
+            }),
+            Err(CatalogError::DuplicateName)
+        ));
+    }
+    #[test]
+    fn ssh_target_validates_profile_kind_and_follows_profile_deletion() -> Result<(), CatalogError>
+    {
+        let mut catalog = ProfileCatalog::from_snapshot(CatalogSnapshot::default())?;
+        let record = profile("server", None);
+        let target = SshConnectionRecord {
+            options: Default::default(),
+            profile_id: record.id,
+            host: "server.example.com".into(),
+            port: 22,
+            username: "alice".into(),
+            auth_method: Default::default(),
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
+            route: Default::default(),
+        };
+        assert!(matches!(
+            catalog.preview_batch(&[CatalogChange::UpsertSshConnection(target.clone())]),
+            Err(CatalogError::UnknownProfile(_))
+        ));
+        let mut invalid = target.clone();
+        invalid.port = 0;
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        let mut invalid = target.clone();
+        invalid.auth_method = SshAuthMethod::PrivateKey;
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid.clone()),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        invalid.private_key_path = Some("/keys/id_ed25519".into());
+        invalid.auth_method = SshAuthMethod::Certificate;
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid.clone()),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        invalid.auth_method = SshAuthMethod::Agent;
+        invalid.agent_identity = Some("invalid fingerprint".into());
+        assert_eq!(
+            catalog.preview_batch(&[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(invalid),
+            ]),
+            Err(CatalogError::InvalidSshTarget)
+        );
+        catalog.apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertSshConnection(target.clone()),
+            ],
+        )?;
+        let mut local = record.clone();
+        local.kind = ProfileKind::Local;
+        assert_eq!(
+            catalog.preview_batch(&[CatalogChange::UpsertProfile(local)]),
+            Err(CatalogError::InvalidSshProfile(record.id))
+        );
+        catalog.apply_batch(1, &[CatalogChange::RemoveProfile(record.id)])?;
+        assert!(catalog.snapshot().ssh_connections.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn jump_routes_reject_missing_self_cycles_and_deleted_profiles_atomically()
+    -> Result<(), CatalogError> {
+        let jump = profile("jump", None);
+        let target = profile("target", None);
+        let connection = |id| SshConnectionRecord {
+            options: Default::default(),
+            profile_id: id,
+            host: "host.example.com".into(),
+            port: 22,
+            username: "alice".into(),
+            auth_method: Default::default(),
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
+            route: Default::default(),
+        };
+        let jump_target = connection(jump.id);
+        let mut target_connection = connection(target.id);
+        target_connection.route = cshell_domain::SshRoute::Jump {
+            profile_id: jump.id,
+        };
+        let mut catalog = ProfileCatalog::from_snapshot(CatalogSnapshot::default())?;
+        catalog.apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(jump.clone()),
+                CatalogChange::UpsertProfile(target.clone()),
+                CatalogChange::UpsertSshConnection(jump_target.clone()),
+                CatalogChange::UpsertSshConnection(target_connection.clone()),
+            ],
+        )?;
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::RemoveProfile(jump.id)]),
+            Err(CatalogError::InvalidJumpProfile)
+        );
+        for id in [target.id, ProfileId::new()] {
+            let mut changed = target_connection.clone();
+            changed.route = cshell_domain::SshRoute::Jump { profile_id: id };
+            assert_eq!(
+                catalog.apply_batch(1, &[CatalogChange::UpsertSshConnection(changed)]),
+                Err(CatalogError::InvalidJumpProfile)
+            );
+        }
+        let mut changed = jump_target;
+        changed.route = cshell_domain::SshRoute::Jump {
+            profile_id: target.id,
+        };
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertSshConnection(changed)]),
+            Err(CatalogError::InvalidJumpProfile)
+        );
+        assert_eq!(catalog.snapshot().revision, 1);
+        assert_eq!(catalog.snapshot().ssh_connections[1], target_connection);
+        Ok(())
+    }
+
+    #[test]
+    fn local_validation_and_kind_changes_are_atomic() -> Result<(), CatalogError> {
+        let mut record = profile("local", None);
+        record.kind = ProfileKind::Local;
+        let target = LocalConnectionRecord {
+            profile_id: record.id,
+            close_policy: cshell_domain::LocalClosePolicy::KeepAlive,
+            program: "/shell path".into(),
+            args: vec!["".into(), "literal $() quote\"".into()],
+            cwd: LocalWorkingDirectory::Home,
+            env_overrides: std::collections::BTreeMap::from([(
+                "VALUE".into(),
+                "line one\nline two".into(),
+            )]),
+        };
+        let mut catalog = ProfileCatalog::from_snapshot(CatalogSnapshot::default())?;
+        catalog.apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::UpsertLocalConnection(target.clone()),
+            ],
+        )?;
+        for (key, value) in [("BAD=NAME", "x"), ("1BAD", "x"), ("BAD", "x\0")] {
+            let mut broken = target.clone();
+            broken.env_overrides.insert(key.into(), value.into());
+            assert_eq!(
+                catalog.apply_batch(1, &[CatalogChange::UpsertLocalConnection(broken)]),
+                Err(CatalogError::InvalidLocalConfiguration)
+            );
+        }
+        let mut broken = target.clone();
+        broken
+            .env_overrides
+            .insert("value".into(), "duplicate case".into());
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertLocalConnection(broken)]),
+            Err(CatalogError::InvalidLocalConfiguration)
+        );
+        let mut broken = target.clone();
+        broken.args.push("nul\0".into());
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertLocalConnection(broken)]),
+            Err(CatalogError::InvalidLocalConfiguration)
+        );
+        record.kind = ProfileKind::Ssh;
+        assert_eq!(
+            catalog.apply_batch(1, &[CatalogChange::UpsertProfile(record.clone())]),
+            Err(CatalogError::InvalidLocalProfile(record.id))
+        );
+        assert_eq!(catalog.snapshot().revision, 1);
+        assert_eq!(catalog.snapshot().local_connections, vec![target]);
+        catalog.apply_batch(
+            1,
+            &[
+                CatalogChange::UpsertProfile(record.clone()),
+                CatalogChange::RemoveLocalConnection(record.id),
+            ],
+        )?;
+        assert!(catalog.snapshot().local_connections.is_empty());
+        Ok(())
+    }
+}

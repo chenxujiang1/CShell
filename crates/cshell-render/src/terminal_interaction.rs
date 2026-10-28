@@ -17,6 +17,7 @@ pub struct TerminalCellPoint {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalSelectionMode {
     Character,
+    Word,
     Line,
     Block,
 }
@@ -50,9 +51,17 @@ pub struct TerminalSearchResult {
 #[derive(Clone, Debug, Default)]
 pub struct TerminalDecorations {
     pub revision: u64,
+    pub highlights: Arc<[TerminalHighlight]>,
     pub selection: Option<TerminalSelection>,
     pub search: TerminalSearchResult,
     pub active_search_match: Option<usize>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalHighlight {
+    pub row: u16,
+    pub start: u16,
+    pub end: u16,
+    pub style: cshell_domain::HighlightStyle,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -65,6 +74,8 @@ pub enum TerminalInteractionError {
     EmptySearchRegexMatch,
     #[error("terminal selection contains more than {0} UTF-8 bytes")]
     SelectionTooLarge(usize),
+    #[error("选区中的历史内容尚未加载或已被回收，请重新选择")]
+    SelectionUnavailable,
 }
 
 impl TerminalSelection {
@@ -74,11 +85,8 @@ impl TerminalSelection {
             return false;
         }
         match self.mode {
-            TerminalSelectionMode::Character => {
-                let (start, end) = ordered_points(
-                    snap_wide_point(snapshot, self.anchor),
-                    snap_wide_point(snapshot, self.focus),
-                );
+            TerminalSelectionMode::Character | TerminalSelectionMode::Word => {
+                let (start, end) = self.endpoints(snapshot);
                 let point = snap_wide_point(snapshot, TerminalCellPoint { row, column });
                 point >= start && point <= end
             }
@@ -103,16 +111,20 @@ impl TerminalSelection {
             return Ok(String::new());
         }
         let mut output = String::new();
-        let first_row = self.anchor.row.min(self.focus.row).min(snapshot.rows - 1);
-        let last_row = self.anchor.row.max(self.focus.row).min(snapshot.rows - 1);
+        let (start, end) = self.endpoints(snapshot);
+        let first_row = start.row.min(snapshot.rows - 1);
+        let last_row = end.row.min(snapshot.rows - 1);
         for row in first_row..=last_row {
-            if row > first_row {
+            let continued = row > first_row && snapshot.row(row - 1)
+                .is_some_and(|cells| cells.iter().any(Cell::soft_wrap));
+            if row > first_row && (self.mode == TerminalSelectionMode::Block || !continued) {
                 push_bounded(&mut output, "\n")?;
             }
             let (first_column, last_column) = self.columns_for_row(snapshot, row);
             let Some(cells) = snapshot.row(row) else {
                 continue;
             };
+            let row_start = output.len();
             for column in first_column..=last_column {
                 let column = usize::from(column);
                 let Some(cell) = cells.get(column) else {
@@ -128,6 +140,10 @@ impl TerminalSelection {
                     push_bounded(&mut output, character.encode_utf8(&mut encoded))?;
                 }
             }
+            if self.mode != TerminalSelectionMode::Block && last_column == snapshot.cols.saturating_sub(1)
+                && !cells.iter().any(Cell::soft_wrap) {
+                while output.len() > row_start && output.ends_with(' ') { output.pop(); }
+            }
         }
         Ok(output)
     }
@@ -140,14 +156,72 @@ impl TerminalSelection {
                 self.anchor.column.min(self.focus.column).min(last),
                 self.anchor.column.max(self.focus.column).min(last),
             ),
-            TerminalSelectionMode::Character => {
-                let (start, end) = ordered_points(self.anchor, self.focus);
+            TerminalSelectionMode::Character | TerminalSelectionMode::Word => {
+                let (start, end) = self.endpoints(snapshot);
                 let first = if row == start.row { start.column } else { 0 }.min(last);
                 let last = if row == end.row { end.column } else { last }.min(last);
                 (snap_wide_start(snapshot, row, first), last)
             }
         }
     }
+
+    fn endpoints(self, snapshot: &FrameSnapshot) -> (TerminalCellPoint, TerminalCellPoint) {
+        let (mut start, mut end) = ordered_points(snap_wide_point(snapshot, self.anchor), snap_wide_point(snapshot, self.focus));
+        if self.mode == TerminalSelectionMode::Word {
+            start = word_edge(snapshot, start, false, "\"'`[]{}()<>|;,=");
+            end = word_edge(snapshot, end, true, "\"'`[]{}()<>|;,=");
+        }
+        (start, end)
+    }
+
+    /// Expand once at pointer-event time, rather than scanning words per glyph.
+    #[must_use]
+    pub fn expanded(self, snapshot: &FrameSnapshot) -> Self {
+        if self.mode != TerminalSelectionMode::Word { return self; }
+        let (anchor, focus) = self.endpoints(snapshot);
+        Self { anchor, focus, mode: TerminalSelectionMode::Character }
+    }
+    #[must_use]
+    pub fn expanded_with_delimiters(self, snapshot:&FrameSnapshot, delimiters:&str)->Self {
+        if self.mode!=TerminalSelectionMode::Word{return self;}
+        let (start,end)=ordered_points(snap_wide_point(snapshot,self.anchor),snap_wide_point(snapshot,self.focus));
+        Self { anchor:word_edge(snapshot,start,false,delimiters),focus:word_edge(snapshot,end,true,delimiters),mode:TerminalSelectionMode::Character }
+    }
+    #[must_use]
+    pub fn expanded_lines(self,snapshot:&FrameSnapshot)->Self {
+        let mut first=self.anchor.row.min(self.focus.row);let mut last=self.anchor.row.max(self.focus.row);
+        while first>0&&snapshot.row(first-1).is_some_and(|r|r.iter().any(Cell::soft_wrap)){first-=1;}
+        while last.saturating_add(1)<snapshot.rows&&snapshot.row(last).is_some_and(|r|r.iter().any(Cell::soft_wrap)){last+=1;}
+        Self {anchor:TerminalCellPoint{row:first,column:0},focus:TerminalCellPoint{row:last,column:snapshot.cols.saturating_sub(1)},mode:TerminalSelectionMode::Character}
+    }
+}
+
+fn word_edge(snapshot: &FrameSnapshot, point: TerminalCellPoint, right: bool, delimiters:&str) -> TerminalCellPoint {
+    let class = |c: char| -> u8 {
+        if c.is_whitespace() { 0 }
+        else if delimiters.contains(c) { 2 }
+        else { 1 }
+    };
+    let Some(row) = snapshot.row(point.row) else { return point; };
+    let Some(cell) = row.get(usize::from(point.column)) else { return point; };
+    let category = class(cell.character);
+    if category == 2 { return point; }
+    let mut current = point;
+    loop {
+        let next = if right {
+            if current.column + 1 < snapshot.cols { TerminalCellPoint { column: current.column + 1, ..current } }
+            else if current.row + 1 < snapshot.rows && snapshot.row(current.row).is_some_and(|r| r.iter().any(Cell::soft_wrap)) {
+                TerminalCellPoint { row: current.row + 1, column: 0 }
+            } else { break; }
+        } else if current.column > 0 { TerminalCellPoint { column: current.column - 1, ..current } }
+        else if current.row > 0 && snapshot.row(current.row - 1).is_some_and(|r| r.iter().any(Cell::soft_wrap)) {
+            TerminalCellPoint { row: current.row - 1, column: snapshot.cols.saturating_sub(1) }
+        } else { break; };
+        let Some(cell) = snapshot.row(next.row).and_then(|r| r.get(usize::from(next.column))) else { break; };
+        if !is_spacer(cell) && class(cell.character) != category { break; }
+        current = next;
+    }
+    current
 }
 
 impl TerminalSearchMatch {
@@ -177,7 +251,7 @@ pub fn search_terminal_snapshot(
         let Some(cells) = snapshot.row(row) else {
             continue;
         };
-        let (text, byte_columns) = searchable_row(cells);
+        let (text, byte_start_columns, byte_end_columns) = searchable_row(cells);
         for matched in matcher.find_iter(&text) {
             if matched.is_empty() {
                 return Err(TerminalInteractionError::EmptySearchRegexMatch);
@@ -187,10 +261,10 @@ pub fn search_terminal_snapshot(
             if options.whole_word && !is_whole_word(&text, byte_start, byte_end) {
                 continue;
             }
-            let Some(&start_column) = byte_columns.get(byte_start) else {
+            let Some(&start_column) = byte_start_columns.get(byte_start) else {
                 continue;
             };
-            let Some(&end_column) = byte_columns.get(byte_end.saturating_sub(1)) else {
+            let Some(&end_column) = byte_end_columns.get(byte_end.saturating_sub(1)) else {
                 continue;
             };
             if matches.len() == MAX_TERMINAL_SEARCH_MATCHES {
@@ -286,29 +360,27 @@ fn snap_wide_point(snapshot: &FrameSnapshot, point: TerminalCellPoint) -> Termin
     }
 }
 
-fn searchable_row(cells: &[Cell]) -> (String, Vec<u16>) {
+fn searchable_row(cells: &[Cell]) -> (String, Vec<u16>, Vec<u16>) {
     let mut text = String::new();
-    let mut byte_columns = Vec::new();
+    let mut byte_start_columns = Vec::new();
+    let mut byte_end_columns = Vec::new();
     for (column, cell) in cells.iter().enumerate() {
         if is_spacer(cell) {
             continue;
         }
         let source: String = cell.characters().collect();
+        let start_column = column.min(usize::from(u16::MAX)) as u16;
         let end_column = if cell.width == CellWidth::Wide {
             column.saturating_add(1)
         } else {
             column
         }
         .min(usize::from(u16::MAX)) as u16;
-        byte_columns.extend(std::iter::repeat_n(end_column, source.len()));
-        if let Some(first) = byte_columns.len().checked_sub(source.len())
-            && !source.is_empty()
-        {
-            byte_columns[first] = column.min(usize::from(u16::MAX)) as u16;
-        }
+        byte_start_columns.extend(std::iter::repeat_n(start_column, source.len()));
+        byte_end_columns.extend(std::iter::repeat_n(end_column, source.len()));
         text.push_str(&source);
     }
-    (text, byte_columns)
+    (text, byte_start_columns, byte_end_columns)
 }
 
 fn is_whole_word(text: &str, start: usize, end: usize) -> bool {
@@ -341,6 +413,34 @@ fn push_bounded(output: &mut String, text: &str) -> Result<(), TerminalInteracti
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_word_delimiters_and_logical_line_selection_follow_wrapping() {
+        use cshell_terminal::{AlacrittyTerminalEngine,TerminalEngine};
+        let mut engine=AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(3,8));
+        engine.feed(b"/var/log/file\r\nnext");let s=engine.snapshot();
+        let selection=super::TerminalSelection{anchor:super::TerminalCellPoint{row:0,column:2},focus:super::TerminalCellPoint{row:0,column:2},mode:super::TerminalSelectionMode::Word};
+        assert_eq!(selection.expanded_with_delimiters(&s,"/").text(&s).unwrap(),"var");
+        assert_eq!(selection.expanded_lines(&s).text(&s).unwrap(),"/var/log/file");
+    }
+    #[test]
+    fn copy_joins_soft_wrap_but_preserves_hard_break_and_block_padding() {
+        use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
+        let mut terminal = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(4, 6));
+        terminal.feed(b"abcdefgh\r\nnext");
+        let snapshot = terminal.snapshot();
+        assert!(snapshot.row(0).unwrap().iter().any(cshell_terminal::Cell::soft_wrap));
+        let selection = super::TerminalSelection {
+            anchor: super::TerminalCellPoint { row: 0, column: 0 },
+            focus: super::TerminalCellPoint { row: 2, column: 5 },
+            mode: super::TerminalSelectionMode::Character,
+        };
+        assert_eq!(selection.text(&snapshot).unwrap(), "abcdefgh\nnext");
+        let block = super::TerminalSelection { mode: super::TerminalSelectionMode::Block, ..selection };
+        assert_eq!(block.text(&snapshot).unwrap(), "abcdef\ngh    \nnext  ");
+        let word = super::TerminalSelection { anchor: super::TerminalCellPoint { row: 1, column: 1 },
+            focus: super::TerminalCellPoint { row: 1, column: 1 }, mode: super::TerminalSelectionMode::Word }.expanded(&snapshot);
+        assert_eq!(word.text(&snapshot).unwrap(), "abcdefgh");
+    }
     use super::{
         MAX_TERMINAL_SEARCH_MATCHES, MAX_TERMINAL_SEARCH_QUERY_BYTES, TerminalCellPoint,
         TerminalInteractionError, TerminalSearchOptions, TerminalSelection, TerminalSelectionMode,
@@ -354,6 +454,7 @@ mod tests {
         let cols = u16::try_from(rows.first().map_or(0, Vec::len))
             .unwrap_or_else(|error| panic!("test column count must fit u16: {error}"));
         FrameSnapshot {
+            screen_start_line: 0,
             generation: 1,
             rows: row_count,
             cols,
@@ -445,6 +546,14 @@ mod tests {
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].start.column, 1);
         assert_eq!(result.matches[0].end.column, 3);
+
+        // A match inside a wide cell must cover the visible glyph and spacer.
+        let combining =
+            search_terminal_snapshot(&frame, "\u{fe0f}", TerminalSearchOptions::default())
+                .unwrap_or_else(|error| panic!("combining search must be valid: {error}"));
+        assert_eq!(combining.matches.len(), 1);
+        assert_eq!(combining.matches[0].start.column, 1);
+        assert_eq!(combining.matches[0].end.column, 2);
     }
 
     #[test]

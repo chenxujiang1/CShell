@@ -8,6 +8,8 @@ fn main() -> ExitCode {
         "phase0-bench" => phase0_bench(),
         "pipeline-bench" => pipeline_bench(),
         "ipc-fanout-bench" => ipc_fanout_bench(),
+        "interactive-sessions" => interactive_sessions(),
+        "workbench-sessions" => workbench_sessions(),
         "atlas-pressure-bench" => atlas_pressure_bench(),
         "echo-latency-bench" => echo_latency_bench(),
         "native-ci-bench" => native_ci_bench(),
@@ -17,6 +19,7 @@ fn main() -> ExitCode {
         "visual-corpus" => visual_corpus(),
         "log-corpus" => log_corpus(),
         "log-window-e2e" => log_window_e2e(),
+        "workspace-window-e2e" => workspace_window_e2e(),
         "session-log" => session_log(),
         "help" | "--help" | "-h" => {
             print_help();
@@ -53,6 +56,7 @@ fn check() -> Result<(), String> {
         &["test", "--workspace", "--all-targets", "--all-features"],
     )?;
     run("cargo", &["test", "--workspace", "--doc", "--all-features"])?;
+    run("cargo", &["deny", "check"])?;
     Ok(())
 }
 
@@ -85,6 +89,23 @@ fn phase0_bench() -> Result<(), String> {
             "cshell-render",
             "--bench",
             "log_geometry",
+        ],
+    )
+}
+
+fn workbench_sessions() -> Result<(), String> {
+    run(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "cshell-gui",
+            "--all-features",
+            "--locked",
+            "interactive_workbench_gate::twenty_live_tabs_preserve_copy_search_split_and_reconnect_state",
+            "--",
+            "--exact",
+            "--nocapture",
         ],
     )
 }
@@ -150,6 +171,7 @@ fn echo_latency_bench() -> Result<(), String> {
 }
 
 fn native_ci_bench() -> Result<(), String> {
+    interactive_sessions()?;
     echo_latency_bench()?;
     run_with_env(
         "cargo",
@@ -171,6 +193,21 @@ fn native_ci_bench() -> Result<(), String> {
             "journal_throughput",
         ],
         &[("CSHELL_SCALE_MIB", "1024"), ("CSHELL_ENFORCE_PERF", "1")],
+    )
+}
+
+fn interactive_sessions() -> Result<(), String> {
+    run_with_env(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "cshelld",
+            "--bench",
+            "interactive_sessions",
+            "--locked",
+        ],
+        &[("CSHELL_INTERACTIVE_GATE", "1")],
     )
 }
 
@@ -244,6 +281,20 @@ fn log_window_e2e() -> Result<(), String> {
     )
 }
 
+fn workspace_window_e2e() -> Result<(), String> {
+    run(
+        "cargo",
+        &[
+            "run",
+            "--release",
+            "--package",
+            "cshell-gui",
+            "--",
+            "--workspace-window-e2e",
+        ],
+    )
+}
+
 fn session_log() -> Result<(), String> {
     run(
         "cargo",
@@ -275,6 +326,8 @@ fn print_help() {
     println!("  cargo xtask phase0-bench  run the output journal throughput probe");
     println!("  cargo xtask pipeline-bench run the 60-second full output pipeline gate");
     println!("  cargo xtask ipc-fanout-bench run the 100-client IPC resource gate");
+    println!("  cargo xtask interactive-sessions run 20 native PTYs through authenticated IPC");
+    println!("  cargo xtask workbench-sessions run the real 20-tab desktop logic gate");
     println!("  cargo xtask atlas-pressure-bench run the full dynamic glyph-atlas gate");
     println!("  cargo xtask echo-latency-bench run PTY/SSH-to-GPU percentile gates");
     println!("  cargo xtask native-ci-bench run bounded four-platform resource gates");
@@ -284,5 +337,6 @@ fn print_help() {
     println!("  cargo xtask visual-corpus launch the terminal Unicode/color visual corpus");
     println!("  cargo xtask log-corpus    launch the GPU LogSurface visual corpus");
     println!("  cargo xtask log-window-e2e run automated scroll/resize/window-present gate");
+    println!("  cargo xtask workspace-window-e2e run native two-window rendering gate");
     println!("  cargo xtask session-log   launch the live daemon-backed session log");
 }

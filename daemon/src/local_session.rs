@@ -27,7 +27,7 @@ pub struct LocalSessionExit {
     pub signal: Option<String>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum LocalSessionError {
     #[error(transparent)]
     Pty(#[from] LocalPtyError),
@@ -37,7 +37,7 @@ pub enum LocalSessionError {
     Input(#[from] InputEncodeError),
     #[error(transparent)]
     PipelineClosed(#[from] PipelineClosed),
-    #[error("local PTY output reader failed: {0}")]
+    #[error("local PTY output reader failed")]
     OutputRead(std::io::Error),
     #[error("local terminal input queue is full")]
     InputBackpressure,
@@ -48,12 +48,25 @@ pub enum LocalSessionError {
     #[error("local terminal process did not exit within {0:?}")]
     ExitTimeout(Duration),
 }
+impl std::fmt::Debug for LocalSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
 
-#[derive(Debug)]
 struct OutboundState {
     control: VecDeque<Vec<u8>>,
     user: VecDeque<Vec<u8>>,
     closed: bool,
+}
+impl std::fmt::Debug for OutboundState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundState")
+            .field("control_count", &self.control.len())
+            .field("user_count", &self.user.len())
+            .field("closed", &self.closed)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -142,7 +155,7 @@ impl OutboundQueue {
 
 /// Daemon-owned local terminal whose PTY survives independently of any GUI view.
 ///
-/// PTY output is losslessly backpressured into the journal/parser pipeline. Parser
+/// PTY output is backpressured into the parser and, when enabled, the journal. Parser
 /// control responses use a separate queue that is always drained before user input.
 #[derive(Debug)]
 pub struct LocalTerminalSession {
@@ -236,7 +249,14 @@ impl LocalTerminalSession {
         journal_path: impl AsRef<Path>,
         ingress_capacity: usize,
     ) -> Result<Self, LocalSessionError> {
-        Self::spawn_inner(profile, size, journal_path.as_ref(), ingress_capacity, None)
+        Self::spawn_inner(
+            profile,
+            size,
+            journal_path.as_ref(),
+            ingress_capacity,
+            None,
+            true,
+        )
     }
 
     #[cfg(unix)]
@@ -253,6 +273,25 @@ impl LocalTerminalSession {
             journal_path.as_ref(),
             ingress_capacity,
             Some(guardian_executable.as_ref()),
+            true,
+        )
+    }
+
+    pub(crate) fn spawn_configured(
+        profile: &LocalProfile,
+        size: TerminalSize,
+        journal_path: &Path,
+        ingress_capacity: usize,
+        guardian: Option<&Path>,
+        logging: bool,
+    ) -> Result<Self, LocalSessionError> {
+        Self::spawn_inner(
+            profile,
+            size,
+            journal_path,
+            ingress_capacity,
+            guardian,
+            logging,
         )
     }
 
@@ -263,8 +302,15 @@ impl LocalTerminalSession {
         ingress_capacity: usize,
         #[cfg(unix)] guardian_executable: Option<&Path>,
         #[cfg(windows)] _guardian_executable: Option<&Path>,
+        logging: bool,
     ) -> Result<Self, LocalSessionError> {
-        let pipeline = TerminalPipeline::spawn(journal_path, size, ingress_capacity)?;
+        let pipeline = TerminalPipeline::spawn_configured(
+            journal_path,
+            size,
+            ingress_capacity,
+            None,
+            logging,
+        )?;
         let ingress = pipeline.ingress().ok_or(LocalSessionError::Closed)?;
         let snapshots = pipeline.snapshots();
         let responses = pipeline.responses();
@@ -335,7 +381,7 @@ impl LocalTerminalSession {
                         Ok(count) => reader_ingress
                             .submit_blocking(buffer[..count].to_vec())
                             .map_err(|error| match error {
-                                SubmitError::Backpressure(_) => unreachable!("blocking submit"),
+                                SubmitError::Backpressure(_) | SubmitError::TooLarge(_) => unreachable!("blocking submit"),
                                 SubmitError::Closed(_) => LocalSessionError::Closed,
                             })?,
                         Err(error) if is_transport_eof(&error) => return Ok(()),

@@ -3,6 +3,7 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,6 +11,8 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    env:
+      CSHELL_REQUIRE_OPENSSH_EXPORT_ORACLE: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -37,6 +40,9 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      RUST_TEST_THREADS: '1'
+      CSHELL_REQUIRE_OPENSSH_EXPORT_ORACLE: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -52,13 +58,20 @@ jobs:
         run: |
           dbus-run-session -- bash -euo pipefail -c '
             printf %s cshell-ci-ephemeral | gnome-keyring-daemon --components=secrets --unlock >/dev/null
-            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshell-vault native_roundtrip --locked --target ${{ matrix.target }}
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshell-vault native_ --locked --target ${{ matrix.target }} -- --test-threads=1
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshelld --lib saved_profile_ipc_uses_keychain_and_verified_host --locked --target ${{ matrix.target }}
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshelld --lib native_system_root_vault --locked --target ${{ matrix.target }}
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshelld --test profile_control saved_key_passphrase_control_is_bound_to_profile_key_path --locked --target ${{ matrix.target }}
           '
       - name: Native Windows/macOS keychain round trip
         if: runner.os != 'Linux'
         env:
           CSHELL_KEYCHAIN_NATIVE_TEST: '1'
-        run: cargo test -p cshell-vault native_roundtrip --locked --target ${{ matrix.target }}
+        run: |
+          cargo test -p cshell-vault native_ --locked --target ${{ matrix.target }} -- --test-threads=1
+          cargo test -p cshelld --lib saved_profile_ipc_uses_keychain_and_verified_host --locked --target ${{ matrix.target }}
+          cargo test -p cshelld --lib native_system_root_vault --locked --target ${{ matrix.target }}
+          cargo test -p cshelld --test profile_control saved_key_passphrase_control_is_bound_to_profile_key_path --locked --target ${{ matrix.target }}
 
   native-resource-gates:
     strategy:
@@ -109,6 +122,12 @@ jobs:
       - name: Run Windows/macOS window recovery
         if: runner.os != 'Linux'
         run: bash .github/scripts/run-with-diagnostics.sh cargo xtask log-window-e2e
+      - name: Run Linux multi-window rendering with a CPU adapter
+        if: runner.os == 'Linux'
+        run: xvfb-run -a bash .github/scripts/run-with-diagnostics.sh cargo xtask workspace-window-e2e
+      - name: Run Windows/macOS multi-window rendering
+        if: runner.os != 'Linux'
+        run: bash .github/scripts/run-with-diagnostics.sh cargo xtask workspace-window-e2e
 
   msrv:
     runs-on: ubuntu-latest
@@ -172,3 +191,99 @@ jobs:
           "CSHELL_PAGEANT_EXE=$(Join-Path $puttyRoot 'pageant.exe')" >> $env:GITHUB_ENV
       - shell: pwsh
         run: .github/scripts/pageant-interop.ps1
+
+  trial-package:
+    needs:
+      - quality
+      - platform-test
+      - native-resource-gates
+      - window-recovery-gates
+      - windows-openssh-interop
+      - openssh-interop
+      - openssh-historical-interop
+      - dropbear-interop
+      - pageant-interop
+      - msrv
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+            architecture: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x64
+            architecture: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build portable trial binaries with a static C runtime
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p cshell-gui -p cshelld -p cshell-script-worker
+      - name: Build native macOS trial binaries
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cshell-gui -p cshelld -p cshell-script-worker
+      - name: Package Windows desktop and companion daemon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/package-trial-windows.ps1 -BinaryDirectory target/x86_64-pc-windows-msvc/release
+      - name: Verify and smoke-test the extracted Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Get-Item -LiteralPath artifacts/ui-refresh-20261015/bin/CShell-trial-windows-x64.zip
+          $destination = Join-Path $env:RUNNER_TEMP 'cshell-trial-package-check'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
+          foreach ($file in @('CShell.exe', 'cshelld.exe', 'cshell-script-worker.exe', 'README-first-run.txt')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $destination $file) -PathType Leaf)) {
+              throw "Missing file in extracted trial archive: $file"
+            }
+          }
+          $env:CSHELL_DATA_DIR = Join-Path $env:RUNNER_TEMP 'cshell-trial-smoke-data'
+          $env:CSHELL_PROFILE_DB = Join-Path $env:CSHELL_DATA_DIR 'profiles.sqlite'
+          $env:CSHELL_RUNTIME_DIR = Join-Path $env:RUNNER_TEMP 'cshell-trial-smoke-runtime'
+          New-Item -ItemType Directory -Force -Path $env:CSHELL_DATA_DIR | Out-Null
+          $process = Start-Process -FilePath (Join-Path $destination 'CShell.exe') -ArgumentList '--log-window-e2e' -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Packaged GUI smoke test failed: $($process.ExitCode)" }
+      - name: Package macOS application and companion daemon
+        if: runner.os == 'macOS'
+        run: bash .github/scripts/package-trial-macos.sh target/${{ matrix.target }}/release ${{ matrix.architecture }}
+      - name: Verify and smoke-test the extracted macOS bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          destination="$RUNNER_TEMP/cshell-trial-package-check"
+          mkdir -p "$destination"
+          ditto -x -k "artifacts/ui-refresh-20261015/bin/CShell-trial-${{ matrix.platform }}.zip" "$destination"
+          app="$destination/CShell.app"
+          test -s "$destination/README-first-run.txt"
+          test -x "$app/Contents/MacOS/CShell"
+          test -x "$app/Contents/MacOS/cshelld"
+          test -x "$app/Contents/MacOS/cshell-script-worker"
+          test -s "$app/Contents/Resources/README-first-run.txt"
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          export CSHELL_DATA_DIR="$RUNNER_TEMP/cshell-trial-smoke-data"
+          export CSHELL_PROFILE_DB="$CSHELL_DATA_DIR/profiles.sqlite"
+          export CSHELL_RUNTIME_DIR="$RUNNER_TEMP/cshell-trial-smoke-runtime"
+          mkdir -p "$CSHELL_DATA_DIR"
+          "$app/Contents/MacOS/CShell" --log-window-e2e
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cshell-trial-${{ matrix.platform }}
+          path: |
+            artifacts/ui-refresh-20261015/bin/CShell-trial-${{ matrix.platform }}.zip
+            artifacts/ui-refresh-20261015/bin/CShell-trial-${{ matrix.platform }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

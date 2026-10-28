@@ -83,6 +83,7 @@ mod tests {
         let mut cells = vec![Cell::default(); 4];
         cells[0].character = character;
         FrameSnapshot {
+            screen_start_line: 0,
             generation,
             rows: 2,
             cols: 2,

@@ -1,7 +1,11 @@
 //! Renderer-side viewport planning. Network, storage and parsing are intentionally absent.
 
+mod highlight_worker;
 mod log_surface;
 mod terminal_interaction;
+pub use highlight_worker::HighlightWorker;
+pub use log_surface::LogHighlight;
+pub use terminal_interaction::TerminalHighlight;
 mod window;
 
 use cshell_terminal::FrameSnapshot;
@@ -24,8 +28,9 @@ pub use terminal_interaction::{
 };
 pub use window::{
     AtlasPressureBenchmarkReport, EguiFrame, HeadlessRenderReport, HeadlessTerminalRenderer,
-    LogGeometryBenchmarkReport, RenderOutcome, TerminalGeometryBenchmarkReport, TerminalViewport,
-    WindowRenderer, WindowRendererError, benchmark_atlas_pressure, benchmark_log_geometry,
+    LogGeometryBenchmarkReport, PaneContent, PaneFrame, RenderOutcome,
+    TerminalGeometryBenchmarkReport, TerminalTheme, TerminalViewport, WindowRenderer,
+    WindowRendererError, benchmark_atlas_pressure, benchmark_log_geometry,
     benchmark_terminal_geometry,
 };
 
@@ -262,6 +267,7 @@ mod tests {
     #[test]
     fn only_visible_rows_and_overscan_are_planned() {
         let snapshot = FrameSnapshot {
+            screen_start_line: 0,
             generation: 9,
             rows: 100,
             cols: 80,
@@ -280,6 +286,7 @@ mod tests {
     fn terminal_surface_accepts_latest_arc_and_rejects_stale_generations() {
         let snapshot = |generation| {
             Arc::new(FrameSnapshot {
+            screen_start_line: 0,
                 generation,
                 rows: 24,
                 cols: 80,
@@ -352,6 +359,7 @@ mod tests {
             *cell = Cell::new(character, CellWidth::Single, Default::default());
         }
         let snapshot = Arc::new(FrameSnapshot {
+            screen_start_line: 0,
             generation: 1,
             rows: 24,
             cols: 80,

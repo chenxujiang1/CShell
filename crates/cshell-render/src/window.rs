@@ -18,12 +18,12 @@ use winit::window::Window;
 
 const ATLAS_WIDTH: u32 = 2048;
 const ATLAS_HEIGHT: u32 = 2048;
-const GLYPH_TILE: u32 = 32;
+const GLYPH_TILE: u32 = 64;
 const GLYPH_PADDING: u32 = 2;
 const ATLAS_BYTES_PER_PIXEL: u32 = 4;
 const FIRST_GLYPH: u32 = 32;
 const LAST_GLYPH: u32 = 126;
-const FONT_SIZE: f32 = 16.0;
+const FONT_SIZE: f32 = cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS as f32;
 const CELL_PADDING_X: f32 = 1.0;
 const STATIC_GLYPH_COUNT: u32 = LAST_GLYPH - FIRST_GLYPH + 1;
 const STATIC_ATLAS_HEIGHT: u32 = STATIC_GLYPH_COUNT
@@ -80,6 +80,7 @@ struct ShapedGlyph {
 }
 
 struct GlyphAtlas {
+    font_size: f32,
     pixels: Vec<u8>,
     glyphs: Vec<GlyphInfo>,
     cell_width: f32,
@@ -90,6 +91,7 @@ struct GlyphAtlas {
     shaped_cells: HashMap<ShapeKey, Vec<ShapedGlyph>>,
     dynamic_allocator: AtlasAllocator,
     pinned_glyphs: HashSet<cosmic_text::CacheKey>,
+    preserve_frame_pins: bool,
     use_clock: u64,
     evictions: u64,
     revision: u64,
@@ -106,9 +108,14 @@ struct ShapeKey {
 
 impl GlyphAtlas {
     fn build() -> Result<Self, WindowRendererError> {
+        Self::build_at_size(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS)
+    }
+
+    fn build_at_size(pixels: u16) -> Result<Self, WindowRendererError> {
+        let font_size = f32::from(pixels.clamp(cshell_domain::MIN_TERMINAL_FONT_PIXELS, cshell_domain::MAX_TERMINAL_FONT_PIXELS));
         let font = FontArc::try_from_slice(epaint_default_fonts::HACK_REGULAR)
             .map_err(|_| WindowRendererError::BundledFont)?;
-        let scale = PxScale::from(FONT_SIZE);
+        let scale = PxScale::from(font_size);
         let scaled = font.as_scaled(scale);
         let ascent = scaled.ascent();
         let cell_width = scaled.h_advance(scaled.glyph_id('M')).ceil() + CELL_PADDING_X * 2.0;
@@ -155,6 +162,7 @@ impl GlyphAtlas {
         }
 
         Ok(Self {
+            font_size,
             pixels,
             glyphs,
             cell_width,
@@ -174,6 +182,7 @@ impl GlyphAtlas {
                 (ATLAS_HEIGHT - STATIC_ATLAS_HEIGHT) as i32,
             )),
             pinned_glyphs: HashSet::new(),
+            preserve_frame_pins: false,
             use_clock: 0,
             evictions: 0,
             revision: 0,
@@ -192,7 +201,9 @@ impl GlyphAtlas {
     }
 
     fn begin_frame(&mut self) {
-        self.pinned_glyphs.clear();
+        if !self.preserve_frame_pins {
+            self.pinned_glyphs.clear();
+        }
     }
 
     fn shape_cell(&mut self, cell: &cshell_terminal::Cell) -> Vec<GlyphInfo> {
@@ -238,7 +249,7 @@ impl GlyphAtlas {
             }
             let mut buffer = Buffer::new(
                 &mut self.font_system,
-                Metrics::new(FONT_SIZE, self.cell_height),
+                Metrics::new(self.font_size, self.cell_height),
             );
             let cell_span = self.cell_width * f32::from(key.columns);
             buffer.set_wrap(Wrap::None);
@@ -783,10 +794,84 @@ pub struct EguiFrame<'a> {
     pub pixels_per_point: f32,
 }
 
+#[derive(Debug)]
+pub struct PaneFrame<'a> {
+    pub viewport: TerminalViewport,
+    pub theme: TerminalTheme,
+    pub content: PaneContent<'a>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TerminalTheme {
+    Custom(cshell_domain::TerminalPalette),
+    #[default]
+    Dark,
+    Light,
+}
+
+impl TerminalTheme {
+    #[must_use]
+    pub fn from_profile_name(name: &str) -> Self {
+        if name.eq_ignore_ascii_case("light") {
+            Self::Light
+        } else {
+            Self::Dark
+        }
+    }
+
+    #[must_use]
+    pub fn from_catalog_name(name: &str, themes: &[cshell_domain::ThemeRecord]) -> Self {
+        themes.iter().find(|theme| theme.name == name).map_or_else(
+            || Self::from_profile_name(name),
+            |theme| Self::Custom(theme.palette),
+        )
+    }
+
+    fn cursor_color(self, fallback: [f32; 4]) -> [f32; 4] {
+        match self {
+            Self::Custom(palette) => linear_rgb(palette.cursor),
+            _ => fallback,
+        }
+    }
+
+    fn selection_color(self) -> [f32; 4] {
+        match self {
+            Self::Custom(palette) => {
+                let mut color = linear_rgb(palette.selection);
+                color[3] = 0.5;
+                color
+            }
+            _ => [0.20, 0.45, 0.90, 0.50],
+        }
+    }
+
+    fn background(self) -> [f32; 4] {
+        match self {
+            Self::Custom(palette) => linear_rgb(palette.background),
+            Self::Dark => linear_rgb([15, 20, 29]),
+            Self::Light => [0.94, 0.95, 0.97, 1.0],
+        }
+    }
+}
+#[derive(Debug)]
+pub enum PaneContent<'a> {
+    Terminal {
+        frame: Option<&'a TerminalSurfaceFrame>,
+        decorations: &'a TerminalDecorations,
+        cursor_visible: bool,
+    },
+    Log {
+        frame: Option<&'a LogSurfaceFrame>,
+        decorations: &'a LogDecorations,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GeometryKey {
+    Panes,
     Terminal {
         generation: u64,
+        theme: TerminalTheme,
         decorations_revision: u64,
         cursor_visible: bool,
         surface_width: u32,
@@ -797,6 +882,7 @@ enum GeometryKey {
     },
     Log {
         source_id: u64,
+        theme: TerminalTheme,
         revision: u64,
         decorations_revision: u64,
         surface_width: u32,
@@ -811,6 +897,7 @@ enum GeometryKey {
 }
 
 enum GeometryFrame<'a> {
+    Panes(&'a [PaneFrame<'a>]),
     Terminal {
         frame: Option<&'a TerminalSurfaceFrame>,
         decorations: &'a TerminalDecorations,
@@ -1222,8 +1309,11 @@ pub struct WindowRenderer {
     vertex_capacity: usize,
     vertex_count: u32,
     geometry_key: Option<GeometryKey>,
+    geometry_snapshot: Option<Arc<FrameSnapshot>>,
+    draw_batches: Vec<(TerminalViewport, std::ops::Range<u32>)>,
     device_lost: Arc<AtomicBool>,
     cpu_adapter: bool,
+    theme: TerminalTheme,
 }
 
 impl std::fmt::Debug for WindowRenderer {
@@ -1240,6 +1330,28 @@ impl std::fmt::Debug for WindowRenderer {
 }
 
 impl WindowRenderer {
+    /// Re-rasterize the same terminal contents immediately at the requested size.
+    pub fn set_font_size(&mut self, pixels: u16) -> Result<bool, WindowRendererError> {
+        let pixels = pixels.clamp(cshell_domain::MIN_TERMINAL_FONT_PIXELS, cshell_domain::MAX_TERMINAL_FONT_PIXELS);
+        if self.atlas.font_size == f32::from(pixels) { return Ok(false); }
+        let atlas = GlyphAtlas::build_at_size(pixels)?;
+        self.queue.write_texture(
+            self.atlas_texture.as_image_copy(), &atlas.pixels,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(ATLAS_WIDTH * ATLAS_BYTES_PER_PIXEL), rows_per_image: Some(ATLAS_HEIGHT) },
+            wgpu::Extent3d { width: ATLAS_WIDTH, height: ATLAS_HEIGHT, depth_or_array_layers: 1 },
+        );
+        self.atlas = atlas;
+        self.uploaded_atlas_revision = 0;
+        self.geometry_key = None;
+        self.geometry_snapshot = None;
+        self.draw_batches.clear();
+        self.vertex_count = 0;
+        Ok(true)
+    }
+
+    #[must_use]
+    pub fn font_size(&self) -> u16 { self.atlas.font_size as u16 }
+
     pub async fn new(window: Arc<Window>) -> Result<Self, WindowRendererError> {
         Self::new_with_adapter_preference(window, false).await
     }
@@ -1452,9 +1564,19 @@ impl WindowRenderer {
             vertex_capacity,
             vertex_count: 0,
             geometry_key: None,
+            geometry_snapshot: None,
+            draw_batches: Vec::new(),
             device_lost,
             cpu_adapter,
+            theme: TerminalTheme::Dark,
         })
+    }
+
+    pub fn set_theme(&mut self, theme: TerminalTheme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.geometry_key = None;
+        }
     }
 
     #[must_use]
@@ -1472,6 +1594,9 @@ impl WindowRenderer {
     pub fn simulate_device_loss(&self) {
         self.device_lost.store(true, Ordering::Release);
     }
+
+    #[must_use]
+    pub fn terminal_cell_size(&self) -> [f32;2] { [self.atlas.cell_width,self.atlas.cell_height] }
 
     #[must_use]
     pub fn viewport_rows(&self, viewport: TerminalViewport) -> u16 {
@@ -1530,6 +1655,23 @@ impl WindowRenderer {
         )
     }
 
+    pub fn render_panes(
+        &mut self,
+        frames: &[PaneFrame<'_>],
+        egui_frame: Option<EguiFrame<'_>>,
+    ) -> Result<RenderOutcome, WindowRendererError> {
+        self.render_inner(
+            GeometryFrame::Panes(frames),
+            TerminalViewport {
+                x: 0,
+                y: 0,
+                width: self.config.width,
+                height: self.config.height,
+            },
+            egui_frame,
+        )
+    }
+
     fn render_inner(
         &mut self,
         frame: GeometryFrame<'_>,
@@ -1557,7 +1699,19 @@ impl WindowRenderer {
             textures_to_free.extend(egui_frame.textures_delta.free.drain());
         }
         let viewport = viewport.clamp(self.config.width, self.config.height);
+        let multiple = matches!(&frame, GeometryFrame::Panes(_));
         match frame {
+            GeometryFrame::Panes(frames) => {
+                let (vertices, batches) = build_pane_geometry(
+                    frames,
+                    &mut self.atlas,
+                    self.config.width,
+                    self.config.height,
+                );
+                self.upload_geometry(vertices, GeometryKey::Panes);
+                self.geometry_snapshot = None;
+                self.draw_batches = batches;
+            }
             GeometryFrame::Terminal {
                 frame: Some(frame),
                 decorations,
@@ -1571,6 +1725,13 @@ impl WindowRenderer {
             | GeometryFrame::Log { frame: None, .. } => {
                 self.vertex_count = 0;
                 self.geometry_key = None;
+                self.geometry_snapshot = None;
+            }
+        }
+        if !multiple {
+            self.draw_batches.clear();
+            if self.vertex_count > 0 && !viewport.is_empty() {
+                self.draw_batches.push((viewport, 0..self.vertex_count));
             }
         }
         let (output, reconfigure_after_present) = match self.surface.get_current_texture() {
@@ -1628,11 +1789,14 @@ impl WindowRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.012,
-                            g: 0.016,
-                            b: 0.024,
-                            a: 1.0,
+                        load: wgpu::LoadOp::Clear({
+                            let color = self.theme.background();
+                            wgpu::Color {
+                                r: f64::from(color[0]),
+                                g: f64::from(color[1]),
+                                b: f64::from(color[2]),
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1642,12 +1806,14 @@ impl WindowRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if self.vertex_count > 0 && !viewport.is_empty() {
-                pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+            if self.vertex_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.atlas_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..self.vertex_count, 0..1);
+                for (viewport, range) in &self.draw_batches {
+                    pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+                    pass.draw(range.clone(), 0..1);
+                }
             }
             if let (Some(egui_frame), Some(screen_descriptor)) = (&egui_frame, &screen_descriptor) {
                 self.egui_renderer.render(
@@ -1684,6 +1850,7 @@ impl WindowRenderer {
     ) {
         let key = GeometryKey::Terminal {
             generation: frame.snapshot.generation,
+            theme: self.theme,
             decorations_revision: decorations.revision,
             cursor_visible,
             surface_width: self.config.width,
@@ -1692,10 +1859,17 @@ impl WindowRenderer {
             first_row: frame.plan.visible_rows.start,
             last_row: frame.plan.visible_rows.end,
         };
-        if self.geometry_key == Some(key) {
+        // Generations are local to each session. Retain the Arc so identity
+        // cannot be recycled while its geometry is cached.
+        if self.geometry_key == Some(key)
+            && self
+                .geometry_snapshot
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &frame.snapshot))
+        {
             return;
         }
-        let vertices = build_vertices(
+        let vertices = build_vertices_themed(
             &frame.snapshot,
             &mut self.atlas,
             self.config.width,
@@ -1704,8 +1878,10 @@ impl WindowRenderer {
             frame.plan.visible_rows.clone(),
             decorations,
             cursor_visible,
+            self.theme,
         );
         self.upload_geometry(vertices, key);
+        self.geometry_snapshot = Some(Arc::clone(&frame.snapshot));
     }
 
     fn update_log_geometry(
@@ -1716,6 +1892,7 @@ impl WindowRenderer {
     ) {
         let key = GeometryKey::Log {
             source_id: frame.page.source_id.0,
+            theme: self.theme,
             revision: frame.page.revision,
             decorations_revision: decorations.revision,
             surface_width: self.config.width,
@@ -1730,15 +1907,17 @@ impl WindowRenderer {
         if self.geometry_key == Some(key) {
             return;
         }
-        let vertices = build_log_vertices(
+        let vertices = build_log_vertices_themed(
             frame,
             &mut self.atlas,
             self.config.width,
             self.config.height,
             viewport,
             decorations,
+            self.theme,
         );
         self.upload_geometry(vertices, key);
+        self.geometry_snapshot = None;
     }
 
     fn upload_geometry(&mut self, vertices: Vec<Vertex>, key: GeometryKey) {
@@ -1788,6 +1967,72 @@ impl WindowRenderer {
     }
 }
 
+type PaneGeometry = (Vec<Vertex>, Vec<(TerminalViewport, std::ops::Range<u32>)>);
+fn build_pane_geometry(
+    frames: &[PaneFrame<'_>],
+    atlas: &mut GlyphAtlas,
+    width: u32,
+    height: u32,
+) -> PaneGeometry {
+    atlas.begin_frame();
+    atlas.preserve_frame_pins = true;
+    let mut vertices = Vec::new();
+    let mut batches = Vec::new();
+    for pane in frames {
+        let viewport = pane.viewport.clamp(width, height);
+        if viewport.is_empty() {
+            continue;
+        }
+        let start = vertices.len() as u32;
+        push_quad(
+            &mut vertices,
+            [viewport.x as f32, viewport.y as f32],
+            [viewport.width as f32, viewport.height as f32],
+            white_uv(),
+            pane.theme.background(),
+            false,
+            [width, height],
+        );
+        let next = match &pane.content {
+            PaneContent::Terminal {
+                frame: Some(frame),
+                decorations,
+                cursor_visible,
+            } => build_vertices_themed(
+                &frame.snapshot,
+                atlas,
+                width,
+                height,
+                viewport,
+                frame.plan.visible_rows.clone(),
+                decorations,
+                *cursor_visible,
+                pane.theme,
+            ),
+            PaneContent::Log {
+                frame: Some(frame),
+                decorations,
+            } => build_log_vertices_themed(
+                frame,
+                atlas,
+                width,
+                height,
+                viewport,
+                decorations,
+                pane.theme,
+            ),
+            _ => Vec::new(),
+        };
+        vertices.extend(next);
+        let end = vertices.len() as u32;
+        if end > start {
+            batches.push((viewport, start..end));
+        }
+    }
+    atlas.preserve_frame_pins = false;
+    (vertices, batches)
+}
+
 // Keeping the complete render context explicit here makes the allocation-free hot path easier to
 // audit at each call site than hiding these values behind mutable renderer state.
 #[allow(clippy::too_many_arguments)]
@@ -1801,11 +2046,53 @@ fn build_vertices(
     decorations: &TerminalDecorations,
     cursor_visible: bool,
 ) -> Vec<Vertex> {
+    build_vertices_themed(
+        snapshot,
+        atlas,
+        width,
+        height,
+        viewport,
+        rows,
+        decorations,
+        cursor_visible,
+        TerminalTheme::Dark,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_vertices_themed(
+    snapshot: &FrameSnapshot,
+    atlas: &mut GlyphAtlas,
+    width: u32,
+    height: u32,
+    viewport: TerminalViewport,
+    rows: std::ops::Range<u16>,
+    decorations: &TerminalDecorations,
+    cursor_visible: bool,
+    theme: TerminalTheme,
+) -> Vec<Vertex> {
     atlas.begin_frame();
     let first_row = rows.start;
     let row_count = usize::from(rows.end.saturating_sub(rows.start));
     let column_count = usize::from(snapshot.cols);
     let mut search_layers = vec![0_u8; row_count.saturating_mul(column_count)];
+    let mut highlight_layers: Vec<Option<cshell_domain::HighlightStyle>> =
+        vec![None; row_count.saturating_mul(column_count)];
+    for span in decorations.highlights.iter() {
+        if span.row < rows.start || span.row >= rows.end {
+            continue;
+        }
+        let row = usize::from(span.row - rows.start) * column_count;
+        for column in span.start.min(snapshot.cols)..span.end.min(snapshot.cols) {
+            let index = row + usize::from(column);
+            let previous = highlight_layers[index].unwrap_or_default();
+            highlight_layers[index] = Some(cshell_domain::HighlightStyle {
+                foreground: span.style.foreground.or(previous.foreground),
+                background: span.style.background.or(previous.background),
+                underline: span.style.underline || previous.underline,
+            });
+        }
+    }
     for (match_index, search_match) in decorations.search.matches.iter().enumerate() {
         if search_match.start.row < rows.start || search_match.start.row >= rows.end {
             continue;
@@ -1848,21 +2135,41 @@ fn build_vertices(
             let cursor_shape =
                 (cursor_visible && is_cursor_cell).then_some(snapshot.cursor_appearance.shape);
             let (mut foreground, mut background) = (
-                resolve_color(cell.style.foreground, true),
-                resolve_color(cell.style.background, false),
+                resolve_color_themed(cell.style.foreground, true, theme),
+                resolve_color_themed(cell.style.background, false, theme),
             );
             if cell.style.inverse {
+                if background[3] == 0.0 && matches!(theme, TerminalTheme::Custom(_)) {
+                    background = theme.background();
+                }
                 std::mem::swap(&mut foreground, &mut background);
+            }
+            let mut highlight_underline = false;
+            if let Some(style) =
+                highlight_layers[usize::from(row - first_row) * column_count + column]
+            {
+                if let Some(color) = style.foreground {
+                    foreground = linear_rgb(color);
+                }
+                if let Some(color) = style.background {
+                    background = linear_rgb(color);
+                }
+                highlight_underline = style.underline;
             }
             let cursor_background = (cursor_shape == Some(CursorShape::Block)).then(|| {
                 let cursor_color = snapshot
                     .cursor_appearance
                     .color
-                    .map_or(foreground, |color| resolve_color(color, true));
+                    .map_or(theme.cursor_color(foreground), |color| {
+                        resolve_color_themed(color, true, theme)
+                    });
                 foreground = if background[3] > 0.0 {
                     background
                 } else {
-                    [0.0, 0.0, 0.0, 1.0]
+                    match theme {
+                        TerminalTheme::Custom(_) => theme.background(),
+                        _ => [0.0, 0.0, 0.0, 1.0],
+                    }
                 };
                 cursor_color
             });
@@ -1900,7 +2207,7 @@ fn build_vertices(
                     &mut vertices,
                     [x, y],
                     [atlas.cell_width, atlas.cell_height],
-                    [0.20, 0.45, 0.90, 0.50],
+                    theme.selection_color(),
                     [width, height],
                 );
             }
@@ -1941,7 +2248,7 @@ fn build_vertices(
                     );
                 }
             }
-            if cell.style.underline {
+            if cell.style.underline || highlight_underline {
                 push_quad(
                     &mut vertices,
                     [x, y + atlas.cell_height - 2.0],
@@ -1959,7 +2266,9 @@ fn build_vertices(
                 let color = snapshot
                     .cursor_appearance
                     .color
-                    .map_or(foreground, |color| resolve_color(color, true));
+                    .map_or(theme.cursor_color(foreground), |color| {
+                        resolve_color_themed(color, true, theme)
+                    });
                 push_cursor_decoration(
                     &mut vertices,
                     shape,
@@ -2071,6 +2380,26 @@ fn build_log_vertices(
     viewport: TerminalViewport,
     decorations: &LogDecorations,
 ) -> Vec<Vertex> {
+    build_log_vertices_themed(
+        frame,
+        atlas,
+        width,
+        height,
+        viewport,
+        decorations,
+        TerminalTheme::Dark,
+    )
+}
+
+fn build_log_vertices_themed(
+    frame: &LogSurfaceFrame,
+    atlas: &mut GlyphAtlas,
+    width: u32,
+    height: u32,
+    viewport: TerminalViewport,
+    decorations: &LogDecorations,
+    theme: TerminalTheme,
+) -> Vec<Vertex> {
     atlas.begin_frame();
     let rows = frame.visible_rows.clone();
     let mut vertices = Vec::with_capacity(
@@ -2111,6 +2440,7 @@ fn build_log_vertices(
             .active_search_match
             .as_ref()
             .filter(|matched| matched.line_id == row.line_id);
+        let active_selection = decorations.selection_ranges.iter().find(|s|s.line_id==row.line_id);
         let mut cell_column = visual_row.start_cell;
         let mut style_index = row
             .style_spans
@@ -2151,10 +2481,27 @@ fn build_log_vertices(
             if x >= viewport.x.saturating_add(viewport.width) as f32 {
                 break;
             }
-            let mut foreground = resolve_color(style.foreground, true);
-            let mut background = resolve_color(style.background, false);
+            let mut foreground = resolve_color_themed(style.foreground, true, theme);
+            let mut background = resolve_color_themed(style.background, false, theme);
             if style.inverse {
+                if background[3] == 0.0 && matches!(theme, TerminalTheme::Custom(_)) {
+                    background = theme.background();
+                }
                 std::mem::swap(&mut foreground, &mut background);
+            }
+            let mut highlight_underline = false;
+            for span in decorations.highlights.iter().filter(|s| {
+                s.line_id == row.line_id
+                    && (s.range.start as usize) < grapheme_end
+                    && byte_index < (s.range.end as usize)
+            }) {
+                if let Some(color) = span.style.foreground {
+                    foreground = linear_rgb(color);
+                }
+                if let Some(color) = span.style.background {
+                    background = linear_rgb(color);
+                }
+                highlight_underline |= span.style.underline;
             }
             if active_search.is_some_and(|matched| {
                 (matched.byte_range.start as usize) < grapheme_end
@@ -2164,6 +2511,18 @@ fn build_log_vertices(
                 background = [1.0, 0.72, 0.12, 0.92];
             }
             let span_width = atlas.cell_width * columns as f32;
+            if active_selection.is_some_and(|selected| (selected.byte_range.start as usize) < grapheme_end && byte_index < selected.byte_range.end as usize) {
+                foreground = [0.95, 0.97, 1.0, 1.0];
+                background = [0.18, 0.36, 0.58, 1.0];
+            }
+            if let Some((snapshot, selection)) = &decorations.selection {
+                let screen_row = relative_row as i32 - frame.first_viewport_row as i32;
+                let screen_col = cell_column.saturating_sub(first_cell).min(u32::from(u16::MAX)) as u16;
+                if screen_row >= 0 && selection.contains(snapshot, screen_row as u16, screen_col) {
+                    foreground = [0.95, 0.97, 1.0, 1.0];
+                    background = [0.18, 0.36, 0.58, 1.0];
+                }
+            }
             if background[3] > 0.0 {
                 push_quad(
                     &mut vertices,
@@ -2197,7 +2556,7 @@ fn build_log_vertices(
                     );
                 }
             }
-            if style.underline {
+            if style.underline || highlight_underline {
                 push_quad(
                     &mut vertices,
                     [x, y + atlas.cell_height - 2.0],
@@ -2265,13 +2624,29 @@ fn white_uv() -> [f32; 4] {
     [x, y, x, y]
 }
 
+#[cfg(test)]
 fn resolve_color(color: Color, foreground: bool) -> [f32; 4] {
+    resolve_color_themed(color, foreground, TerminalTheme::Dark)
+}
+
+fn resolve_color_themed(color: Color, foreground: bool, theme: TerminalTheme) -> [f32; 4] {
     let rgb = match color {
-        Color::Default if foreground => [216, 222, 233],
+        Color::Default if foreground => match theme {
+            TerminalTheme::Custom(palette) => palette.foreground,
+            TerminalTheme::Dark => [216, 222, 233],
+            TerminalTheme::Light => [35, 42, 52],
+        },
         Color::Default => return [0.0, 0.0, 0.0, 0.0],
-        Color::Indexed(index) => xterm_color(index),
+        Color::Indexed(index) => match theme {
+            TerminalTheme::Custom(palette) if index < 16 => palette.ansi[usize::from(index)],
+            _ => xterm_color(index),
+        },
         Color::Rgb(red, green, blue) => [red, green, blue],
     };
+    linear_rgb(rgb)
+}
+
+fn linear_rgb(rgb: [u8; 3]) -> [f32; 4] {
     [
         srgb_to_linear(rgb[0]),
         srgb_to_linear(rgb[1]),
@@ -2357,6 +2732,320 @@ mod tests {
     }
 
     #[test]
+    fn light_theme_changes_default_ink_and_keeps_panes_separate() {
+        let dark = super::TerminalTheme::from_profile_name("default");
+        let light = super::TerminalTheme::from_profile_name("light");
+        assert_eq!(dark, super::TerminalTheme::Dark);
+        assert_eq!(light, super::TerminalTheme::Light);
+        assert_ne!(
+            super::resolve_color_themed(Color::Default, true, dark),
+            super::resolve_color_themed(Color::Default, true, light)
+        );
+        assert_eq!(
+            super::resolve_color_themed(Color::Rgb(24, 48, 72), true, dark),
+            super::resolve_color_themed(Color::Rgb(24, 48, 72), true, light)
+        );
+        let mut atlas = GlyphAtlas::build().unwrap_or_else(|e| panic!("{e}"));
+        let decorations = TerminalDecorations::default();
+        let snapshot = FrameSnapshot {
+            screen_start_line: 0,
+            generation: 1,
+            rows: 1,
+            cols: 1,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_appearance: Default::default(),
+            terminal_modes: Default::default(),
+            cells: vec![Cell::new('A', CellWidth::Single, Style::default())],
+        };
+        let glyph_viewport = TerminalViewport {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 60,
+        };
+        let dark_glyph = super::build_vertices_themed(
+            &snapshot,
+            &mut atlas,
+            80,
+            60,
+            glyph_viewport,
+            0..1,
+            &decorations,
+            false,
+            dark,
+        );
+        let light_glyph = super::build_vertices_themed(
+            &snapshot,
+            &mut atlas,
+            80,
+            60,
+            glyph_viewport,
+            0..1,
+            &decorations,
+            false,
+            light,
+        );
+        assert!(!dark_glyph.is_empty());
+        assert!(
+            dark_glyph
+                .iter()
+                .all(|vertex| vertex.color
+                    == super::resolve_color_themed(Color::Default, true, dark))
+        );
+        assert!(
+            light_glyph
+                .iter()
+                .all(|vertex| vertex.color
+                    == super::resolve_color_themed(Color::Default, true, light))
+        );
+        let panes = [
+            super::PaneFrame {
+                viewport: TerminalViewport {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 60,
+                },
+                theme: dark,
+                content: super::PaneContent::Terminal {
+                    frame: None,
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+            super::PaneFrame {
+                viewport: TerminalViewport {
+                    x: 80,
+                    y: 0,
+                    width: 80,
+                    height: 60,
+                },
+                theme: light,
+                content: super::PaneContent::Terminal {
+                    frame: None,
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+        ];
+        let (vertices, batches) = super::build_pane_geometry(&panes, &mut atlas, 160, 60);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].1, 0..6);
+        assert_eq!(batches[1].1, 6..12);
+        assert!(
+            vertices[..6]
+                .iter()
+                .all(|vertex| vertex.color == dark.background())
+        );
+        assert!(
+            vertices[6..]
+                .iter()
+                .all(|vertex| vertex.color == light.background())
+        );
+    }
+
+    #[test]
+    fn imported_palette_renders_selection_cursor_and_ansi_without_changing_truecolor() {
+        let palette = cshell_domain::TerminalPalette {
+            foreground: [220, 210, 200],
+            background: [12, 22, 32],
+            cursor: [140, 150, 160],
+            selection: [44, 54, 64],
+            ansi: [[70, 80, 90]; 16],
+        };
+        let theme = super::TerminalTheme::Custom(palette);
+        assert_eq!(theme.background(), super::linear_rgb(palette.background));
+        assert_eq!(
+            super::resolve_color_themed(Color::Default, true, theme),
+            super::linear_rgb(palette.foreground)
+        );
+        for index in 0..16 {
+            assert_eq!(
+                super::resolve_color_themed(Color::Indexed(index), true, theme),
+                super::linear_rgb(palette.ansi[usize::from(index)])
+            );
+        }
+        for color in [
+            Color::Indexed(16),
+            Color::Indexed(231),
+            Color::Indexed(255),
+            Color::Rgb(24, 48, 72),
+        ] {
+            assert_eq!(
+                super::resolve_color_themed(color, true, theme),
+                super::resolve_color_themed(color, true, super::TerminalTheme::Dark)
+            );
+        }
+        let snapshot = FrameSnapshot {
+            screen_start_line: 0,
+            generation: 1,
+            rows: 1,
+            cols: 1,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_appearance: Default::default(),
+            terminal_modes: Default::default(),
+            cells: vec![Cell::default()],
+        };
+        let point = TerminalCellPoint { row: 0, column: 0 };
+        let decorations = TerminalDecorations {
+            selection: Some(TerminalSelection {
+                anchor: point,
+                focus: point,
+                mode: TerminalSelectionMode::Character,
+            }),
+            ..Default::default()
+        };
+        let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
+        let viewport = TerminalViewport {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let vertices = super::build_vertices_themed(
+            &snapshot,
+            &mut atlas,
+            100,
+            100,
+            viewport,
+            0..1,
+            &decorations,
+            true,
+            theme,
+        );
+        assert_eq!(vertices.len(), 12);
+        let mut selection = super::linear_rgb(palette.selection);
+        selection[3] = 0.5;
+        assert!(vertices[..6].iter().all(|vertex| vertex.color == selection));
+        assert!(
+            vertices[6..]
+                .iter()
+                .all(|vertex| vertex.color == super::linear_rgb(palette.cursor))
+        );
+        let mut explicit_cursor = snapshot;
+        explicit_cursor.cursor_appearance.color = Some(Color::Rgb(1, 2, 3));
+        let vertices = super::build_vertices_themed(
+            &explicit_cursor,
+            &mut atlas,
+            100,
+            100,
+            viewport,
+            0..1,
+            &decorations,
+            true,
+            theme,
+        );
+        assert!(
+            vertices[6..]
+                .iter()
+                .all(|vertex| vertex.color == super::linear_rgb([1, 2, 3]))
+        );
+    }
+
+    #[test]
+    fn panes_keep_equal_generation_frames_and_scissors_independent() {
+        let mut atlas = GlyphAtlas::build().unwrap_or_else(|e| panic!("{e}"));
+        let mut frames = Vec::new();
+        for (text, background) in [("A", Color::Rgb(255, 0, 0)), ("B", Color::Rgb(0, 255, 0))] {
+            let mut model = crate::TerminalSurfaceModel::default();
+            model.submit_snapshot(Arc::new(FrameSnapshot {
+                generation: 1,
+                screen_start_line: 0,
+                rows: 1,
+                cols: 1,
+                cursor_row: 0,
+                cursor_col: 0,
+                cursor_appearance: Default::default(),
+                terminal_modes: Default::default(),
+                cells: vec![Cell::new(
+                    text.chars().next().unwrap_or('?'),
+                    CellWidth::Single,
+                    Style {
+                        bold: true,
+                        background,
+                        ..Style::default()
+                    },
+                )],
+            }));
+            frames.push(model.prepare_frame(0, 1).unwrap_or_else(|| panic!("frame")));
+        }
+        let decorations = TerminalDecorations::default();
+        let viewport = |x| TerminalViewport {
+            x,
+            y: 10,
+            width: 80,
+            height: 50,
+        };
+        let panes = [
+            super::PaneFrame {
+                theme: super::TerminalTheme::Dark,
+                viewport: viewport(10),
+                content: super::PaneContent::Terminal {
+                    frame: Some(&frames[0]),
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+            super::PaneFrame {
+                theme: super::TerminalTheme::Dark,
+                viewport: viewport(110),
+                content: super::PaneContent::Terminal {
+                    frame: Some(&frames[1]),
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+            super::PaneFrame {
+                theme: super::TerminalTheme::Dark,
+                viewport: viewport(300),
+                content: super::PaneContent::Terminal {
+                    frame: Some(&frames[0]),
+                    decorations: &decorations,
+                    cursor_visible: false,
+                },
+            },
+        ];
+        let mut expected_pins = std::collections::HashSet::new();
+        for frame in &frames {
+            let _ = build_vertices(
+                &frame.snapshot,
+                &mut atlas,
+                200,
+                100,
+                viewport(10),
+                0..1,
+                &decorations,
+                false,
+            );
+            expected_pins.extend(atlas.pinned_glyphs.iter().copied());
+        }
+        let (vertices, batches) = super::build_pane_geometry(&panes, &mut atlas, 200, 100);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].0, viewport(10));
+        assert_eq!(batches[1].0, viewport(110));
+        assert_eq!(batches[0].1.end, batches[1].1.start);
+        assert_eq!(batches[1].1.end as usize, vertices.len());
+        for (index, (viewport, range)) in batches.iter().enumerate() {
+            let batch = &vertices[range.start as usize..range.end as usize];
+            let color = if index == 0 {
+                [1.0, 0.0, 0.0, 1.0]
+            } else {
+                [0.0, 1.0, 0.0, 1.0]
+            };
+            assert!(batch.iter().any(|v| v.color == color));
+            assert!(batch.iter().all(|v| {
+                let x = (v.position[0] + 1.0) * 100.0;
+                x >= viewport.x as f32 - 0.01 && x <= (viewport.x + viewport.width) as f32 + 0.01
+            }));
+        }
+        assert!(expected_pins.len() >= 2);
+        assert_eq!(atlas.pinned_glyphs, expected_pins);
+        assert!(!atlas.preserve_frame_pins);
+    }
+
+    #[test]
     fn bundled_font_builds_ascii_atlas_and_unknown_uses_fallback() {
         let atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
         assert!(atlas.glyph('A').width > 0);
@@ -2366,10 +3055,28 @@ mod tests {
     }
 
     #[test]
+    fn resizable_font_keeps_ascii_visible_and_unicode_shaping_at_the_same_size() {
+        let mut last_width = 0.0;
+        for size in [12, 24, 32, 40] {
+            let mut atlas = GlyphAtlas::build_at_size(size).unwrap();
+            assert!(atlas.cell_width > last_width);
+            last_width = atlas.cell_width;
+            for character in '!'..='~' {
+                let glyph = atlas.glyph(character);
+                assert!(glyph.width > 0 && glyph.height > 0, "ASCII {character} disappeared at {size}px");
+                assert!(glyph.width + super::GLYPH_PADDING * 2 <= super::GLYPH_TILE);
+            }
+            assert!(!atlas.shape_text("中e\u{301}", 3, Default::default()).is_empty());
+            assert!(atlas.shaped_cells.values().flatten().all(|glyph| glyph.cache_key.font_size_bits == f32::from(size).to_bits()));
+        }
+    }
+
+    #[test]
     fn terminal_cells_generate_bounded_background_glyph_and_underline_quads() {
         let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
         let snapshot = FrameSnapshot {
             generation: 1,
+            screen_start_line: 0,
             rows: 1,
             cols: 2,
             cursor_row: 0,
@@ -2418,6 +3125,7 @@ mod tests {
     fn cursor_shapes_generate_bounded_geometry_and_apply_explicit_color() {
         let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
         let mut snapshot = FrameSnapshot {
+            screen_start_line: 0,
             generation: 1,
             rows: 1,
             cols: 1,
@@ -2502,6 +3210,7 @@ mod tests {
         let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
         let point = TerminalCellPoint { row: 0, column: 0 };
         let snapshot = FrameSnapshot {
+            screen_start_line: 0,
             generation: 1,
             rows: 1,
             cols: 1,
@@ -2513,6 +3222,7 @@ mod tests {
         };
         let decorations = TerminalDecorations {
             revision: 1,
+            highlights: Default::default(),
             selection: Some(TerminalSelection {
                 anchor: point,
                 focus: point,
@@ -2565,12 +3275,13 @@ mod tests {
     #[test]
     fn log_rows_generate_only_visible_styled_unicode_geometry() {
         let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
-        let page = Arc::new(LogPage {
+        let page = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(4),
             revision: 1,
             anchor_line_id: 9,
             rows: Arc::from([LogRow {
                 line_id: 9,
+                soft_wrap: false,
                 text: Arc::from("A中"),
                 style_spans: Arc::from([LogStyleSpan {
                     byte_range: 0..1,
@@ -2627,10 +3338,13 @@ mod tests {
             viewport,
             &LogDecorations {
                 revision: 1,
+                selection_ranges: Default::default(),
+                highlights: Default::default(),
                 active_search_match: Some(LogSearchMatch {
                     line_id: 9,
                     byte_range: 1..4,
                 }),
+                selection: None,
             },
         );
         assert_eq!(highlighted.len(), 30);
@@ -2657,11 +3371,12 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn wrapped_log_geometry_scans_each_visual_text_slice_once() {
-        let page = Arc::new(LogPage {
+        let page = Arc::new(LogPage { first_line_id: 1,
             source_id: LogSourceId(5),
             revision: 1,
             anchor_line_id: 1,
             rows: Arc::from([LogRow {
+            soft_wrap: false,
                 line_id: 1,
                 text: Arc::from("ABCD"),
                 style_spans: Arc::from([]),

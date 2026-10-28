@@ -1,0 +1,26 @@
+[package]
+name = "cshell-script-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+[features]
+default = ["supervisor"]
+supervisor = ["dep:tokio", "dep:tempfile", "dep:cshell-ipc"]
+[dependencies]
+cshell-application = { path = "../cshell-application" }
+cshell-domain = { path = "../cshell-domain" }
+cshell-ipc = { path = "../cshell-ipc", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process"], optional = true }
+tempfile = { workspace = true, optional = true }
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc.workspace = true
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+[lints]
+workspace = true

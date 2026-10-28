@@ -4,6 +4,7 @@
 //! product adapter is `AlacrittyTerminalEngine`; the probe remains for focused tests.
 
 mod alacritty;
+mod output_guard;
 mod input;
 
 use cshell_domain::TerminalSize;
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use unicode_width::UnicodeWidthChar;
 
-pub use alacritty::AlacrittyTerminalEngine;
+pub use alacritty::{HistorySlice, AlacrittyTerminalEngine, DEFAULT_HISTORY_BYTES, MAX_TERMINAL_COLUMNS, MAX_TERMINAL_ROWS, MAX_TERMINAL_CELLS};
 pub use input::{InputEncodeError, InputEncoder, TerminalModes};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -69,16 +70,21 @@ pub fn is_zero_width_character(character: char) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     pub character: char,
+    #[serde(default, skip_serializing_if = "is_false")]
+    soft_wrap: bool,
     zerowidth: Option<Arc<[char]>>,
     hyperlink_uri: Option<Arc<str>>,
     pub width: CellWidth,
     pub style: Style,
 }
 
+fn is_false(value: &bool) -> bool { !*value }
+
 impl Default for Cell {
     fn default() -> Self {
         Self {
             character: ' ',
+            soft_wrap: false,
             zerowidth: None,
             hyperlink_uri: None,
             width: CellWidth::Single,
@@ -92,6 +98,7 @@ impl Cell {
     pub const fn new(character: char, width: CellWidth, style: Style) -> Self {
         Self {
             character,
+            soft_wrap: false,
             zerowidth: None,
             hyperlink_uri: None,
             width,
@@ -113,6 +120,7 @@ impl Cell {
             .collect();
         Self {
             character,
+            soft_wrap: false,
             zerowidth: (!characters.is_empty()).then(|| Arc::from(characters)),
             hyperlink_uri: None,
             width,
@@ -131,6 +139,16 @@ impl Cell {
     #[must_use]
     pub fn hyperlink_uri(&self) -> Option<&str> {
         self.hyperlink_uri.as_deref()
+    }
+
+    /// This cell ends a display row continued by automatic wrapping.
+    #[must_use]
+    pub const fn soft_wrap(&self) -> bool { self.soft_wrap }
+
+    #[must_use]
+    pub const fn with_soft_wrap(mut self, wrapped: bool) -> Self {
+        self.soft_wrap = wrapped;
+        self
     }
 
     #[must_use]
@@ -155,6 +173,8 @@ impl Cell {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FrameSnapshot {
     pub generation: u64,
+    #[serde(default)]
+    pub screen_start_line: u64,
     pub rows: u16,
     pub cols: u16,
     pub cursor_row: u16,
@@ -478,6 +498,7 @@ impl TerminalEngine for ProbeTerminalEngine {
 
     fn snapshot(&self) -> FrameSnapshot {
         FrameSnapshot {
+            screen_start_line: 0,
             generation: self.generation,
             rows: self.size.rows,
             cols: self.size.cols,
