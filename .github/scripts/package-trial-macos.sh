@@ -24,7 +24,7 @@ case "$binary_directory/" in
 esac
 for executable in cshell-gui cshelld cshell-script-worker; do
     test -x "$binary_directory/$executable"
-    lipo -verify_arch "$architecture" "$binary_directory/$executable"
+    lipo "$binary_directory/$executable" -verify_arch "$architecture"
 done
 # Never overwrite an application while its desktop or companion is running.
 if pgrep -x CShell >/dev/null || pgrep -x cshelld >/dev/null || pgrep -x cshell-script-worker >/dev/null; then
