@@ -30,6 +30,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: '2'
       RUST_TEST_THREADS: '2'
+      CARGO_PROFILE_TEST_DEBUG: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -39,6 +40,7 @@ jobs:
         with:
           shared-key: macos-trial-${{ matrix.target }}
           cache-on-failure: 'true'
+          cache-workspace-crates: 'true'
       - name: Run SSH, vault, storage, PTY and script runtime regression tests
         run: cargo test --locked -p cshell-ssh -p cshell-vault -p cshell-storage -p cshell-local -p cshell-script-runtime --lib --tests
       - name: Check native macOS keychain

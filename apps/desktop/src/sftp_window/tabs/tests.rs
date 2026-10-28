@@ -438,7 +438,10 @@ async fn two_host_tabs_keep_connections_remote_directories_and_one_local_cursor_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn common_local_browser_reads_and_pages_real_files_without_any_ssh_session() {
     let root = tempfile::tempdir().unwrap();
-    let files = root.path().join("files");
+    // macOS temporary roots may go through /var -> /private/var. The default
+    // local browser intentionally rejects directory links, including ancestors.
+    let real_root = root.path().canonicalize().unwrap();
+    let files = real_root.join("files");
     std::fs::create_dir(&files).unwrap();
     for index in 0..513 {
         std::fs::write(files.join(format!("{index:04}.txt")), b"fixture").unwrap();
@@ -446,7 +449,7 @@ async fn common_local_browser_reads_and_pages_real_files_without_any_ssh_session
     #[cfg(windows)]
     let endpoint = format!(r"\\.\pipe\cshell-local-browser-{}", SessionId::new());
     #[cfg(unix)]
-    let endpoint = root.path().join("local.sock");
+    let endpoint = real_root.join("local.sock");
     let listener = transport::LocalListener::bind(&endpoint).unwrap();
     let config = DesktopConnectionConfig::for_fixture(ResolvedDesktopEndpoint {
         endpoint,
@@ -454,7 +457,7 @@ async fn common_local_browser_reads_and_pages_real_files_without_any_ssh_session
         daemon_instance_id: [37; 16],
     });
     let service = Arc::new(cshelld::SessionIpcService::new(Arc::new(
-        cshelld::LocalSessionRegistry::new(root.path().join("journals"), 16).unwrap(),
+        cshelld::LocalSessionRegistry::new(real_root.join("journals"), 16).unwrap(),
     )));
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
@@ -481,7 +484,9 @@ async fn common_local_browser_reads_and_pages_real_files_without_any_ssh_session
     )));
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
-            if connection.view().local_cursor.is_some() {
+            let view = connection.view();
+            assert!(view.error.is_none(), "local browse failed: {:?}", view.error);
+            if view.local_cursor.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
