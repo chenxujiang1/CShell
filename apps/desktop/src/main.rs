@@ -9,6 +9,7 @@ mod cursor_blink;
 mod daemon_connection;
 mod daemon_input;
 mod diagnostics;
+mod interaction_regressions;
 mod display_settings;
 mod terminal_clipboard_settings;
 mod terminal_clipboard;
@@ -142,6 +143,9 @@ struct TerminalClickState {
 
 #[derive(Default)]
 struct DesktopApp {
+    // Outer None means no saved transition; inner None means terminal focus.
+    focus_before_deactivate: Option<Option<egui::Id>>,
+    terminal_ui_regions: Vec<egui::Rect>,
     keyboard_auth: keyboard_auth::Dialog,
     zmodem: zmodem_panel::Panel,
     terminal_upload: terminal_upload::Panel,
@@ -2009,7 +2013,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         let terminal_mouse = !self.command_center.blocks_input() && matches!(&event, WindowEvent::MouseInput { .. })
             && self.clipboard_pointer_available(window.scale_factor() as f32);
         let mut egui_consumed = false;
-        if !terminal_tab && !terminal_wheel && !terminal_mouse && let Some(state) = &mut self.egui_state {
+        if !terminal_tab && !terminal_wheel
+            && !interaction_regressions::intercepts_native_press(&event, terminal_mouse)
+            && let Some(state) = &mut self.egui_state {
             let response = state.on_window_event(&window, &event);
             egui_consumed = response.consumed;
             // RedrawRequested is already being serviced. Re-requesting it here
@@ -2143,7 +2149,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::Focused(active) => {
-                self.window_active = active;
+                self.restore_window_focus(active);
                 if active { self.key_picker_focus_deferred = false; }
                 if !active {
                     self.release_remote_mouse();
@@ -2233,8 +2239,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             }
             WindowEvent::KeyboardInput { event, is_synthetic:false, .. }
                 if !egui_consumed && self.terminal_keyboard_available()
-                    && terminal_scrollback::history_shortcut(&event,self.modifiers,self.terminal_scrollback).is_some() => {
-                match terminal_scrollback::history_shortcut(&event,self.modifiers,self.terminal_scrollback) {
+                    && terminal_scrollback::history_shortcut(&event,self.modifiers,self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some()).is_some() => {
+                match terminal_scrollback::history_shortcut(&event,self.modifiers,self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some()) {
                     Some(0)=>self.return_to_live_terminal(),
                     Some(direction)=>self.scroll_terminal_history(direction*i32::from(self.viewport_rows.saturating_sub(1).max(1))),
                     None=>{},
@@ -2359,6 +2365,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     .and_then(|surface| surface.scrollbar_state(self.viewport_rows.max(1)));
                 let mut scrollbar_action = None;
                 let mut return_to_live=false;
+                self.terminal_ui_regions.clear();
                 let context = self.egui_context.clone();
                 let mut search_changed = false;
                 let mut search_navigation = 0_i8;
@@ -2527,13 +2534,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     } else {
                         terminal_rect = cshell_ui::draw_workbench_content(ui, &mut self.view_model);
                     }
-                    if self.terminal_scrollback && !self.task_panel.open {
-                        let pane=self.view_model.pane_views.iter().find(|p|p.tab_id==self.current_workspace_tab).map_or(terminal_rect,|p|p.rect);
-                        let width=(pane.width()-16.0).clamp(80.0,290.0);
-                        let rect=egui::Rect::from_min_size(pane.right_bottom()-egui::vec2(width+8.0,34.0),egui::vec2(width,28.0));
-                        let text=if width<250.0{"返回最新 [End]"}else{"正在回看历史 · 返回最新 [End]"};
-                        if ui.put(rect,egui::Button::new(text).fill(cshell_ui::theme::PANEL)).clicked(){return_to_live=true;}
-                    }
+                    let pane=self.view_model.pane_views.iter().find(|p|p.tab_id==self.current_workspace_tab).map_or(terminal_rect,|p|p.rect);
+                    return_to_live = self.draw_terminal_return_button(ui, pane);
                     if let Some(sync) = &self.sync_input {
                         let sync = sync
                             .lock()
@@ -2638,7 +2640,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     if !self.task_panel.open
                         && let Some(state) = scrollbar_state
                     {
-                        scrollbar_action = draw_log_scrollbar(ui, &mut terminal_rect, state);
+                        scrollbar_action = self.draw_terminal_history_scrollbar(ui, &mut terminal_rect, state);
                     }
                     if self.log_surface.is_none()
                         && !self.task_panel.open
@@ -3182,17 +3184,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 {
                     self.view_model.input_warning = Some("剪贴板确认队列已满；请重新确认。".into());
                 }
-                if return_to_live || (self.terminal_scrollback && matches!(scrollbar_action,Some(LogScrollbarAction::FollowTail))) {
-                    self.return_to_live_terminal();
-                }
-                if let (Some(surface), Some(action)) = (&mut self.log_surface, scrollbar_action) {
-                    match action {
-                        LogScrollbarAction::FollowTail => surface.follow_tail(),
-                        LogScrollbarAction::JumpTo(line_id) => {
-                            surface.jump_to_line(line_id, 0);
-                        }
-                    }
-                }
+                self.apply_terminal_scroll_navigation(return_to_live, scrollbar_action);
                 self.schedule_egui_repaint(&full_output, std::time::Instant::now());
                 let egui::FullOutput {
                     mut platform_output,
@@ -4016,6 +4008,10 @@ const fn function_key_number(key: NamedKey) -> Option<u8> {
     }
 }
 
+fn log_scrollbar_rect(rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(egui::pos2((rect.max.x - 12.0).max(rect.min.x), rect.min.y), rect.max)
+}
+
 fn draw_log_scrollbar(
     ui: &mut egui::Ui,
     terminal_rect: &mut egui::Rect,
@@ -4026,10 +4022,7 @@ fn draw_log_scrollbar(
     if terminal_rect.width() <= WIDTH || terminal_rect.height() <= 0.0 {
         return None;
     }
-    let track = egui::Rect::from_min_max(
-        egui::pos2(terminal_rect.max.x - WIDTH, terminal_rect.min.y),
-        terminal_rect.max,
-    );
+    let track = log_scrollbar_rect(*terminal_rect);
     terminal_rect.max.x -= WIDTH;
     let first = state.first_line_id.max(1);
     let total = state.total_line_count.saturating_sub(first).saturating_add(1).max(1);

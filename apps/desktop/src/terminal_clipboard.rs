@@ -196,7 +196,11 @@ pub(super) fn history_text(
 
 impl DesktopApp {
     pub(super) fn clipboard_pointer_available(&self, scale: f32) -> bool {
-        self.terminal_wheel_available(scale)
+        let over_control = self.cursor_position.is_some_and(|pos| {
+            let point = egui::pos2(pos.x as f32 / scale, pos.y as f32 / scale);
+            self.terminal_ui_regions.iter().any(|rect| rect.contains(point))
+        });
+        !over_control && self.terminal_wheel_available(scale)
             && (self.log_surface.is_none() || self.terminal_scrollback)
             && !self.task_panel.open
             && !self.host_panel.open

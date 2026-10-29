@@ -458,6 +458,9 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let state = model.selected_tab.and_then(|tab| model.ssh_tab_states.get(&tab).copied());
+                if model.sidebar_hidden && sidebar_icon_button(ui, "›", "展开会话管理器").clicked() {
+                    model.sidebar_hidden = false;
+                }
                 let (status, color) = if let Some(state) = state {
                     (format!("{} SSH {}", if state == SshConnectionState::Connected { "●" } else { "○" }, state.label()), ssh_state_color(state))
                 } else if model.daemon_connected {
@@ -479,6 +482,9 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().interact_size.y = 18.0;
                     ui.spacing_mut().button_padding.y = 1.0;
+                    if state.is_some() && ui.selectable_label(model.connection_diagnostics_open, "连接诊断").clicked() {
+                        model.connection_diagnostics_open = !model.connection_diagnostics_open;
+                    }
                     if ui.available_width()>250.0 && let Some(status)=&model.vault_status {
                         if ui.small_button(status).on_hover_text("打开全局凭据库设置；连接会按需解锁，无需提前操作").clicked(){model.menu_command=Some(WorkbenchMenuCommand::VaultSettings);}
                         ui.separator();
@@ -865,14 +871,6 @@ fn sidebar_auto_width(ui: &egui::Ui, model: &WorkbenchViewModel) -> f32 {
 
 fn draw_sidebar(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) {
     if model.sidebar_hidden {
-        egui::Panel::left("classic-session-rail")
-            .exact_size(36.0)
-            .frame(Frame::NONE.fill(PANEL).inner_margin(egui::Margin::symmetric(4, 12)))
-            .show(ui, |ui| {
-                if sidebar_icon_button(ui, "›", "展开会话管理器").clicked() {
-                    model.sidebar_hidden = false;
-                }
-            });
         return;
     }
     let panel_id = egui::Id::new("classic-session-tree");

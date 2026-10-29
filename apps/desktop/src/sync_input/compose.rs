@@ -104,6 +104,11 @@ pub(crate) fn visible_body(text: &str) -> Zeroizing<String> {
 }
 
 impl DesktopSyncInput {
+    pub(super) fn suspend_compose_focus(&mut self) {
+        self.compose.focus_requested = false;
+        self.compose.focus_active = false;
+        self.compose.ime_active = false;
+    }
     pub(super) fn begin_paste_review(&mut self) {
         self.compose.risk_ack = false;
         self.compose.review_serial = self.compose.review_serial.wrapping_add(1);

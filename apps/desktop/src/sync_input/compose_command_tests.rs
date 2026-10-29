@@ -435,6 +435,18 @@ fn ordinary_new_session_shows_one_bar_without_stealing_terminal_focus() {
 }
 
 #[test]
+fn application_focus_loss_preserves_draft_without_requesting_command_bar_focus() {
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.text("echo unfinished");
+    assert!(f.sync.focus_terminal());
+    f.sync.focus_lost(Some(f.tabs[0]));
+    assert!(!f.sync.compose.focus_requested && !f.sync.compose.focus_active);
+    assert_eq!(f.sync.compose.text.as_str(), "echo unfinished");
+    assert!(f.sync.pending.is_none() && f.sync.pending_current.is_none());
+}
+
+#[test]
 fn command_scope_and_draft_survive_focus_but_old_work_and_review_are_revoked() {
     let mut f = Fixture::new(3); f.enable();
     f.text("hostname"); f.enter(false);

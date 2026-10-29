@@ -488,7 +488,7 @@ impl DesktopSyncInput {
             self.arm_review = None;
             self.panel_open = false;
             self.compose.risk_ack = false;
-            self.compose.focus_requested = true;
+            self.suspend_compose_focus();
             return;
         }
         self.disarm(SyncInputDisarmReason::FocusLost);

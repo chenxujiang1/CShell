@@ -93,6 +93,7 @@ impl TabNavigatorState {
 #[derive(Debug, Default)]
 pub struct WorkbenchViewModel {
     pub toolbar_hidden: bool,
+    pub connection_diagnostics_open: bool,
     pub profile_environments: std::collections::BTreeMap<ProfileId, environment::Environment>,
     pub terminal_font_pixels: Option<u16>,
     pub terminal_zoom_pixels: Option<u16>,

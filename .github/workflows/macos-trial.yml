@@ -41,8 +41,8 @@ jobs:
           shared-key: macos-trial-${{ matrix.target }}
           cache-on-failure: 'true'
           cache-workspace-crates: 'true'
-      - name: Run SSH, vault, storage, PTY and script runtime regression tests
-        run: cargo test --locked -p cshell-ssh -p cshell-vault -p cshell-storage -p cshell-local -p cshell-script-runtime --lib --tests
+      - name: Run SSH, vault, storage, PTY, renderer and script runtime regression tests
+        run: cargo test --locked -p cshell-ssh -p cshell-vault -p cshell-storage -p cshell-local -p cshell-render -p cshell-script-runtime --lib --tests
       - name: Check native macOS keychain
         env:
           CSHELL_KEYCHAIN_NATIVE_TEST: '1'

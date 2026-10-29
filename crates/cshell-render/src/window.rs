@@ -24,11 +24,18 @@ const ATLAS_BYTES_PER_PIXEL: u32 = 4;
 const FIRST_GLYPH: u32 = 32;
 const LAST_GLYPH: u32 = 126;
 const FONT_SIZE: f32 = cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS as f32;
+/// Shared terminal/UI fallback, licensed under OFL-1.1 alongside the font asset.
+pub const BUNDLED_CJK_FONT_BYTES: &[u8] =
+    include_bytes!("../../../apps/desktop/assets/fonts/NotoSansSC-Regular.ttf");
 const CELL_PADDING_X: f32 = 1.0;
 const STATIC_GLYPH_COUNT: u32 = LAST_GLYPH - FIRST_GLYPH + 1;
 const STATIC_ATLAS_HEIGHT: u32 = STATIC_GLYPH_COUNT
     .div_ceil(ATLAS_WIDTH / GLYPH_TILE)
     .saturating_mul(GLYPH_TILE);
+
+#[cfg(test)]
+#[path = "window/chinese_tests.rs"]
+mod chinese_tests;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -168,9 +175,13 @@ impl GlyphAtlas {
             cell_width,
             cell_height,
             font_system: {
-                let source =
-                    fontdb::Source::Binary(Arc::new(epaint_default_fonts::HACK_REGULAR.to_vec()));
-                let mut font_system = FontSystem::new_with_fonts([source]);
+                // System font discovery can omit the user's CJK faces. Keep
+                // Chinese output renderable without relying on OS font paths.
+                let sources = [
+                    fontdb::Source::Binary(Arc::new(epaint_default_fonts::HACK_REGULAR.to_vec())),
+                    fontdb::Source::Binary(Arc::new(BUNDLED_CJK_FONT_BYTES.to_vec())),
+                ];
+                let mut font_system = FontSystem::new_with_fonts(sources);
                 font_system.db_mut().set_monospace_family("Hack");
                 font_system
             },

@@ -341,33 +341,37 @@ pub(crate) fn draw(
 
 impl crate::DesktopApp {
     pub(super) fn draw_connection_diagnostics(&mut self, ui: &mut egui::Ui) {
-        let Some((tab, profile)) = self.active_ssh_profile() else {
-            return;
-        };
-        let Some(view) = self
-            .daemon
-            .as_ref()
-            .map(crate::daemon_connection::DesktopDaemonConnection::view)
-            .filter(|v| v.session_profile_id == Some(profile))
-        else {
-            return;
-        };
-        let matching_runtime = self
-            .workspace
-            .sessions
-            .get(&tab)
-            .map_or(view.session_id.is_none(), |id| view.session_id == Some(*id));
-        if !matching_runtime
-            && !(view.session_opening && self.workspace.pending_launch == Some(tab))
-        {
+        if !self.view_model.connection_diagnostics_open {
             return;
         }
-        if draw(
-            ui,
-            view.connection_trace.as_ref(),
-            view.session_opening,
-            self.view_model.can_restart_ssh && !view.session_opening,
-        ) {
+        let view = self.active_ssh_profile().and_then(|(tab, profile)| {
+            let view = self.daemon.as_ref()?.view();
+            let matching_runtime = self.workspace.sessions.get(&tab)
+                .map_or(view.session_id.is_none(), |id| view.session_id == Some(*id));
+            (view.session_profile_id == Some(profile)
+                && (matching_runtime || view.session_opening && self.workspace.pending_launch == Some(tab)))
+                .then_some(view)
+        });
+        let mut open = true;
+        let mut retry = false;
+        egui::Window::new("连接诊断")
+            .id(egui::Id::new("connection-diagnostics-window"))
+            .open(&mut open)
+            .default_width(480.0)
+            .max_width((ui.ctx().content_rect().width() - 24.0).max(240.0))
+            .show(ui.ctx(), |ui| {
+                if let Some(view) = view {
+                    retry = draw(ui, view.connection_trace.as_ref(), view.session_opening,
+                        self.view_model.can_restart_ssh && !view.session_opening);
+                    if view.connection_trace.is_none() && !view.session_opening {
+                        ui.label("当前连接暂无诊断记录。");
+                    }
+                } else {
+                    ui.label("请选择 SSH 连接查看本次诊断记录。");
+                }
+            });
+        self.view_model.connection_diagnostics_open = open;
+        if retry {
             self.request_ssh_control(true);
         }
     }

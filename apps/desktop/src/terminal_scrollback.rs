@@ -76,10 +76,10 @@ impl DesktopApp {
     }
 
     pub(super) fn return_to_live_terminal(&mut self) {
+        self.clear_clipboard_selection();
         if !self.terminal_scrollback {
             return;
         }
-        self.clear_clipboard_selection();
         self.terminal_scrollback = false;
         self.log_surface = None;
         self.log_decorations = LogDecorations::default();
@@ -87,6 +87,24 @@ impl DesktopApp {
         self.wheel_row_accumulator = 0.0;
         if let Some(daemon) = &self.daemon {
             daemon.cancel_log_page();
+        }
+    }
+    pub(super) fn apply_terminal_scroll_navigation(&mut self, live: bool, action: Option<LogScrollbarAction>) {
+        if live || action.is_some() {
+            // A UI navigation gesture breaks the terminal's multi-click chain.
+            self.terminal_click = TerminalClickState::default();
+        }
+        if live || (self.terminal_scrollback && matches!(action, Some(LogScrollbarAction::FollowTail))) {
+            self.return_to_live_terminal();
+        } else if let Some(action) = action {
+            // Explicit navigation releases the frozen selection image too.
+            self.clear_clipboard_selection();
+            if let Some(surface) = &mut self.log_surface {
+                match action {
+                    LogScrollbarAction::FollowTail => surface.follow_tail(),
+                    LogScrollbarAction::JumpTo(line) => { surface.jump_to_line(line, 0); }
+                }
+            }
         }
     }
     pub(super) fn scroll_terminal_history(&mut self, rows: i32) {

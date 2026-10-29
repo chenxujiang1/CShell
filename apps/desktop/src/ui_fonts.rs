@@ -4,7 +4,7 @@ use std::sync::Arc;
 const CJK_FONT_NAME: &str = "Noto Sans SC";
 // Google Fonts Noto Sans SC (OFL 1.1); see ../assets/fonts/OFL.txt.
 // egui uses the variable font's default axis (100); pin 400 for readable UI text.
-const CJK_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/NotoSansSC-Regular.ttf");
+const CJK_FONT_BYTES: &[u8] = cshell_render::BUNDLED_CJK_FONT_BYTES;
 
 pub fn install(context: &Context) {
     let mut fonts = FontDefinitions::default();

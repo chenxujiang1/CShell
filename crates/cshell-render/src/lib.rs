@@ -27,8 +27,8 @@ pub use terminal_interaction::{
     search_terminal_snapshot, validate_terminal_search_query,
 };
 pub use window::{
-    AtlasPressureBenchmarkReport, EguiFrame, HeadlessRenderReport, HeadlessTerminalRenderer,
-    LogGeometryBenchmarkReport, PaneContent, PaneFrame, RenderOutcome,
+    AtlasPressureBenchmarkReport, BUNDLED_CJK_FONT_BYTES, EguiFrame, HeadlessRenderReport,
+    HeadlessTerminalRenderer, LogGeometryBenchmarkReport, PaneContent, PaneFrame, RenderOutcome,
     TerminalGeometryBenchmarkReport, TerminalTheme, TerminalViewport, WindowRenderer,
     WindowRendererError, benchmark_atlas_pressure, benchmark_log_geometry,
     benchmark_terminal_geometry,
