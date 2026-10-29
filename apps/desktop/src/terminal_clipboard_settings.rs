@@ -9,6 +9,8 @@ pub(crate) struct Settings {
     pub right_click_paste: bool,
     pub middle_click_paste: bool,
     pub word_delimiters: String,
+    pub smart_selection: bool,
+    pub mac_history_shortcuts: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -16,7 +18,9 @@ impl Default for Settings {
             copy_on_select: true,
             right_click_paste: false,
             middle_click_paste: true,
-            word_delimiters: "\"'`[]{}()<>|;,=".into(),
+            word_delimiters: cshell_render::DEFAULT_WORD_DELIMITERS.into(),
+            smart_selection: false,
+            mac_history_shortcuts: cfg!(target_os = "macos"),
         }
     }
 }
@@ -36,7 +40,7 @@ fn path() -> Option<std::path::PathBuf> {
         .map(|p| p.join("terminal-clipboard.json"))
 }
 pub(crate) fn initialize() {
-    let settings = path()
+    let mut settings: Settings = path()
         .and_then(|p| {
             if std::fs::metadata(&p).ok()?.len() > 4096 {
                 return None;
@@ -44,6 +48,7 @@ pub(crate) fn initialize() {
             serde_json::from_slice(&std::fs::read(p).ok()?).ok()
         })
         .unwrap_or_default();
+    migrate_word_delimiters(&mut settings);
     *store()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
@@ -55,8 +60,10 @@ pub(crate) fn draw(ui: &mut egui::Ui) {
     ui.checkbox(&mut settings.copy_on_select, "选中后自动复制（松开左键时）");
     ui.checkbox(&mut settings.middle_click_paste, "中键粘贴");
     ui.checkbox(&mut settings.right_click_paste, "右键直接粘贴");
+    ui.checkbox(&mut settings.mac_history_shortcuts, "Mac 历史快捷键：⌘↑/↓ 翻页，⌘⇧↓ 返回最新");
     ui.weak("右键默认打开菜单；启用直接粘贴后，Shift＋右键仍可打开菜单。");
     ui.collapsing("高级选择设置", |ui| {
+        ui.checkbox(&mut settings.smart_selection, "双击智能选择完整路径、URL 和 IP 地址");
         ui.label("双击单词时的分隔字符（空白始终分隔）");
         ui.add(
             egui::TextEdit::singleline(&mut settings.word_delimiters)
@@ -66,14 +73,14 @@ pub(crate) fn draw(ui: &mut egui::Ui) {
         if ui.small_button("恢复默认分隔符").clicked() {
             settings.word_delimiters = Settings::default().word_delimiters;
         }
-        ui.weak("默认保留路径中的 /、地址中的 : 和 .，三击选择完整逻辑行。");
+        ui.weak("默认将冒号、引号和中文标点作为边界；保留 / 和 .。智能选择可识别地址中的冒号，三击选择完整逻辑行。");
     });
     ui.separator();
     for text in [
         "选择：左键拖动 · 双击单词 · 三击整行",
         "扩展选择：Shift＋左键 · 矩形选择：Alt＋拖动",
-        "复制：Ctrl＋Shift＋C / Ctrl＋Insert",
-        "粘贴：Ctrl＋Shift＋V / Shift＋Insert",
+        "复制：⌘C（Mac）/ Ctrl＋Shift＋C / Ctrl＋Insert",
+        "粘贴：⌘V（Mac）/ Ctrl＋Shift＋V / Shift＋Insert",
     ] {
         ui.label(text);
     }
@@ -101,9 +108,26 @@ pub(crate) fn draw(ui: &mut egui::Ui) {
     }
 }
 
+fn migrate_word_delimiters(settings: &mut Settings) {
+    // Upgrade the former default without overwriting customized boundaries.
+    if settings.word_delimiters == "\"'`[]{}()<>|;,=" {
+        settings.word_delimiters = cshell_render::DEFAULT_WORD_DELIMITERS.into();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_default_is_migrated_but_custom_boundaries_are_preserved() {
+        let mut legacy = Settings { word_delimiters: "\"'`[]{}()<>|;,=".into(), ..Default::default() };
+        migrate_word_delimiters(&mut legacy);
+        assert_eq!(legacy.word_delimiters, cshell_render::DEFAULT_WORD_DELIMITERS);
+        let mut custom = Settings { word_delimiters: "/:".into(), ..Default::default() };
+        migrate_word_delimiters(&mut custom);
+        assert_eq!(custom.word_delimiters, "/:");
+        assert!(!serde_json::from_str::<Settings>("{}").unwrap().smart_selection);
+    }
     #[test]
     fn missing_preferences_keep_linux_defaults_and_roundtrip() {
         let defaults: Settings = serde_json::from_str("{}").unwrap();

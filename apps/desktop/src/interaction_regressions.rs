@@ -23,11 +23,26 @@ pub(super) fn return_button_rect(pane: egui::Rect) -> egui::Rect {
 }
 
 impl DesktopApp {
+    pub(super) fn handle_clipboard_lifecycle(&mut self, event: &WindowEvent) {
+        match event {
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                self.finish_clipboard_selection();
+            }
+            WindowEvent::Focused(false) => {
+                self.cancel_clipboard_gesture();
+                self.modifiers = ModifiersState::default();
+                self.terminal_click = TerminalClickState::default();
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn draw_terminal_return_button(
         &mut self,
         ui: &mut egui::Ui,
         pane: egui::Rect,
     ) -> bool {
+        self.draw_search_origin_return(ui, pane);
         if self.task_panel.open
             || !(self.terminal_scrollback
                 || self.terminal_clipboard.snapshot.is_some() && !self.terminal_selecting)
@@ -36,17 +51,14 @@ impl DesktopApp {
         }
         let rect = return_button_rect(pane);
         self.terminal_ui_regions.push(rect);
-        let text = if rect.width() < 250.0 {
-            "返回最新 [End]"
-        } else {
-            "正在回看历史 · 返回最新 [End]"
-        };
+        let text = self.reading_return_label(rect.width() < 250.0);
         ui.put(
             rect,
             egui::Button::new(text)
                 .truncate()
                 .fill(cshell_ui::theme::PANEL),
         )
+        .on_hover_text("恢复跟随最新输出，不发送回车。Shift+PageUp/PageDown 翻页；Mac 可在鼠标与剪贴板设置中启用 ⌘↑/↓。历史保留量有限，重要日志请保存到文件。")
         .clicked()
     }
 
@@ -145,6 +157,70 @@ mod tests {
         app.finish_clipboard_selection();
         assert!(app.terminal_clipboard.snapshot.is_some());
         app
+    }
+
+    #[test]
+    fn fresh_click_after_scrolling_discards_cross_page_anchor_and_ranges() {
+        let mut app = selected_app(true);
+        assert!(app.start_history_drag());
+        assert!(app.cross_selection_text().is_some());
+        assert!(!app.log_decorations.selection_ranges.is_empty());
+        // Wheel navigation retains the selection, but must not make the next
+        // ordinary press an extension of that old selection.
+        app.scroll_terminal_history(-1);
+        let point = TerminalCellPoint { row: 1, column: 2 };
+        app.begin_clipboard_selection(point);
+        assert!(app.cross_selection_text().is_none());
+        assert!(app.log_decorations.selection_ranges.is_empty());
+        app.finish_clipboard_selection();
+        app.update_clipboard_selection(TerminalCellPoint { row: 4, column: 5 });
+        assert!(app.terminal_selection_text().is_none());
+        assert!(!app.terminal_selecting);
+    }
+
+    #[test]
+    fn shift_click_still_extends_a_cross_page_selection_explicitly() {
+        let mut app = selected_app(true);
+        app.terminal_viewport = Some(TerminalViewport { x: 0, y: 0, width: 640, height: 100 });
+        assert!(app.start_history_drag());
+        app.modifiers = ModifiersState::SHIFT;
+        app.cursor_position = Some(winit::dpi::PhysicalPosition::new(45.0, 35.0));
+        app.begin_clipboard_selection(TerminalCellPoint { row: 3, column: 4 });
+        assert!(app.cross_selection_text().is_some());
+        let text = app.terminal_selection_text().unwrap().unwrap();
+        assert!(text.starts_with("history 50\nhistory 51\nhistory 52\nhisto"), "{text}");
+        app.finish_clipboard_selection();
+        let before = app.terminal_selection_text().unwrap().unwrap();
+        app.cursor_position = Some(winit::dpi::PhysicalPosition::new(60.0, 75.0));
+        app.update_clipboard_selection(TerminalCellPoint { row: 7, column: 6 });
+        assert_eq!(app.terminal_selection_text().unwrap().unwrap(), before);
+    }
+
+    #[test]
+    fn native_release_finishes_selection_before_modal_or_remote_routing() {
+        let mut app = selected_app(false);
+        app.begin_clipboard_selection(TerminalCellPoint { row: 1, column: 2 });
+        app.command_center.open = true;
+        app.handle_clipboard_lifecycle(&mouse(ElementState::Released));
+        assert!(!app.terminal_selecting);
+        assert!(app.terminal_selection_text().is_none());
+    }
+
+    #[test]
+    fn blur_cancels_drag_and_stale_shift_without_clearing_selected_text() {
+        let mut app = selected_app(false);
+        let selected = app.terminal_selection_text().unwrap().unwrap();
+        app.modifiers = ModifiersState::SHIFT;
+        app.begin_clipboard_selection(TerminalCellPoint { row: 1, column: 1 });
+        let before_blur = app.terminal_selection_text().unwrap().unwrap();
+        app.handle_clipboard_lifecycle(&WindowEvent::Focused(false));
+        assert!(!app.terminal_selecting && !app.modifiers.shift_key());
+        app.update_clipboard_selection(TerminalCellPoint { row: 1, column: 8 });
+        assert_eq!(app.terminal_selection_text().unwrap().unwrap(), before_blur);
+        assert!(before_blur.starts_with(&selected));
+        app.begin_clipboard_selection(TerminalCellPoint { row: 1, column: 3 });
+        app.finish_clipboard_selection();
+        assert!(app.terminal_selection_text().is_none());
     }
 
     #[test]

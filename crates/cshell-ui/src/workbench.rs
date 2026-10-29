@@ -482,6 +482,10 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().interact_size.y = 18.0;
                     ui.spacing_mut().button_padding.y = 1.0;
+                    if ui.available_width() > 220.0 && let Some(reading) = &model.terminal_reading_status {
+                        ui.label(RichText::new(reading).size(12.0).color(MUTED));
+                        ui.separator();
+                    }
                     if state.is_some() && ui.selectable_label(model.connection_diagnostics_open, "连接诊断").clicked() {
                         model.connection_diagnostics_open = !model.connection_diagnostics_open;
                     }

@@ -328,6 +328,7 @@ impl DesktopApp {
     }
     pub(crate) fn tick_selection_autoscroll(&mut self) -> bool {
         if !self.terminal_selecting
+            || !self.terminal_clipboard.dragged
             || self.command_center.blocks_input()
             || !self.window_active
             || self.pending_paste.is_some()
@@ -534,6 +535,8 @@ mod tests {
         app.terminal_viewport=Some(TerminalViewport{x:0,y:0,width:80,height:20});
         app.cursor_position=Some(winit::dpi::PhysicalPosition::new(20.0,-10.0));
         app.terminal_surface.submit_snapshot(Arc::new(snapshot));app.begin_clipboard_selection(TerminalCellPoint{row:0,column:1});
+        app.cursor_position=Some(winit::dpi::PhysicalPosition::new(35.0,-10.0));
+        app.update_clipboard_selection(TerminalCellPoint{row:1,column:2});
         let mut requests=0;
         for _ in 0..32 {app.terminal_clipboard.auto_at=Some(std::time::Instant::now()-std::time::Duration::from_secs(1));requests+=usize::from(app.tick_selection_autoscroll());}
         assert_eq!(requests,1);

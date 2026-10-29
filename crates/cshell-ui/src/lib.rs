@@ -118,6 +118,7 @@ pub struct WorkbenchViewModel {
     pub selected: Option<SessionId>,
     pub daemon_connected: bool,
     pub daemon_status_detail: String,
+    pub terminal_reading_status: Option<String>,
     pub vault_status: Option<String>,
     pub can_reconnect_ssh: bool,
     pub can_disconnect_ssh: bool,

@@ -4,6 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 mod context;
 mod history_drag;
+mod smart;
 
 pub(super) enum Action {
     Copy,
@@ -211,15 +212,26 @@ impl DesktopApp {
             && !self.sync_blocks_input()
     }
     pub(super) fn clear_clipboard_selection(&mut self) {
-        self.terminal_selecting = false;
+        self.cancel_clipboard_gesture();
         self.terminal_clipboard.snapshot = None;
         self.terminal_clipboard.history_frame = None;
         self.terminal_clipboard.cross = None;
         self.terminal_clipboard.auto_key = None;
         self.terminal_decorations.selection = None;
         self.log_decorations.selection = None;
+        self.log_decorations.selection_ranges = Arc::from([]);
         self.log_decorations.revision = self.log_decorations.revision.wrapping_add(1);
         self.bump_terminal_decorations();
+    }
+
+    // End pointer ownership independently of retaining the selected text.
+    pub(super) fn cancel_clipboard_gesture(&mut self) {
+        self.terminal_selecting = false;
+        self.terminal_clipboard.press_position = None;
+        self.terminal_clipboard.word_anchor = None;
+        self.terminal_clipboard.line_anchor = None;
+        self.terminal_clipboard.auto_at = None;
+        self.terminal_clipboard.auto_key = None;
     }
 
     fn selection_source(&self) -> Option<Arc<cshell_terminal::FrameSnapshot>> {
@@ -230,10 +242,15 @@ impl DesktopApp {
     }
 
     pub(super) fn begin_clipboard_selection(&mut self, point: TerminalCellPoint) {
+        self.pause_terminal_reading();
+        self.cancel_history_search_jump();
         let extending = self.modifiers.shift_key()
             && self.terminal_clipboard.owner == self.current_workspace_tab
             && self.terminal_decorations.selection.is_some();
         if !extending {
+            // Wheel/edge scrolling may have promoted the previous selection to
+            // stable history IDs. A fresh press must discard that anchor too.
+            self.clear_clipboard_selection();
             self.terminal_clipboard.history_frame = self
                 .log_surface
                 .as_ref()
@@ -278,10 +295,25 @@ impl DesktopApp {
             }
         });
         self.terminal_selecting = true;
-        self.update_clipboard_highlight();
+        if extending && self.terminal_clipboard.cross.is_some() {
+            self.refresh_history_drag(true);
+        } else {
+            self.update_clipboard_highlight();
+        }
     }
 
     pub(super) fn update_clipboard_selection(&mut self, point: TerminalCellPoint) {
+        if !self.terminal_selecting {
+            return;
+        }
+        if let (Some(start), Some(now)) =
+            (self.terminal_clipboard.press_position, self.cursor_position)
+        {
+            let threshold = 3.0 * f64::from(self.egui_context.pixels_per_point());
+            if !self.terminal_clipboard.dragged && (now.x - start.x).hypot(now.y - start.y) <= threshold {
+                return;
+            }
+        }
         if self.terminal_clipboard.cross.is_some() {
             self.refresh_history_drag(true);
             return;
@@ -328,10 +360,7 @@ impl DesktopApp {
             *selection = if selection.mode == TerminalSelectionMode::Line {
                 selection.expanded_lines(snapshot)
             } else {
-                selection.expanded_with_delimiters(
-                    snapshot,
-                    &terminal_clipboard_settings::get().word_delimiters,
-                )
+                smart::expand(*selection, snapshot, &terminal_clipboard_settings::get())
             };
         }
         self.bump_terminal_decorations();
@@ -350,7 +379,7 @@ impl DesktopApp {
         if !self.terminal_selecting {
             return;
         }
-        self.terminal_selecting = false;
+        self.cancel_clipboard_gesture();
         if !self.terminal_clipboard.dragged && self.terminal_clipboard.clicks == 1 {
             self.clear_clipboard_selection();
         } else if terminal_clipboard_settings::get().copy_on_select {
@@ -589,6 +618,8 @@ impl DesktopApp {
     }
 
     pub(super) fn open_clipboard_menu(&mut self, position: egui::Pos2) {
+        self.cancel_clipboard_gesture();
+        self.terminal_click = TerminalClickState::default();
         self.terminal_clipboard.context = self.capture_terminal_context();
         self.terminal_clipboard.menu = Some(position);
         self.terminal_clipboard.menu_focus_requested = true;
@@ -619,6 +650,36 @@ mod tests {
             .submit_snapshot(Arc::new(terminal.snapshot()));
         app.current_workspace_tab = Some(cshell_domain::TabId::new());
         app
+    }
+
+    #[test]
+    fn double_click_jitter_and_movement_after_release_do_not_extend_selection() {
+        let mut app = app();
+        let point = TerminalCellPoint { row: 0, column: 2 };
+        app.cursor_position = Some(winit::dpi::PhysicalPosition::new(20.0, 10.0));
+        app.begin_clipboard_selection(point);
+        app.finish_clipboard_selection();
+        app.begin_clipboard_selection(point);
+        app.cursor_position = Some(winit::dpi::PhysicalPosition::new(21.0, 10.0));
+        app.update_clipboard_selection(TerminalCellPoint { row: 0, column: 3 });
+        assert_eq!(app.terminal_selection_text().unwrap().unwrap(), "hello");
+        app.finish_clipboard_selection();
+        app.update_clipboard_selection(TerminalCellPoint { row: 1, column: 8 });
+        assert_eq!(app.terminal_selection_text().unwrap().unwrap(), "hello");
+        app.begin_clipboard_selection(TerminalCellPoint { row: 1, column: 8 });
+        app.finish_clipboard_selection();
+        assert!(app.terminal_selection_text().is_none());
+    }
+
+    #[test]
+    fn opening_menu_stops_drag_without_replacing_existing_selection() {
+        let mut app = app();
+        app.begin_clipboard_selection(TerminalCellPoint { row: 0, column: 0 });
+        app.update_clipboard_selection(TerminalCellPoint { row: 0, column: 4 });
+        app.open_clipboard_menu(egui::pos2(10.0, 10.0));
+        app.update_clipboard_selection(TerminalCellPoint { row: 1, column: 3 });
+        assert!(!app.terminal_selecting);
+        assert_eq!(app.terminal_selection_text().unwrap().unwrap(), "hello");
     }
     #[test]
     fn single_click_does_not_copy_and_drag_keeps_exact_original_text() {

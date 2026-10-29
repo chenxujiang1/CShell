@@ -84,6 +84,13 @@ CShell 早期测试版 — macOS $2
 5. 反馈请附源码版本、芯片类型、macOS 版本、复现步骤和脱敏日志；不要发送密码、私钥或验证码。
 
 请在 Apple Silicon 上选择 arm64 包，在 Intel 上选择 x64 包。
+
+日志回看与复制：
+- 双击选择单词或数字，三击整行；普通单击取消旧选区，Shift+单击扩展。
+- tail -f 持续输出时，向上滚动或选择文字会暂停视图跟随，后台继续接收。
+- 有新输出时显示提示；点击“返回最新”恢复跟随，不需要发送回车。
+- Shift+PageUp/PageDown 或 ⌘↑/↓ 翻页，⌘⇧↓ 返回最新；Mac 快捷键可在鼠标与剪贴板设置中关闭。
+- 查找后可点击“返回查找前位置”。历史有保留上限，重要日志请另存。
 EOF
 # The companion stays beside CFBundleExecutable to match start_companion_daemon.
 # Sign nested executable first, then the bundle; this is not Developer ID signing.

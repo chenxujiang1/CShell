@@ -161,8 +161,7 @@ impl DesktopApp {
                 self.terminal_search_query = text;
                 self.terminal_search_options.regex = false;
                 self.terminal_search_options.whole_word = false;
-                self.terminal_search_open = true;
-                self.terminal_search_focus_requested = true;
+                self.open_terminal_search();
                 if self.log_surface.is_some() {
                     self.schedule_history_search(HistorySearchDirection::Backward, None, true);
                 } else {

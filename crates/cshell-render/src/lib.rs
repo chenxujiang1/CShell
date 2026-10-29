@@ -21,6 +21,7 @@ pub use log_surface::{
     MAX_LOG_PAGE_TEXT_BYTES, MAX_LOG_REFLOW_ROWS,
 };
 pub use terminal_interaction::{
+    DEFAULT_WORD_DELIMITERS,
     MAX_TERMINAL_SEARCH_MATCHES, MAX_TERMINAL_SEARCH_QUERY_BYTES, MAX_TERMINAL_SELECTION_BYTES,
     TerminalCellPoint, TerminalDecorations, TerminalInteractionError, TerminalSearchMatch,
     TerminalSearchOptions, TerminalSearchResult, TerminalSelection, TerminalSelectionMode,

@@ -76,6 +76,8 @@ impl DesktopApp {
     }
 
     pub(super) fn return_to_live_terminal(&mut self) {
+        self.cancel_history_search_jump();
+        self.terminal_click = TerminalClickState::default();
         self.clear_clipboard_selection();
         if !self.terminal_scrollback {
             return;
@@ -91,6 +93,7 @@ impl DesktopApp {
     }
     pub(super) fn apply_terminal_scroll_navigation(&mut self, live: bool, action: Option<LogScrollbarAction>) {
         if live || action.is_some() {
+            self.cancel_history_search_jump();
             // A UI navigation gesture breaks the terminal's multi-click chain.
             self.terminal_click = TerminalClickState::default();
         }
@@ -108,6 +111,8 @@ impl DesktopApp {
         }
     }
     pub(super) fn scroll_terminal_history(&mut self, rows: i32) {
+        if rows != 0 { self.cancel_history_search_jump(); self.pause_terminal_reading(); }
+        if rows != 0 { self.terminal_click = TerminalClickState::default(); }
         let keep = self.terminal_decorations.selection.is_some() && self.start_history_drag();
         self.scroll_terminal_history_kept(rows,keep);
     }
@@ -170,9 +175,19 @@ pub(super) fn history_shortcut(
         return None;
     }
     match event.logical_key {
-        Key::Named(NamedKey::PageUp) if modifiers.shift_key() => Some(-1),
-        Key::Named(NamedKey::PageDown) if modifiers.shift_key() => Some(1),
-        Key::Named(NamedKey::End) if active => Some(0),
+        ref key => history_key(key, modifiers, active, terminal_clipboard_settings::get().mac_history_shortcuts),
+    }
+}
+
+pub(super) fn history_key(key: &Key, modifiers: ModifiersState, active: bool, mac: bool) -> Option<i32> {
+    if modifiers.alt_key() || modifiers.control_key() { return None; }
+    match key {
+        Key::Named(NamedKey::PageUp) if modifiers.shift_key() && !modifiers.super_key() => Some(-1),
+        Key::Named(NamedKey::PageDown) if modifiers.shift_key() && !modifiers.super_key() => Some(1),
+        Key::Named(NamedKey::End) if active && modifiers.is_empty() => Some(0),
+        Key::Named(NamedKey::ArrowUp) if mac && modifiers == ModifiersState::SUPER => Some(-1),
+        Key::Named(NamedKey::ArrowDown) if mac && modifiers == ModifiersState::SUPER => Some(1),
+        Key::Named(NamedKey::ArrowDown) if mac && active && modifiers == (ModifiersState::SUPER | ModifiersState::SHIFT) => Some(0),
         _ => None,
     }
 }

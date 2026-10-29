@@ -168,8 +168,8 @@ impl TerminalSelection {
     fn endpoints(self, snapshot: &FrameSnapshot) -> (TerminalCellPoint, TerminalCellPoint) {
         let (mut start, mut end) = ordered_points(snap_wide_point(snapshot, self.anchor), snap_wide_point(snapshot, self.focus));
         if self.mode == TerminalSelectionMode::Word {
-            start = word_edge(snapshot, start, false, "\"'`[]{}()<>|;,=");
-            end = word_edge(snapshot, end, true, "\"'`[]{}()<>|;,=");
+            start = word_edge(snapshot, start, false, DEFAULT_WORD_DELIMITERS);
+            end = word_edge(snapshot, end, true, DEFAULT_WORD_DELIMITERS);
         }
         (start, end)
     }
@@ -196,6 +196,9 @@ impl TerminalSelection {
     }
 }
 
+/// Shared by native preferences and callers that use the default word rules.
+pub const DEFAULT_WORD_DELIMITERS: &str = "\"'`[]{}()<>|;,:=：，；（）【】「」『』“”‘’";
+
 fn word_edge(snapshot: &FrameSnapshot, point: TerminalCellPoint, right: bool, delimiters:&str) -> TerminalCellPoint {
     let class = |c: char| -> u8 {
         if c.is_whitespace() { 0 }
@@ -218,7 +221,14 @@ fn word_edge(snapshot: &FrameSnapshot, point: TerminalCellPoint, right: bool, de
             TerminalCellPoint { row: current.row - 1, column: snapshot.cols.saturating_sub(1) }
         } else { break; };
         let Some(cell) = snapshot.row(next.row).and_then(|r| r.get(usize::from(next.column))) else { break; };
-        if !is_spacer(cell) && class(cell.character) != category { break; }
+        // The second column of a wide punctuation character belongs to that
+        // punctuation. Skipping its class lets the left boundary land on the
+        // spacer, which later snaps back and incorrectly includes the mark.
+        let character = if cell.width == CellWidth::WideSpacer {
+            snapshot.row(next.row).and_then(|row| row.get(usize::from(next.column.saturating_sub(1))))
+                .map_or(cell.character, |leader| leader.character)
+        } else { cell.character };
+        if cell.width != CellWidth::LeadingWideSpacer && class(character) != category { break; }
         current = next;
     }
     current

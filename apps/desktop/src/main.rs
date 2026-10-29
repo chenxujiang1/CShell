@@ -61,6 +61,7 @@ mod zmodem_panel;
 mod zmodem_settings;
 mod terminal_upload;
 mod terminal_scrollback;
+mod terminal_reading;
 mod ssh_session_controls;
 #[cfg(test)]
 mod terminal_keyboard_tests;
@@ -228,6 +229,7 @@ struct DesktopApp {
     terminal_search_requested_generation: Option<u64>,
     log_surface: Option<LogSurfaceModel>,
     terminal_scrollback: bool,
+    terminal_reading: terminal_reading::State,
     log_decorations: LogDecorations,
     submitted_history_search: Option<Arc<DesktopHistorySearchResponse>>,
     history_search_direction: Option<HistorySearchDirection>,
@@ -273,6 +275,7 @@ struct SplitRenderFrame {
 
 #[derive(Default)]
 struct CachedTabView {
+    reading: terminal_reading::State,
     clipboard: terminal_clipboard::State,
     surface: TerminalSurfaceModel,
     decorations: TerminalDecorations,
@@ -368,9 +371,8 @@ impl DesktopApp {
             .as_ref()
             .and_then(TerminalSearchWorker::take_latest);
         if let Some(response) = search_response {
-            let current_generation = self
-                .terminal_surface
-                .latest_snapshot()
+            let current_generation = self.terminal_clipboard.snapshot.as_ref()
+                .or_else(|| self.terminal_surface.latest_snapshot())
                 .map(|snapshot| snapshot.generation);
             if response.revision == self.terminal_search_revision
                 && current_generation == Some(response.snapshot_generation)
@@ -431,6 +433,7 @@ impl DesktopApp {
             {
                 self.submitted_history_search = Some(Arc::clone(response));
                 if response.revision == self.terminal_search_revision && self.log_surface.is_some()
+                    && self.terminal_search_open && self.history_search_direction.is_some()
                 {
                     if let Some(matched) = response.result.matches.first() {
                         self.terminal_search_error = response.result.incomplete.then(|| {
@@ -445,6 +448,7 @@ impl DesktopApp {
                         if let Some(surface) = &mut self.log_surface {
                             surface.jump_to_byte(matched.line_id, matched.byte_start);
                         }
+                        self.history_search_direction = None;
                         redraw_needed = true;
                     } else if let (Some(line_id), Some(byte_offset), Some(direction)) = (
                         response.result.next_line_id,
@@ -893,6 +897,7 @@ impl DesktopApp {
         }
         self.terminal_clipboard.menu = None;
         let old = CachedTabView {
+            reading: std::mem::take(&mut self.terminal_reading),
             clipboard: std::mem::take(&mut self.terminal_clipboard),
             surface: std::mem::take(&mut self.terminal_surface),
             decorations: std::mem::take(&mut self.terminal_decorations),
@@ -908,6 +913,7 @@ impl DesktopApp {
             self.cached_tab_views.insert(id, old);
         }
         let next = self.cached_tab_views.remove(&tab).unwrap_or_default();
+        self.terminal_reading = next.reading;
         self.terminal_surface = next.surface;
         self.terminal_decorations = next.decorations;
         self.terminal_clipboard = next.clipboard;
@@ -1877,9 +1883,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if self.log_surface.is_some() {
             redraw_needed |= self.cursor_blink.synchronize(None, false, now);
         }
-        let current_generation = self
-            .terminal_surface
-            .latest_snapshot()
+        let current_generation = self.terminal_clipboard.snapshot.as_ref()
+            .or_else(|| self.terminal_surface.latest_snapshot())
             .map(|snapshot| snapshot.generation);
         if self.terminal_search_open
             && self.log_surface.is_none()
@@ -1949,6 +1954,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if window.id() != window_id {
             return;
         }
+        // Release local pointer ownership even if a modal or remote mouse
+        // handler consumes the event later in this function.
+        self.handle_clipboard_lifecycle(&event);
         if !self.window_active
             && matches!(
                 &event,
@@ -2012,8 +2020,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             && self.terminal_wheel_available(window.scale_factor() as f32);
         let terminal_mouse = !self.command_center.blocks_input() && matches!(&event, WindowEvent::MouseInput { .. })
             && self.clipboard_pointer_available(window.scale_factor() as f32);
+        let terminal_history_key = matches!(&event, WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
+            if self.terminal_keyboard_available() && !self.egui_context.egui_wants_keyboard_input()
+                && terminal_scrollback::history_shortcut(event, self.modifiers,
+                    self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some()).is_some());
         let mut egui_consumed = false;
-        if !terminal_tab && !terminal_wheel
+        if !terminal_tab && !terminal_history_key && !terminal_wheel
             && !interaction_regressions::intercepts_native_press(&event, terminal_mouse)
             && let Some(state) = &mut self.egui_state {
             let response = state.on_window_event(&window, &event);
@@ -2219,8 +2231,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 && command_center::uses_default_search(&self.view_model)
                 && is_terminal_search_shortcut(&event, self.modifiers) =>
             {
-                self.terminal_search_open = true;
-                self.terminal_search_focus_requested = true;
+                self.open_terminal_search();
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput {
@@ -2365,6 +2376,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     .and_then(|surface| surface.scrollbar_state(self.viewport_rows.max(1)));
                 let mut scrollbar_action = None;
                 let mut return_to_live=false;
+                self.refresh_terminal_reading();
                 self.terminal_ui_regions.clear();
                 let context = self.egui_context.clone();
                 let mut search_changed = false;
@@ -2420,7 +2432,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         );
                         if search_requested {
                             if self.terminal_search_open {self.close_terminal_search();}
-                            else {self.terminal_search_open=true;self.terminal_search_focus_requested=true;}
+                            else {self.open_terminal_search();}
                         }
                         return_auxiliary_focus |= sync.take_focus_return();
                         if let Some((definition, selection)) =
@@ -2876,8 +2888,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                     Some(WorkbenchMenuCommand::ShellHistory) => {self.terminal_tools_panel.open_commands();window.request_redraw();}
                     Some(WorkbenchMenuCommand::SearchTerminal) => {
-                        self.terminal_search_open = true;
-                        self.terminal_search_focus_requested = true;
+                        self.open_terminal_search();
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::Profiles) => {
@@ -3185,6 +3196,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     self.view_model.input_warning = Some("剪贴板确认队列已满；请重新确认。".into());
                 }
                 self.apply_terminal_scroll_navigation(return_to_live, scrollbar_action);
+                self.apply_search_return_request();
                 self.schedule_egui_repaint(&full_output, std::time::Instant::now());
                 let egui::FullOutput {
                     mut platform_output,
@@ -3570,7 +3582,8 @@ impl DesktopApp {
             self.terminal_decorations.active_search_match = None;
         }
         self.bump_terminal_decorations();
-        let Some(snapshot) = self.terminal_surface.latest_snapshot().cloned() else {
+        let Some(snapshot) = self.terminal_clipboard.snapshot.as_ref()
+            .or_else(|| self.terminal_surface.latest_snapshot()).cloned() else {
             self.terminal_search_requested_generation = None;
             return;
         };
@@ -3629,6 +3642,7 @@ impl DesktopApp {
         cursor: Option<(u64, u32)>,
         reset_active: bool,
     ) {
+        self.remember_search_position();
         self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
         self.terminal_search_error = None;
         self.history_search_direction = Some(direction);
@@ -4516,6 +4530,7 @@ impl DesktopApp {
         self.view_model.daemon_connected = false;
         self.view_model.can_reconnect_ssh = false;
         let view = CachedTabView {
+            reading: std::mem::take(&mut self.terminal_reading),
             clipboard: std::mem::take(&mut self.terminal_clipboard),
             surface: std::mem::take(&mut self.terminal_surface),
             decorations: std::mem::take(&mut self.terminal_decorations),
