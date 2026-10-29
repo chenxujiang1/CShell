@@ -110,7 +110,18 @@ impl DesktopApp {
                 cell: cell_offset,
             }
         } else if self.log_surface.is_none() {
-            Position::Live
+            match self
+                .terminal_clipboard
+                .snapshot
+                .as_ref()
+                .filter(|s| s.screen_start_line > 0)
+            {
+                Some(snapshot) => Position::History {
+                    line: snapshot.screen_start_line,
+                    cell: 0,
+                },
+                None => Position::Live,
+            }
         } else {
             return;
         };
@@ -174,9 +185,36 @@ impl DesktopApp {
                     self.scroll_terminal_history(-1);
                 }
                 if let Some(surface) = &mut self.log_surface {
-                    surface.jump_to_line(line, cell);
+                    if surface.prepare_frame(self.viewport_rows).is_some() {
+                        surface.jump_to_line(line, cell);
+                    } else {
+                        // No page exists after leaving history. Preserve the
+                        // destination for the first request instead of losing
+                        // the jump while waiting for the tail page.
+                        surface.anchor(line, cell);
+                    }
                 }
             }
+        }
+    }
+
+    pub(super) fn initial_terminal_history_request(&self) -> cshell_render::LogPageRequest {
+        let (follow_tail, anchor_line_id, cell_offset) =
+            match self.log_surface.as_ref().map(LogSurfaceModel::mode) {
+                Some(cshell_render::ScrollMode::Anchored {
+                    line_id,
+                    cell_offset,
+                }) => (false, line_id, cell_offset),
+                _ => (true, 0, 0),
+            };
+        let rows = self.viewport_rows.saturating_add(128).min(2047);
+        cshell_render::LogPageRequest {
+            source_id: LogSourceId(0),
+            follow_tail,
+            anchor_line_id,
+            cell_offset,
+            rows_before: rows,
+            rows_after: if follow_tail { 0 } else { rows },
         }
     }
 }
@@ -266,6 +304,38 @@ mod tests {
                 line_id: 110,
                 cell_offset: 0
             }
+        );
+    }
+
+    #[test]
+    fn search_return_after_resuming_live_requests_the_original_page() {
+        let mut app = history_app();
+        let tab = cshell_domain::TabId::new();
+        app.current_workspace_tab = Some(tab);
+        app.workspace.sessions.insert(tab, SessionId::new());
+        app.open_terminal_search();
+        app.return_to_live_terminal();
+        app.return_to_search_origin();
+        let request = app.initial_terminal_history_request();
+        assert!(!request.follow_tail);
+        assert_eq!((request.anchor_line_id, request.cell_offset), (105, 7));
+        assert!(request.rows_after > 0);
+    }
+
+    #[test]
+    fn search_started_on_a_frozen_live_selection_remembers_its_line() {
+        let mut app = DesktopApp::default();
+        let mut terminal = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(3, 20));
+        terminal.feed(b"selected text\r\n");
+        let snapshot = terminal.snapshot();
+        let line = snapshot.screen_start_line;
+        app.terminal_surface.submit_snapshot(Arc::new(snapshot));
+        app.begin_clipboard_selection(TerminalCellPoint { row: 0, column: 0 });
+        app.update_clipboard_selection(TerminalCellPoint { row: 0, column: 7 });
+        app.finish_clipboard_selection();
+        app.open_terminal_search();
+        assert!(
+            matches!(app.terminal_reading.origin.unwrap().position, Position::History { line: saved, cell: 0 } if saved == line)
         );
     }
 

@@ -419,7 +419,7 @@ impl DesktopApp {
         {
             let view = daemon.view();
             if self.log_surface.is_some() && self.submitted_log_page.is_none() && view.session_id.is_some() {
-                let request=cshell_render::LogPageRequest{source_id:cshell_render::LogSourceId(0),follow_tail:true,anchor_line_id:0,cell_offset:0,rows_before:self.viewport_rows.saturating_add(128).min(4095),rows_after:0};
+                let request = if self.terminal_scrollback { self.initial_terminal_history_request() } else { cshell_render::LogPageRequest{source_id:cshell_render::LogSourceId(0),follow_tail:true,anchor_line_id:0,cell_offset:0,rows_before:self.viewport_rows.saturating_add(128).min(4095),rows_after:0} };
                 if self.terminal_scrollback{daemon.request_terminal_history_page(request);}else{daemon.request_log_page(request);}
             }
             redraw_needed |= self
