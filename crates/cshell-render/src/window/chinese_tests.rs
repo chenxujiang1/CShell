@@ -5,16 +5,7 @@ use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
 // Keep exactly the fonts supplied by the application, so developer/CI system
 // fonts cannot hide missing CJK coverage on another user's Mac.
 fn without_system_fonts(atlas: &mut GlyphAtlas) {
-    let mut db = atlas.font_system.db().clone();
-    let external: Vec<_> = db
-        .faces()
-        .filter(|face| !matches!(face.source, fontdb::Source::Binary(_)))
-        .map(|face| face.id)
-        .collect();
-    for id in external {
-        db.remove_face(id);
-    }
-    atlas.font_system = FontSystem::new_with_locale_and_db("zh-CN".into(), db);
+    atlas.font_system = bundled_fallback_fonts(&atlas.font_system);
     atlas.shaped_cells.clear();
 }
 
@@ -129,5 +120,69 @@ fn styled_chinese_rerasterizes_after_atlas_eviction_without_question_marks() {
             assert!(atlas.revision > revision);
             assert!(redrawn.iter().all(|glyph| *glyph != atlas.glyph('?')));
         }
+    }
+}
+
+#[test]
+fn out_of_range_font_layout_is_rejected_before_subpixel_conversion() {
+    let mut atlas = GlyphAtlas::build().unwrap();
+    without_system_fonts(&mut atlas);
+    let mut buffer = Buffer::new(&mut atlas.font_system, Metrics::new(28.0, 36.0));
+    buffer.set_text(
+        "e",
+        &Attrs::new().family(Family::Monospace),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut atlas.font_system, false);
+    let run = buffer.layout_runs().next().unwrap();
+    let valid = run.glyphs[0].clone();
+    assert!(checked_physical_glyph(&valid, run.line_y).is_some());
+    for bad in [
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        i32::MAX as f32,
+        i32::MIN as f32,
+    ] {
+        let mut glyph = valid.clone();
+        glyph.x = bad;
+        assert!(checked_physical_glyph(&glyph, run.line_y).is_none());
+        glyph = valid.clone();
+        glyph.font_size = bad;
+        assert!(checked_physical_glyph(&glyph, run.line_y).is_none());
+        assert!(checked_physical_glyph(&valid, bad).is_none());
+    }
+}
+
+#[test]
+fn bundled_fallback_glyphs_rasterize_in_the_original_font_system() {
+    let mut atlas = GlyphAtlas::build().unwrap();
+    let mut fallback = bundled_fallback_fonts(&atlas.font_system);
+    let shaped = shape_checked(
+        &mut fallback,
+        "等",
+        &Attrs::new().family(Family::Monospace),
+        atlas.font_size,
+        atlas.cell_height,
+        atlas.cell_width * 2.0,
+    )
+    .unwrap();
+    assert!(!shaped.is_empty());
+    for shaped in shaped {
+        assert_ne!(shaped.cache_key.glyph_id, 0);
+        let face = atlas
+            .font_system
+            .db()
+            .face(shaped.cache_key.font_id)
+            .unwrap();
+        assert!(
+            face.families
+                .iter()
+                .any(|(name, _)| name.starts_with("Noto Sans SC"))
+        );
+        let raster = atlas.dynamic_glyph(shaped.cache_key).unwrap();
+        assert!(raster.width > 0 && raster.height > 0);
+        assert_ne!(raster, atlas.glyph('?'));
     }
 }

@@ -86,6 +86,55 @@ struct ShapedGlyph {
     offset_y: f32,
 }
 
+fn checked_physical_glyph(glyph: &cosmic_text::LayoutGlyph, line_y: f32) -> Option<ShapedGlyph> {
+    // Invalid system-font metrics must not reach cosmic-text's i32 subpixel
+    // conversion (nor wrap into extreme GPU coordinates in release builds).
+    let bounded = |value: f32| value.is_finite() && value.abs() < 1_048_576.0;
+    if !(glyph.font_size.is_finite() && glyph.font_size > 0.0 && glyph.font_size <= 256.0)
+        || !bounded(line_y) || !bounded(glyph.w)
+        || !bounded(glyph.x + glyph.font_size * glyph.x_offset)
+        || !bounded(glyph.y - glyph.font_size * glyph.y_offset + line_y)
+    {
+        return None;
+    }
+    let physical = glyph.physical((0.0, line_y), 1.0);
+    Some(ShapedGlyph {
+        cache_key: physical.cache_key,
+        offset_x: physical.x as f32,
+        offset_y: physical.y as f32,
+    })
+}
+
+fn bundled_fallback_fonts(fonts: &FontSystem) -> FontSystem {
+    let mut db = fonts.db().clone();
+    let external: Vec<_> = db.faces()
+        .filter(|face| !matches!(face.source, fontdb::Source::Binary(_)))
+        .map(|face| face.id).collect();
+    for id in external { db.remove_face(id); }
+    // Retain the original face IDs so cached glyphs rasterize through the
+    // original font system using the same embedded face data.
+    FontSystem::new_with_locale_and_db(fonts.locale().to_owned(), db)
+}
+
+fn shape_checked(
+    fonts: &mut FontSystem, text: &str, attrs: &Attrs<'_>,
+    font_size: f32, cell_height: f32, cell_span: f32,
+) -> Option<Vec<ShapedGlyph>> {
+    let mut buffer = Buffer::new(fonts, Metrics::new(font_size, cell_height));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(Some(cell_span), Some(cell_height));
+    buffer.set_monospace_width(Some(cell_span));
+    buffer.set_text(text, attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(fonts, false);
+    let mut shaped = Vec::new();
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            shaped.push(checked_physical_glyph(glyph, run.line_y)?);
+        }
+    }
+    Some(shaped)
+}
+
 struct GlyphAtlas {
     font_size: f32,
     pixels: Vec<u8>,
@@ -258,29 +307,15 @@ impl GlyphAtlas {
             if key.italic {
                 attrs = attrs.style(FontStyle::Italic);
             }
-            let mut buffer = Buffer::new(
-                &mut self.font_system,
-                Metrics::new(self.font_size, self.cell_height),
-            );
             let cell_span = self.cell_width * f32::from(key.columns);
-            buffer.set_wrap(Wrap::None);
-            buffer.set_size(Some(cell_span), Some(self.cell_height));
-            buffer.set_monospace_width(Some(cell_span));
-            buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
-            buffer.shape_until_scroll(&mut self.font_system, false);
-            let shaped: Vec<_> = buffer
-                .layout_runs()
-                .flat_map(|run| {
-                    run.glyphs.iter().map(move |glyph| {
-                        let physical = glyph.physical((0.0, run.line_y), 1.0);
-                        ShapedGlyph {
-                            cache_key: physical.cache_key,
-                            offset_x: physical.x as f32,
-                            offset_y: physical.y as f32,
-                        }
-                    })
+            let shaped = shape_checked(&mut self.font_system, &key.text, &attrs,
+                self.font_size, self.cell_height, cell_span)
+                .or_else(|| {
+                    let mut fallback = bundled_fallback_fonts(&self.font_system);
+                    shape_checked(&mut fallback, &key.text, &attrs,
+                        self.font_size, self.cell_height, cell_span)
                 })
-                .collect();
+                .unwrap_or_default();
             if self.shaped_cells.len() >= 4096 {
                 self.shaped_cells.clear();
             }
