@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 mod release_performance;
+mod routing;
 use std::cell::Cell;
 fn password() -> Secret {
     Secret::new(b"original-test-password".to_vec())

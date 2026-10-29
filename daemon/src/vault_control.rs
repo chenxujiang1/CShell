@@ -18,6 +18,7 @@ mod package;
 mod managed_keys;
 mod rebuild;
 mod protection;
+mod routing;
 
 const MODE_BINDING: &str = "profile-credential-mode-v1";
 #[cfg(test)]
@@ -97,7 +98,8 @@ impl VaultController {
             match active_path.try_exists().and_then(|exists| {
                 activation_path(&active_path)
                     .try_exists()
-                    .map(|active| exists || active || root.as_ref().is_ok_and(Option::is_some))
+                    .and_then(|active| Ok(exists || active || root.as_ref().is_ok_and(Option::is_some)
+                        || routing::evidence_exists(&active_path)?))
             }) {
                 Ok(false) if active_path != path => Backend::Unavailable(VaultError::ReloadRequired),
                 Ok(false) => Backend::Native,
@@ -188,6 +190,9 @@ impl VaultController {
     pub(crate) fn lock(&self) {
         self.invalidate();
         let mut state = self.guard();
+        // Failure still locks. An old/missing index then requires an unlock;
+        // preserving confidentiality takes priority over avoiding a prompt.
+        let _ = routing::publish(&state);
         if let Backend::Portable(vault) = &mut state.backend {
             vault.lock();
         }
@@ -226,6 +231,7 @@ impl VaultController {
             return Err(VaultError::Locked);
         }
         self.manually_locked.store(false,Ordering::Release);
+        let _ = routing::publish(&state);
         Ok(())
     }
     pub(crate) fn create_system(&self, expected: u64) -> Result<(), VaultError> {
@@ -287,6 +293,7 @@ impl VaultController {
             return Err(VaultError::Locked);
         }
         self.manually_locked.store(false,Ordering::Release);
+        let _ = routing::publish(&state);
         Ok(())
     }
     pub(crate) fn unlock_system(&self, expected: u64) -> Result<(), VaultError> {
@@ -295,6 +302,7 @@ impl VaultController {
     fn unlock_system_with(&self, expected: u64, read: impl FnOnce(VaultRootRef) -> Result<Secret,cshell_vault::KeychainError>) -> Result<(), VaultError> {
         let epoch = self.begin_unlock(expected)?;
         let mut state = self.guard();
+        let _ = routing::publish(&state);
         state.unlocked_at = None;
         if let Backend::Portable(vault) = &mut state.backend {
             vault.lock();
@@ -313,11 +321,13 @@ impl VaultController {
         }
         state.unlocked_at = Some(Instant::now());
         self.manually_locked.store(false,Ordering::Release);
+        let _ = routing::publish(&state);
         Ok(())
     }
     pub(crate) fn unlock(&self, password: &Secret, expected: u64) -> Result<(), VaultError> {
         let epoch = self.begin_unlock(expected)?;
         let mut state = self.guard();
+        let _ = routing::publish(&state);
         state.unlocked_at = None;
         if let Backend::Portable(vault) = &mut state.backend {
             vault.lock();
@@ -335,6 +345,7 @@ impl VaultController {
         }
         state.unlocked_at = Some(Instant::now());
         self.manually_locked.store(false,Ordering::Release);
+        let _ = routing::publish(&state);
         Ok(())
     }
     pub(crate) fn reload(&self) -> Result<(), VaultError> {
@@ -357,7 +368,8 @@ impl VaultController {
             Ok(root) => root,
             Err(error) => { state.backend = Backend::Unavailable(error); return Err(error); }
         };
-        if !state.path.try_exists()? && !activation_path(&state.path).try_exists()? && let Some(id) = state.root {
+        if !state.path.try_exists()? && !activation_path(&state.path).try_exists()?
+            && !routing::evidence_exists(&state.path)? && let Some(id) = state.root {
             let secret = SystemVaultRootKeys::read(id).map_err(|_| VaultError::RootKeyUnavailable)?;
             let mut vault = PortableVault::create(&state.path, &secret)?;
             activate(&state.path)?; vault.lock(); state.backend = Backend::Portable(Box::new(vault));
@@ -591,7 +603,34 @@ impl VaultController {
                 }
             }
         }
+        if !response.unlocked && response.status == VaultControlStatus::Ok as i32
+            && let Some(id) = id
+            && matches!(state.backend, Backend::Portable(_))
+        {
+            match routing::mode(&state, id) {
+                Ok(value) => {
+                    response.portable = value;
+                    response.key_notice = if value {
+                        "当前连接凭据位置：凭据库；实际读取库内凭据时才需要解锁。"
+                    } else {
+                        "当前连接凭据位置：系统存储；读取此配置的凭据无需解锁此凭据库。"
+                    }.into();
+                }
+                Err(VaultError::Locked) => response.key_notice =
+                    "当前连接存储位置待验证，首次连接需解锁确认一次；不会回退到系统旧密码。".into(),
+                Err(error) => {
+                    response.status = status(error) as i32;
+                    response.key_notice = "凭据库文件已变化，请重新加载后检查存储位置。".into();
+                }
+            }
+        }
         response
+    }
+}
+impl Drop for VaultController {
+    fn drop(&mut self) {
+        let state = self.state.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = routing::publish(state);
     }
 }
 fn activation_path(path: &std::path::Path) -> PathBuf {
@@ -666,8 +705,17 @@ fn portable(state: &mut State) -> Result<&mut PortableVault, VaultError> {
 }
 fn mode(state: &mut State, id: ProfileId) -> Result<bool, VaultError> {
     match &mut state.backend {
-        Backend::Native => Ok(false),
-        Backend::Portable(v) => mode_value(v, id),
+        Backend::Native => {
+            if state.path.try_exists()? || activation_path(&state.path).try_exists()?
+                || routing::evidence_exists(&state.path)?
+            { return Err(VaultError::ReloadRequired); }
+            Ok(false)
+        }
+        Backend::Portable(v) if v.status().unlocked => {
+            v.metadata_binding()?;
+            mode_value(v, id)
+        }
+        Backend::Portable(_) => routing::mode(state, id),
         Backend::Unavailable(e) => Err(*e),
     }
 }

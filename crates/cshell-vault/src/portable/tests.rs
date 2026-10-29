@@ -7,6 +7,24 @@ fn password() -> Secret {
 }
 
 #[test]
+fn auxiliary_metadata_signature_requires_unlock_and_binding_detects_disk_changes() {
+    use ring::signature::{ED25519, UnparsedPublicKey};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("metadata.vault");
+    let mut vault = PortableVault::create(&path, &password()).unwrap();
+    let binding = vault.metadata_binding().unwrap();
+    let (public, signature) = vault.sign_metadata(b"routing metadata").unwrap();
+    UnparsedPublicKey::new(&ED25519, public).verify(b"routing metadata", &signature).unwrap();
+    assert!(UnparsedPublicKey::new(&ED25519, public).verify(b"modified metadata", &signature).is_err());
+    assert_eq!(vault.status().record_count, 0);
+    vault.lock();
+    assert_eq!(vault.metadata_binding().unwrap(), binding);
+    assert_eq!(vault.sign_metadata(b"anything").unwrap_err(), VaultError::Locked);
+    std::fs::write(&path, b"damaged").unwrap();
+    assert!(vault.metadata_binding().is_err());
+}
+
+#[test]
 fn ciphertext_publication_retry_is_bounded_preserves_target_and_never_replays_creation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("destination");

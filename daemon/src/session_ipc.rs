@@ -1412,7 +1412,7 @@ impl SessionIpcService {
         }
         cshell_ssh::connection_progress::peer(0,&plan.target.host,plan.target.port);
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::Credentials);
-        vault.prepare_connection(format!("{}@{}:{}",plan.target.username,plan.target.host,plan.target.port)).await.map_err(|error|ssh_launch_failure(SshSessionError::Ssh(error)))?;
+        vault.prepare_plan(&plan).await.map_err(|error|ssh_launch_failure(SshSessionError::Ssh(error)))?;
         let mut cancellation = vault.cancellation();
         let epoch = *cancellation.borrow();
         let launch = async {

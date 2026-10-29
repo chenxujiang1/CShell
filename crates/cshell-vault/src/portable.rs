@@ -10,6 +10,10 @@ pub use package::{
     MAX_CREDENTIAL_PACKAGE_CONTEXT, MAX_CREDENTIAL_PACKAGE_RECORDS,
 };
 use rand::{TryRng, rngs::SysRng};
+use ring::{
+    digest, hkdf,
+    signature::{Ed25519KeyPair, KeyPair},
+};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
@@ -214,6 +218,47 @@ impl PortableVault {
 
     pub fn lock(&mut self) {
         self.keys = None;
+    }
+
+    /// Public binding for an auxiliary index. Never trusts a changed on-disk
+    /// document just because this instance still has an older copy in memory.
+    pub fn metadata_binding(&self) -> Result<([u8; 16], u64, [u8; 32]), VaultError> {
+        if self.reload_required {
+            return Err(VaultError::ReloadRequired);
+        }
+        let current = load(&self.path)?;
+        if current.authenticated_prefix != self.document.authenticated_prefix
+            || current.manifest.nonce != self.document.manifest.nonce
+            || current.manifest.ciphertext != self.document.manifest.ciphertext
+        {
+            return Err(VaultError::ReloadRequired);
+        }
+        let mut hash = digest::Context::new(&digest::SHA256);
+        hash.update(&current.authenticated_prefix);
+        hash.update(&current.manifest.nonce);
+        hash.update(&current.manifest.ciphertext);
+        let mut fingerprint = [0; 32];
+        fingerprint.copy_from_slice(hash.finish().as_ref());
+        Ok((current.header.id, current.header.revision, fingerprint))
+    }
+
+    /// Domain-separated signing key for non-secret routing metadata. The data
+    /// encryption key itself is never exposed, and signing requires an unlock.
+    pub fn sign_metadata(&self, message: &[u8]) -> Result<([u8; 32], Vec<u8>), VaultError> {
+        let keys = self.active_keys()?;
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"CSHELL-VAULT-ROUTING-SIGNING-v1");
+        let prk = salt.extract(keys.as_ref());
+        let info = [b"ed25519-public-routing-index".as_slice()];
+        let mut seed = Zeroizing::new([0; 32]);
+        prk.expand(&info, hkdf::HKDF_SHA256)
+            .map_err(|_| VaultError::DerivationFailed)?
+            .fill(&mut seed[..])
+            .map_err(|_| VaultError::DerivationFailed)?;
+        let pair = Ed25519KeyPair::from_seed_unchecked(seed.as_ref())
+            .map_err(|_| VaultError::DerivationFailed)?;
+        let mut public = [0; 32];
+        public.copy_from_slice(pair.public_key().as_ref());
+        Ok((public, pair.sign(message).as_ref().to_vec()))
     }
 
     /// Even a failed unlock of an already unlocked Vault discards its previous keys.

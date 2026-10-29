@@ -85,6 +85,9 @@ impl VaultPanel {
                 ui.label(&response.storage_path);
             });
         }
+        if !response.unlocked && !response.key_notice.is_empty() {
+            ui.weak(&response.key_notice);
+        }
         if self.busy {
             ui.horizontal(|ui| {
                 ui.spinner();

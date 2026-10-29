@@ -50,6 +50,11 @@ jobs:
       # Exercise desktop interaction on both native Mac architectures.
       - name: Run desktop interaction regression tests
         run: cargo test --locked -p cshell-gui --bin cshell-gui
+      - name: Verify storage-aware credential routing on macOS
+        run: |
+          cargo test --locked -p cshelld --lib vault_control -- --test-threads=2
+          cargo test --locked -p cshelld --lib keyboard_auth::login::tests -- --test-threads=2
+          cargo test --locked -p cshelld --lib native_password_can_be_saved_and_loaded_while_master_vault_stays_locked -- --ignored --test-threads=1
       - name: Build optimized application and companions
         run: cargo build --release --locked --target ${{ matrix.target }} -p cshell-gui -p cshelld -p cshell-script-worker
       - name: Package an ad-hoc signed trial application

@@ -240,10 +240,10 @@ async fn stored_password(
     let vault = vault.clone();
     let target = target.clone();
     tokio::task::spawn_blocking(move || {
-        let portable = vault.mode(target.profile_id).map_err(|e| e.to_string())?;
         if target.username.is_empty() || !target.uses_password() {
             return Ok(None);
         }
+        let portable = vault.mode(target.profile_id).map_err(|e| e.to_string())?;
         let secret = if portable {
             match vault.read(&target, Kind::Password) {
                 Ok(secret) => Some(secret),

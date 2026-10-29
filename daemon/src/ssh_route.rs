@@ -514,12 +514,24 @@ pub(crate) async fn load_authentication(
     target: &SshConnectionRecord,
     vault: &Arc<crate::vault_control::VaultController>,
 ) -> Result<SshAuthentication, String> {
+    vault.ensure_owned().map_err(|error| error.to_string())?;
     if target.auth_method==SshAuthMethod::Password || !target.options.authentication_order.is_empty() || target.username.is_empty() {
         return crate::keyboard_auth::ordered_authentication(target,vault).await;
     }
     load_single_authentication(target,vault,target.auth_method).await
 }
 pub(crate) async fn load_single_authentication(target:&SshConnectionRecord,vault:&Arc<crate::vault_control::VaultController>,method:SshAuthMethod)->Result<SshAuthentication,String> {
+    if method == SshAuthMethod::Agent {
+        vault.ensure_owned().map_err(|error| error.to_string())?;
+        return Ok(SshAuthentication::Agent {
+            backend: match target.agent_backend {
+                SshAgentBackend::Auto => AgentBackend::Auto,
+                SshAgentBackend::OpenSsh => AgentBackend::OpenSsh,
+                SshAgentBackend::Pageant => AgentBackend::Pageant,
+            },
+            identity_fingerprint: target.agent_identity.clone(),
+        });
+    }
     let controller = vault.clone();
     let id = target.profile_id;
     let portable = tokio::task::spawn_blocking(move || controller.mode(id))

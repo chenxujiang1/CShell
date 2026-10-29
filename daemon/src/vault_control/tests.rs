@@ -76,14 +76,12 @@ fn native_system_root_vault_reopens_locked_and_unlocks_only_with_the_keychain() 
     SystemVaultRootKeys::delete(cleanup.0).unwrap();
     assert!(reopened.unlock_system(generation(&reopened)).is_err());
     assert!(!reopened.response(None).unlocked);
-    assert_eq!(
-        reopened.mode(target.profile_id).unwrap_err(),
-        VaultError::Locked
-    );
+    assert!(reopened.mode(target.profile_id).unwrap());
+    assert_eq!(reopened.read(&target, Kind::Password).unwrap_err(), VaultError::Locked);
 }
 
 #[test]
-fn mode_and_lock_gate_all_saved_authentication_without_native_fallback() {
+fn mode_is_readable_while_locked_but_vault_secrets_never_fall_back_to_native() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("credentials.vault");
     let controller = VaultController::new(path.clone());
@@ -132,10 +130,9 @@ fn mode_and_lock_gate_all_saved_authentication_without_native_fallback() {
             .unwrap_err(),
         VaultError::Locked
     );
-    assert_eq!(
-        controller.mode(ProfileId::new()).unwrap_err(),
-        VaultError::Locked
-    );
+    assert!(!controller.mode(ProfileId::new()).unwrap());
+    assert!(controller.mode(target.profile_id).unwrap());
+    assert_eq!(controller.read(&target, Kind::Password).unwrap_err(), VaultError::Locked);
     assert_eq!(
         controller.unlock(&password(), previous).unwrap_err(),
         VaultError::AlreadyExists

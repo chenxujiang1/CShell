@@ -171,6 +171,18 @@ impl Fixture {
             attempts,
         }
     }
+    async fn connect_with_frontend(
+        &self,
+        target: SshConnectionRecord,
+    ) -> tokio::task::JoinHandle<
+        Result<crate::ssh_route::RoutedSshConnection, crate::session_ipc::SshLaunchFailure>,
+    > {
+        // Register the interactive frontend before starting authentication.
+        // A fast empty-account path must not race the first prompt poll.
+        self.call(VaultRequest::new(VaultOperation::KeyboardAuthPoll))
+            .await;
+        self.connect(target)
+    }
     fn connect(
         &self,
         target: SshConnectionRecord,
@@ -292,7 +304,7 @@ async fn login_empty_account_wrong_password_retry_saves_only_verified_credential
 {
     let fixture = Fixture::new("", None).await;
     let epoch = *fixture.profiles.vault.cancellation().borrow();
-    let job = fixture.connect(fixture.target.clone());
+    let job = fixture.connect_with_frontend(fixture.target.clone()).await;
     let first = fixture.prompt().await;
     assert!(first.login && first.username_editable);
     fixture.answer(&first, "wrong-password", true, false).await;
@@ -340,7 +352,7 @@ async fn login_empty_account_wrong_password_retry_saves_only_verified_credential
         epoch,
         "saving successful credentials must not cancel its own connection"
     );
-    let connection = connected(fixture.connect(saved)).await;
+    let connection = connected(fixture.connect_with_frontend(saved).await).await;
     connection.client.disconnect().await.unwrap();
     assert_eq!(
         fixture.keyboard.load(Ordering::Relaxed),
@@ -362,7 +374,7 @@ async fn login_empty_account_wrong_password_retry_saves_only_verified_credential
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn login_without_save_and_cancelled_retry_do_not_persist_any_credentials() {
     let fixture = Fixture::new("", None).await;
-    let job = fixture.connect(fixture.target.clone());
+    let job = fixture.connect_with_frontend(fixture.target.clone()).await;
     let first = fixture.prompt().await;
     fixture.answer(&first, "", false, false).await;
     let password = fixture.prompt().await;
@@ -377,7 +389,7 @@ async fn login_without_save_and_cancelled_retry_do_not_persist_any_credentials()
         fixture.profiles.vault.read(&fixture.target, Kind::Password),
         Err(cshell_vault::VaultError::Missing)
     ));
-    let job = fixture.connect(fixture.target.clone());
+    let job = fixture.connect_with_frontend(fixture.target.clone()).await;
     let first = fixture.prompt().await;
     fixture.answer(&first, "wrong-password", true, false).await;
     let retry = fixture.prompt().await;
@@ -392,7 +404,7 @@ async fn login_without_save_and_cancelled_retry_do_not_persist_any_credentials()
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn login_rejected_saved_password_can_be_corrected_and_replaced_after_success() {
     let fixture = Fixture::new("operator", Some("old-password")).await;
-    let job = fixture.connect(fixture.target.clone());
+    let job = fixture.connect_with_frontend(fixture.target.clone()).await;
     let retry = fixture.prompt().await;
     assert!(retry.rejected);
     assert_eq!(
@@ -422,7 +434,7 @@ async fn login_rejected_saved_password_can_be_corrected_and_replaced_after_succe
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn login_does_not_overwrite_configuration_edited_while_prompt_is_open() {
     let fixture = Fixture::new("", None).await;
-    let job = fixture.connect(fixture.target.clone());
+    let job = fixture.connect_with_frontend(fixture.target.clone()).await;
     let first = fixture.prompt().await;
     let snapshot = fixture.profiles.service.load().await.unwrap().snapshot();
     let mut changed = fixture.target.clone();

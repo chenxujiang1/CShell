@@ -30,6 +30,7 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 rand.workspace = true
+ring.workspace = true
 tempfile.workspace = true
 zmodem2 = "=0.7.3"
 unicode-segmentation.workspace = true

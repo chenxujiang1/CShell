@@ -467,10 +467,7 @@ impl SessionIpcService {
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::Credentials);
         crate::keyboard_auth::for_sftp(
             session,
-            vault.prepare_connection(format!(
-                "{}@{}:{}",
-                plan.target.username, plan.target.host, plan.target.port
-            )),
+            vault.prepare_plan(&plan),
         )
         .await
         .map_err(|error| {

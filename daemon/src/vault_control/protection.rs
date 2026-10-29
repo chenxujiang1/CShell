@@ -3,6 +3,66 @@ use super::*;
 use std::path::Path;
 const CONNECTION_PREPARATION_TIMEOUT: Duration = Duration::from_secs(120);
 impl VaultController {
+    /// Inspect every authentication hop before asking for any master password.
+    /// Unknown legacy routing is verified by unlocking once, never by guessing
+    /// that an old native password should be used.
+    pub(crate) async fn prepare_plan(
+        self: &Arc<Self>,
+        plan: &crate::ssh_route::SshConnectionPlan,
+    ) -> Result<(), cshell_ssh::SshError> {
+        let targets = std::iter::once(plan.target.clone())
+            .chain(plan.jumps.clone())
+            .collect();
+        self.prepare_profiles(
+            targets,
+            format!("{}@{}:{}", plan.target.username, plan.target.host, plan.target.port),
+        )
+        .await
+    }
+
+    async fn prepare_profiles(
+        self: &Arc<Self>,
+        targets: Vec<SshConnectionRecord>,
+        label: String,
+    ) -> Result<(), cshell_ssh::SshError> {
+        if self.keyboard_auth.current_owner_cancelled() {
+            return Err(cshell_ssh::SshError::AuthenticationCancelled);
+        }
+        let controller = self.clone();
+        let required = tokio::task::spawn_blocking(move || {
+            controller.ensure_owned()?;
+            let mut required = false;
+            let mut confirmation = false;
+            for target in targets {
+                if !target.uses_password() && !target.uses_private_key() {
+                    continue;
+                }
+                match controller.mode(target.profile_id) {
+                    Ok(true) => required = true,
+                    Err(VaultError::Locked) => {
+                        required = true;
+                        confirmation = true;
+                    }
+                    Ok(false) => {},
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok::<_, VaultError>((required, confirmation))
+        })
+        .await
+        .map_err(|_| cshell_ssh::SshError::CredentialUnavailable("凭据存储位置检查失败".into()))?
+        .map_err(|error| {
+            cshell_ssh::SshError::CredentialUnavailable(format!("凭据存储位置不可用：{error}"))
+        })?;
+        if self.keyboard_auth.current_owner_cancelled() {
+            return Err(cshell_ssh::SshError::AuthenticationCancelled);
+        }
+        if required.0 {
+            self.prepare_connection_with_confirmation(label, required.1).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn protect(
         &self,
         revision: u64,
@@ -216,13 +276,21 @@ impl VaultController {
         self.lock();
     }
     /// Called only by an explicit connection workflow; polling never unlocks.
+    #[cfg(test)]
     pub(crate) async fn prepare_connection(
         self: &Arc<Self>,
         target: String,
     ) -> Result<(), cshell_ssh::SshError> {
+        self.prepare_connection_with_confirmation(target, false).await
+    }
+    async fn prepare_connection_with_confirmation(
+        self: &Arc<Self>,
+        target: String,
+        confirmation: bool,
+    ) -> Result<(), cshell_ssh::SshError> {
         tokio::time::timeout(
             CONNECTION_PREPARATION_TIMEOUT,
-            self.prepare_connection_inner(target),
+            self.prepare_connection_inner(target, confirmation),
         )
         .await
         .map_err(|_| {
@@ -234,6 +302,7 @@ impl VaultController {
     async fn prepare_connection_inner(
         self: &Arc<Self>,
         target: String,
+        confirmation: bool,
     ) -> Result<(), cshell_ssh::SshError> {
         use cshell_ssh::{KeyboardInteractiveChallenge, KeyboardInteractivePrompt, SshError};
         let _access = self.access_gate.lock().await;
@@ -287,7 +356,9 @@ impl VaultController {
                             "主密码不正确，请重试"
                         }
                         .into(),
-                        instructions: if response.system {
+                        instructions: if confirmation {
+                            "本连接的凭据存储位置尚待确认（旧版升级或索引变化）。请解锁一次后继续；不会迁移现有密码，也不会把主密码发送到服务器。"
+                        } else if response.system {
                             "凭据库已手动锁定，确认解锁后继续本次连接。"
                         } else {
                             "输入凭据库主密码后自动继续本次连接；此密码不会发送到服务器。"
