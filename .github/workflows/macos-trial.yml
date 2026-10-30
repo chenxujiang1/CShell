@@ -50,6 +50,10 @@ jobs:
       # Exercise desktop interaction on both native Mac architectures.
       - name: Run desktop interaction regression tests
         run: cargo test --locked -p cshell-gui --bin cshell-gui
+      - name: Verify profile protocol and explicit host-key updates
+        run: |
+          cargo test --locked -p cshell-ipc --lib
+          cargo test --locked -p cshelld --test profile_control
       - name: Verify storage-aware credential routing on macOS
         run: |
           cargo test --locked -p cshelld --lib vault_control -- --test-threads=2

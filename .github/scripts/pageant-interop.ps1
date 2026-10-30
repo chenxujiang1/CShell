@@ -38,6 +38,12 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Pageant interoperability test failed with exit code $LASTEXITCODE"
     }
+    if (-not [string]::IsNullOrWhiteSpace($env:CSHELL_OPENSSH_MFA_FIXTURE)) {
+        cargo test -p cshell-ssh --lib openssh_mfa_tests::real_openssh_ordered_pageant_then_keyboard_interactive --all-features --locked -- --ignored --exact --test-threads=1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Pageant/OpenSSH MFA interoperability test failed with exit code $LASTEXITCODE"
+        }
+    }
 } finally {
     Remove-Item Env:CSHELL_PAGEANT_INTEROP -ErrorAction SilentlyContinue
 

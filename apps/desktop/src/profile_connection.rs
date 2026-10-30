@@ -217,7 +217,17 @@ pub enum ProfileClientCommand {
         profile_id: ProfileId,
         expected_revision: u64,
     },
+    PreviewHostKeyUpdate {
+        profile_id: ProfileId,
+        expected_revision: u64,
+    },
     ConfirmHostKey {
+        profile_id: ProfileId,
+        expected_revision: u64,
+        token: Zeroizing<Vec<u8>>,
+        fingerprint: String,
+    },
+    ConfirmHostKeyUpdate {
         profile_id: ProfileId,
         expected_revision: u64,
         token: Zeroizing<Vec<u8>>,
@@ -229,7 +239,9 @@ impl ProfileClientCommand {
     fn host_key_scope(&self) -> Option<(ProfileId, u64)> {
         match self {
             Self::PreviewHostKey { profile_id, expected_revision }
-            | Self::ConfirmHostKey { profile_id, expected_revision, .. } => Some((*profile_id, *expected_revision)),
+            | Self::ConfirmHostKey { profile_id, expected_revision, .. }
+            | Self::PreviewHostKeyUpdate { profile_id, expected_revision }
+            | Self::ConfirmHostKeyUpdate { profile_id, expected_revision, .. } => Some((*profile_id, *expected_revision)),
             _ => None,
         }
     }
@@ -269,6 +281,8 @@ impl std::fmt::Debug for ProfileClientCommand {
             Self::CommitReviewedImport { .. } => "CommitReviewedImport",
             Self::PreviewHostKey { .. } => "PreviewHostKey",
             Self::ConfirmHostKey { .. } => "ConfirmHostKey",
+            Self::PreviewHostKeyUpdate { .. } => "PreviewHostKeyUpdate",
+            Self::ConfirmHostKeyUpdate { .. } => "ConfirmHostKeyUpdate",
         };
         formatter.write_str(name)
     }
@@ -612,8 +626,10 @@ async fn profile_worker(
                         publish_catalog(&shared, result);
                         update(&shared, |view| { view.preview = None; view.preview_source = None; });
                     }
-                    ProfileClientCommand::PreviewHostKey { profile_id, expected_revision } => {
-                        let mut outgoing = request(ProfileOperation::PreviewHostKey);
+                    command @ (ProfileClientCommand::PreviewHostKey { .. } | ProfileClientCommand::PreviewHostKeyUpdate { .. }) => {
+                        let updating = matches!(&command, ProfileClientCommand::PreviewHostKeyUpdate { .. });
+                        let (profile_id, expected_revision) = command.host_key_scope().unwrap();
+                        let mut outgoing = request(if updating { ProfileOperation::PreviewHostKeyUpdate } else { ProfileOperation::PreviewHostKey });
                         outgoing.expected_revision = expected_revision;
                         outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
                         let result = send(&config, outgoing).await.and_then(|response| {
@@ -622,8 +638,14 @@ async fn profile_worker(
                         });
                         update(&shared, |view| publish_host_key_preview(view, result));
                     }
-                    ProfileClientCommand::ConfirmHostKey { profile_id, expected_revision, mut token, fingerprint } => {
-                        let mut outgoing = request(ProfileOperation::ConfirmHostKey);
+                    command @ (ProfileClientCommand::ConfirmHostKey { .. } | ProfileClientCommand::ConfirmHostKeyUpdate { .. }) => {
+                        let updating = matches!(&command, ProfileClientCommand::ConfirmHostKeyUpdate { .. });
+                        let (profile_id, expected_revision, mut token, fingerprint) = match command {
+                            ProfileClientCommand::ConfirmHostKey { profile_id, expected_revision, token, fingerprint }
+                            | ProfileClientCommand::ConfirmHostKeyUpdate { profile_id, expected_revision, token, fingerprint } => (profile_id, expected_revision, token, fingerprint),
+                            _ => unreachable!(),
+                        };
+                        let mut outgoing = request(if updating { ProfileOperation::ConfirmHostKeyUpdate } else { ProfileOperation::ConfirmHostKey });
                         outgoing.expected_revision = expected_revision;
                         outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
                         outgoing.host_key_token = std::mem::take(&mut *token);
@@ -1054,7 +1076,7 @@ async fn send(
 ) -> Result<ProfileResponse, String> {
     let timeout = if matches!(
         ProfileOperation::try_from(request.operation),
-        Ok(ProfileOperation::PreviewHostKey | ProfileOperation::ConfirmHostKey)
+        Ok(ProfileOperation::PreviewHostKey | ProfileOperation::ConfirmHostKey | ProfileOperation::PreviewHostKeyUpdate | ProfileOperation::ConfirmHostKeyUpdate)
     ) {
         std::time::Duration::from_secs(40)
     } else if matches!(
@@ -1558,6 +1580,7 @@ mod tests {
                 default_username: marker.into(),
             }),
             host_key_preview: Some(HostKeyPreviewData {
+                previous_fingerprints: Vec::new(),
                 token: marker.as_bytes().to_vec(),
                 profile_id: vec![],
                 host: String::new(),

@@ -10,6 +10,8 @@ use std::path::Path;
 use thiserror::Error;
 
 const MAX_KNOWN_HOSTS_BYTES: u64 = 8 * 1024 * 1024;
+mod update;
+pub use update::{HostKeyUpdate, preview_host_key_update, update_confirmed_host_key};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostKeyCheck {
@@ -205,6 +207,9 @@ impl KnownHostsVerifier {
     #[must_use]
     pub fn has_matching_entries(&self) -> bool {
         !self.entries.is_empty()
+    }
+    pub fn has_authority_entries(&self) -> bool {
+        self.entries.iter().any(|entry| entry.marker == Some(Marker::CertAuthority))
     }
     /// Add a peer pin without replacing known_hosts, CA or revocation checks.
     #[must_use]

@@ -35,6 +35,7 @@ pub use transport::{ProxyProtocol, SshStream, SshTransport, open_proxy_stream, o
 pub use forwarding::{ForwardHandle, ForwardLimits, RemoteForwardTarget};
 pub use known_hosts::import_confirmed_host_key;
 pub use known_hosts::{HostKeyCheck, KnownHostsError, KnownHostsVerifier};
+pub use known_hosts::{HostKeyUpdate, preview_host_key_update, update_confirmed_host_key};
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_AUTH_ROUND_TIMEOUT: Duration = Duration::from_secs(30);

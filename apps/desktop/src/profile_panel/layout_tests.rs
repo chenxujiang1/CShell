@@ -273,6 +273,37 @@ fn unknown_host_key_automatically_previews_the_requested_profile_in_a_modal() {
 }
 
 #[test]
+fn changed_key_waits_for_catalog_then_opens_update_prompt_once() {
+    let context = context(); let mut panel = panel();
+    let requested = panel.profile_draft.as_ref().unwrap().record.id;
+    let catalog = panel.catalog.take().unwrap();
+    let error = Some("HostKeyChanged: server reinstalled".into());
+    panel.set_launch_error(error.clone(), Some(requested));
+    assert!(panel.host_key_prompt.is_none());
+    panel.sync(&DesktopProfileView { generation: 1, catalog: Some(catalog), ..Default::default() });
+    let mut command = None;
+    frame(&context, egui::vec2(900.0, 600.0), |ctx| command = panel.draw(ctx));
+    assert!(matches!(command, Some(ProfileClientCommand::PreviewHostKeyUpdate { profile_id, .. }) if profile_id == requested));
+    panel.host_key_prompt = None; // User dismissed the prompt.
+    assert!(!panel.set_launch_error(error, Some(requested)));
+    assert!(panel.host_key_prompt.is_none());
+}
+
+#[test]
+fn identical_host_key_errors_from_different_profiles_open_the_correct_prompt() {
+    let context = context(); let mut panel = panel();
+    let first = panel.catalog.as_ref().unwrap().ssh_connections[0].clone();
+    let mut second = first.clone(); second.profile_id = ProfileId::new(); second.host = "second.example.test".into();
+    panel.catalog.as_mut().unwrap().ssh_connections.push(second.clone());
+    let error = Some("HostKeyChanged: server reinstalled".into());
+    panel.set_launch_error(error.clone(), Some(first.profile_id));
+    panel.set_launch_error(error, Some(second.profile_id));
+    let mut command = None;
+    frame(&context, egui::vec2(900.0, 600.0), |ctx| command = panel.draw(ctx));
+    assert!(matches!(command, Some(ProfileClientCommand::PreviewHostKeyUpdate { profile_id, .. }) if profile_id == second.profile_id));
+}
+
+#[test]
 fn every_ssh_settings_page_keeps_save_and_connect_visible() {
     for size in [
         egui::vec2(1280.0, 800.0),

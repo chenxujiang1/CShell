@@ -39,6 +39,7 @@ pub struct ProfileIpcService {
 }
 
 struct PendingHostKey {
+    replacement: Option<cshell_ssh::HostKeyUpdate>,
     target: SshConnectionRecord,
     revision: u64,
     public_key_line: String,
@@ -672,7 +673,8 @@ impl ProfileIpcService {
                 let snapshot = self.service.load().await.map_err(service_error)?.snapshot();
                 Ok(catalog_response(snapshot))
             }
-            ProfileOperation::PreviewHostKey => {
+            ProfileOperation::PreviewHostKey | ProfileOperation::PreviewHostKeyUpdate => {
+                let replacing = operation == ProfileOperation::PreviewHostKeyUpdate;
                 let id_bytes = decode_id(&request.credential_profile_id)
                     .map_err(|error| invalid(error.to_string()))?;
                 let id = ProfileId::from_bytes(id_bytes);
@@ -682,7 +684,7 @@ impl ProfileIpcService {
                 let verifier = crate::host_ca_store::verifier(&path, &target.host, target.port)
                     .await
                     .map_err(|error| (ProfileStatus::Corrupt, error.into()))?;
-                if verifier.has_matching_entries() {
+                if !replacing && verifier.has_matching_entries() {
                     return Err((
                         ProfileStatus::Conflict,
                         "host already has a known_hosts entry; first-key import is blocked".into(),
@@ -691,6 +693,14 @@ impl ProfileIpcService {
                 let scanned = crate::ssh_route::scan_profile(&plan, &path, &self.vault)
                     .await
                     .map_err(|error| (ProfileStatus::Unavailable, error))?;
+                let replacement = if replacing {
+                    if verifier.has_authority_entries() || verifier.public_key_revoked(&scanned.public_key_line)
+                        .map_err(|error| (ProfileStatus::Corrupt, error.into()))? {
+                        return Err((ProfileStatus::Conflict, "CA-managed or revoked host trust cannot be replaced".into()));
+                    }
+                    Some(cshell_ssh::preview_host_key_update(&path, &target.host, target.port, &scanned.public_key_line)
+                        .map_err(|error| (ProfileStatus::Conflict, error))?)
+                } else { None };
                 let token: [u8; 32] = rand::random();
                 let expires_unix_seconds = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -698,6 +708,7 @@ impl ProfileIpcService {
                     .as_secs()
                     + 300;
                 let preview = HostKeyPreviewData {
+                    previous_fingerprints: replacement.as_ref().map_or_else(Vec::new, |r| r.previous_fingerprints.clone()),
                     profile_id: id_bytes.to_vec(),
                     host: target.host.clone(),
                     port: target.port.into(),
@@ -708,6 +719,7 @@ impl ProfileIpcService {
                     expires_unix_seconds,
                 };
                 let pending = PendingHostKey {
+                    replacement,
                     target,
                     revision: request.expected_revision,
                     public_key_line: scanned.public_key_line,
@@ -728,7 +740,8 @@ impl ProfileIpcService {
                     ..ProfileResponse::default()
                 })
             }
-            ProfileOperation::ConfirmHostKey => {
+            ProfileOperation::ConfirmHostKey | ProfileOperation::ConfirmHostKeyUpdate => {
+                let replacing = operation == ProfileOperation::ConfirmHostKeyUpdate;
                 let id_bytes = decode_id(&request.credential_profile_id)
                     .map_err(|error| invalid(error.to_string()))?;
                 let id = ProfileId::from_bytes(id_bytes);
@@ -744,6 +757,7 @@ impl ProfileIpcService {
                         || preview.revision != request.expected_revision
                         || request.host_key_token.as_slice() != preview.token
                         || request.host_key_fingerprint != preview.fingerprint
+                        || replacing != preview.replacement.is_some()
                     {
                         return Err(invalid(
                             "host-key preview expired or fingerprint confirmation did not match",
@@ -774,11 +788,14 @@ impl ProfileIpcService {
                     ));
                 }
                 let profile_id = id.as_uuid().to_string();
+                let _mutation = self.catalog_mutation.lock().await;
+                self.host_key_target(id, request.expected_revision).await?;
                 let _trust = crate::host_ca_store::coordination().read_owned().await;
                 let verifier = crate::host_ca_store::verifier(&path, &target.host, target.port)
                     .await
                     .map_err(|error| (ProfileStatus::Corrupt, error.into()))?;
-                if verifier.has_matching_entries()
+                if (!replacing && verifier.has_matching_entries())
+                    || (replacing && verifier.has_authority_entries())
                     || verifier
                         .public_key_revoked(&scanned.public_key_line)
                         .map_err(|error| (ProfileStatus::Corrupt, error.into()))?
@@ -790,14 +807,17 @@ impl ProfileIpcService {
                     ));
                 }
                 tokio::task::spawn_blocking(move || {
-                    import_confirmed_host_key(
+                    if let Some(replacement) = &pending.replacement {
+                        cshell_ssh::update_confirmed_host_key(&path, &target.host, target.port,
+                            &scanned.public_key_line, &pending.fingerprint, &profile_id, replacement)
+                    } else { import_confirmed_host_key(
                         &path,
                         &target.host,
                         target.port,
                         &scanned.public_key_line,
                         &pending.fingerprint,
                         &profile_id,
-                    )
+                    ) }
                 })
                 .await
                 .map_err(|_| {
@@ -810,7 +830,7 @@ impl ProfileIpcService {
                 Ok(ProfileResponse {
                     status: ProfileStatus::Ok as i32,
                     revision: request.expected_revision,
-                    detail: "Host key imported into known_hosts with an audit record".into(),
+                    detail: if replacing { "Host key updated in known_hosts with an audit record" } else { "Host key imported into known_hosts with an audit record" }.into(),
                     ..ProfileResponse::default()
                 })
             }

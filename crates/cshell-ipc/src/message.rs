@@ -2128,6 +2128,7 @@ mod tests {
     fn host_key_preview_debug_redacts_token_and_peer_text_through_nested_envelopes() {
         let marker = "SECRET-PREVIEW-MARKER";
         let preview = crate::HostKeyPreviewData {
+                previous_fingerprints: Vec::new(),
             token: marker.as_bytes().to_vec(),
             host: marker.into(),
             algorithm: marker.into(),

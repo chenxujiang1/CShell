@@ -185,6 +185,8 @@ pub struct ProfilePanel {
     local_shells: Vec<cshell_ipc::LocalShellData>,
     error: Option<String>,
     launch_error: Option<String>,
+    launch_error_profile: Option<ProfileId>,
+    pending_host_key_prompt: Option<(ProfileId, bool)>,
     cancelled_connection: Option<ProfileId>,
     status: String,
     credential_pending: bool,
@@ -234,6 +236,8 @@ impl Default for ProfilePanel {
             local_shells: Vec::new(),
             error: None,
             launch_error: None,
+            launch_error_profile: None,
+            pending_host_key_prompt: None,
             cancelled_connection: None,
             status: String::new(),
             credential_pending: false,
@@ -335,40 +339,42 @@ impl ProfilePanel {
     }
 
     pub fn set_launch_error(&mut self, error: Option<String>, profile_id: Option<ProfileId>) -> bool {
-        if self.launch_error == error {
-            return false;
+        if self.launch_error == error && self.launch_error_profile == profile_id {
+            return self.try_host_key_prompt();
         }
-        if error.is_some() {
-            // Connection failures remain visible in their tab; configuration
-            // and host-key issues alone may request a settings/confirmation UI.
-            // Recovery stays in the connection flow; editing settings is explicit.
-
-            if error.as_deref().is_some_and(|error| error.starts_with("HostKeyUnknown:")) {
-                if let Some(id) = profile_id
-                    && self.selected != Some(Selected::Profile(id))
-                    && !self.open_profile_editor(id)
-                {
-                    self.selected = None;
-                    self.profile_draft = None;
-                }
-                self.page = 0;
-                self.editor_tab = 3;
-                if let Some(target) = self.catalog.as_ref().and_then(|catalog| {
-                    catalog.ssh_connections.iter().find(|target| Some(target.profile_id) == profile_id)
-                        .map(|target| (target.clone(), catalog.revision))
-                }) {
-                    self.host_key_prompt = Some(crate::host_key_prompt::HostKeyPrompt::new(target.0, target.1, true));
-                    self.open = false;
-                }
-            }
-        }
+        self.pending_host_key_prompt = profile_id.and_then(|id| error.as_deref().and_then(|message| {
+            if message.starts_with("HostKeyUnknown:") { Some((id, false)) }
+            else if message.starts_with("HostKeyChanged:") { Some((id, true)) }
+            else { None }
+        }));
         self.launch_error = error;
+        self.launch_error_profile = profile_id;
+        self.try_host_key_prompt();
+        true
+    }
+
+    fn try_host_key_prompt(&mut self) -> bool {
+        let Some((id, updating)) = self.pending_host_key_prompt else { return false; };
+        let Some((target, revision)) = self.catalog.as_ref().and_then(|catalog| {
+            catalog.ssh_connections.iter().find(|target| target.profile_id == id)
+                .map(|target| (target.clone(), catalog.revision))
+        }) else { return false; };
+        self.pending_host_key_prompt = None;
+        if self.selected != Some(Selected::Profile(id)) { self.open_profile_editor(id); }
+        self.page = 0;
+        self.editor_tab = 3;
+        self.host_key_prompt = Some(if updating {
+            crate::host_key_prompt::HostKeyPrompt::new_update(target, revision, true)
+        } else { crate::host_key_prompt::HostKeyPrompt::new(target, revision, true) });
+        self.open = false;
         true
     }
 
     pub fn finish_open(&mut self) {
         self.open = false;
         self.launch_error = None;
+        self.launch_error_profile = None;
+        self.pending_host_key_prompt = None;
         self.clear_secrets();
     }
     pub(crate) fn take_cancelled_connection(&mut self)->Option<ProfileId> {self.cancelled_connection.take()}
@@ -452,6 +458,7 @@ impl ProfilePanel {
                 None => {}
             }
         }
+        self.try_host_key_prompt();
         if let Some(prompt) = &mut self.host_key_prompt { prompt.sync(view); }
         true
     }
@@ -544,6 +551,8 @@ impl ProfilePanel {
                 if let Some(error) = self.error.as_ref().or(self.launch_error.as_ref()) {
                     let message = if error.starts_with("HostKeyUnknown:") {
                         "尚未信任服务器主机密钥。请预览指纹并在弹框中确认。"
+                    } else if error.starts_with("HostKeyChanged:") {
+                        "服务器主机密钥已变化，请核对新旧指纹并确认更新。"
                     } else { error.as_str() };
                     ui.colored_label(cshell_ui::theme::DANGER, message);
                 } else if self.status == "配置和密码已保存" || self.status.starts_with("密码已") || self.status == "服务器主机密钥已保存" {

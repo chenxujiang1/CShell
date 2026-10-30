@@ -129,7 +129,7 @@ fn guidance(stage: Stage) -> &'static str {
         Stage::Proxy => "检查代理地址、协议及代理到目标服务器的连通性。",
         Stage::JumpChannel => "检查该级跳板到目标的网络，以及服务器是否允许 TCP 转发。",
         Stage::Handshake => "确认该端口提供 SSH 服务，并检查服务器与当前算法策略是否兼容。",
-        Stage::HostKey => "请使用现有的指纹确认入口核对主机身份；密钥变化时先核实服务器。",
+        Stage::HostKey => "请在主机密钥确认窗口核对指纹；服务器重装导致指纹变化时，核对新旧指纹后点击“确认更新并连接”。",
         Stage::Authentication | Stage::Credentials | Stage::WaitingForInput => {
             "检查账号和认证方式、凭据库或私钥；重试时可重新输入密码和动态码。"
         }

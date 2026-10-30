@@ -36,6 +36,9 @@ const STATIC_ATLAS_HEIGHT: u32 = STATIC_GLYPH_COUNT
 #[cfg(test)]
 #[path = "window/chinese_tests.rs"]
 mod chinese_tests;
+#[cfg(test)]
+#[path = "window/paste_tests.rs"]
+mod paste_tests;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -2185,7 +2188,7 @@ fn build_vertices_themed(
                 resolve_color_themed(cell.style.background, false, theme),
             );
             if cell.style.inverse {
-                if background[3] == 0.0 && matches!(theme, TerminalTheme::Custom(_)) {
+                if background[3] == 0.0 {
                     background = theme.background();
                 }
                 std::mem::swap(&mut foreground, &mut background);
@@ -2530,7 +2533,7 @@ fn build_log_vertices_themed(
             let mut foreground = resolve_color_themed(style.foreground, true, theme);
             let mut background = resolve_color_themed(style.background, false, theme);
             if style.inverse {
-                if background[3] == 0.0 && matches!(theme, TerminalTheme::Custom(_)) {
+                if background[3] == 0.0 {
                     background = theme.background();
                 }
                 std::mem::swap(&mut foreground, &mut background);

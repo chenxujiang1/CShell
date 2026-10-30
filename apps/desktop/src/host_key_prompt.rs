@@ -49,6 +49,7 @@ mod tests {
             }),
             host_key_scope: Some((target.profile_id, 7)),
             host_key_preview: Some(HostKeyPreviewData {
+                previous_fingerprints: Vec::new(),
                 profile_id: target.profile_id.as_uuid().as_bytes().to_vec(),
                 host: target.host.clone(),
                 port: 22,
@@ -218,6 +219,63 @@ mod tests {
             assert!(matches!(prompt.stage, Stage::Failed(_)));
         }
     }
+
+    #[test]
+    fn changed_key_displays_both_fingerprints_and_reconnects_only_after_update_receipt() {
+        let context = egui::Context::default(); context.enable_accesskit();
+        let (mut prompt, mut view) = fixture();
+        prompt.updating = true;
+        view.host_key_preview.as_mut().unwrap().previous_fingerprints = vec!["ssh-ed25519 SHA256:previous-key".into()];
+        assert!(matches!(frame(&context, &mut prompt, vec![]).1, Some(Action::Request(ProfileClientCommand::PreviewHostKeyUpdate { .. }))));
+        prompt.sync(&view);
+        let (first_tree, _) = frame(&context, &mut prompt, vec![]);
+        let (tree, action) = frame(&context, &mut prompt, vec![]);
+        assert!(action.is_none());
+        for label in ["ssh-ed25519 SHA256:previous-key", "SHA256:test-only-fingerprint", "确认更新并连接"] {
+            assert!(first_tree.nodes.iter().chain(tree.nodes.iter()).any(|(_, node)| node.label() == Some(label) || node.value() == Some(label)), "missing {label}");
+        }
+        assert!(matches!(frame(&context, &mut prompt, click(&tree, "确认更新并连接")).1,
+            Some(Action::Request(ProfileClientCommand::ConfirmHostKeyUpdate { fingerprint, .. })) if fingerprint == view.host_key_preview.as_ref().unwrap().fingerprint));
+        assert!(frame(&context, &mut prompt, vec![]).1.is_none());
+        view.host_key_preview = None; view.host_key_confirmed = Some(prompt.target.profile_id);
+        prompt.sync(&view);
+        assert!(matches!(prompt.draw(&context), Some(Action::Connect(id)) if id == prompt.target.profile_id));
+    }
+
+    #[test]
+    fn cancelling_an_update_never_confirms_and_missing_previous_fingerprint_is_rejected() {
+        let context = egui::Context::default(); context.enable_accesskit();
+        let (mut prompt, mut view) = fixture(); prompt.updating = true;
+        frame(&context, &mut prompt, vec![]); prompt.sync(&view);
+        assert!(matches!(prompt.stage, Stage::Failed(_)));
+        let (mut prompt, _) = fixture(); prompt.updating = true;
+        view.host_key_preview.as_mut().unwrap().previous_fingerprints = vec!["ssh-ed25519 SHA256:old".into()];
+        frame(&context, &mut prompt, vec![]); prompt.sync(&view);
+        frame(&context, &mut prompt, vec![]);
+        let (tree, _) = frame(&context, &mut prompt, vec![]);
+        assert!(matches!(frame(&context, &mut prompt, click(&tree, "取消")).1, Some(Action::Dismiss)));
+    }
+    #[test]
+    fn many_previous_keys_keep_update_and_cancel_visible_in_a_small_window() {
+        let context = crate::ui_layout_gate::context(); context.enable_accesskit();
+        let (mut prompt, mut view) = fixture(); prompt.updating = true;
+        view.host_key_preview.as_mut().unwrap().previous_fingerprints = (0..64)
+            .map(|i| format!("ssh-ed25519 SHA256:previous-key-{i:043}")).collect();
+        prompt.stage = Stage::Scanning; prompt.sync(&view);
+        let mut tree = None;
+        for _ in 0..3 {
+            let mut output = context.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 360.0))),
+                ..Default::default()
+            }, |ui| { assert!(prompt.draw(ui.ctx()).is_none()); });
+            output.textures_delta.clear(); tree = output.platform_output.accesskit_update;
+        }
+        let tree = tree.unwrap();
+        for label in ["取消", "确认更新并连接"] {
+            let bounds = tree.nodes.iter().find(|(_, n)| n.label() == Some(label)).unwrap().1.bounds().unwrap();
+            assert!(bounds.x0 >= 0.0 && bounds.x1 <= 480.0 && bounds.y0 >= 0.0 && bounds.y1 <= 360.0, "{label}: {bounds:?}");
+        }
+    }
 }
 
 pub(crate) enum Action {
@@ -227,6 +285,7 @@ pub(crate) enum Action {
 }
 
 pub(crate) struct HostKeyPrompt {
+    updating: bool,
     target: SshConnectionRecord,
     revision: u64,
     reconnect: bool,
@@ -236,11 +295,18 @@ pub(crate) struct HostKeyPrompt {
 impl HostKeyPrompt {
     pub(crate) fn new(target: SshConnectionRecord, revision: u64, reconnect: bool) -> Self {
         Self {
+            updating: false,
             target,
             revision,
             reconnect,
             stage: Stage::Start,
         }
+    }
+
+    pub(crate) fn new_update(target: SshConnectionRecord, revision: u64, reconnect: bool) -> Self {
+        let mut prompt = Self::new(target, revision, reconnect);
+        prompt.updating = true;
+        prompt
     }
 
     pub(crate) fn fail(&mut self, message: impl Into<String>) {
@@ -276,7 +342,10 @@ impl HostKeyPrompt {
         if let Some(error) = &view.error {
             self.fail(error.clone());
         } else if matches!(self.stage, Stage::Scanning) && view.host_key_existing_entry {
-            self.stage = Stage::ExistingEntry;
+            if self.reconnect && !self.updating {
+                self.updating = true;
+                self.stage = Stage::Start;
+            } else { self.stage = Stage::ExistingEntry; }
         } else if matches!(self.stage, Stage::Confirming) {
             if view.host_key_confirmed == Some(self.target.profile_id) {
                 self.stage = Stage::Complete;
@@ -287,6 +356,7 @@ impl HostKeyPrompt {
                 && preview.port == u32::from(self.target.port)
                 && !preview.token.is_empty()
                 && !preview.fingerprint.is_empty()
+                && self.updating == !preview.previous_fingerprints.is_empty()
             {
                 self.stage = Stage::Ready(preview.clone());
             } else {
@@ -306,10 +376,12 @@ impl HostKeyPrompt {
         let mut action = None;
         if matches!(self.stage, Stage::Start) {
             self.stage = Stage::Scanning;
-            action = Some(Action::Request(ProfileClientCommand::PreviewHostKey {
+            action = Some(Action::Request(if self.updating { ProfileClientCommand::PreviewHostKeyUpdate {
+                profile_id: self.target.profile_id, expected_revision: self.revision,
+            } } else { ProfileClientCommand::PreviewHostKey {
                 profile_id: self.target.profile_id,
                 expected_revision: self.revision,
-            }));
+            } }));
         }
         if let Stage::Ready(preview) = &self.stage {
             let now = std::time::SystemTime::now()
@@ -324,32 +396,59 @@ impl HostKeyPrompt {
                 ui.set_width((context.content_rect().width() - 48.0).clamp(260.0, 480.0));
                 ui.heading(if matches!(self.stage, Stage::ExistingEntry) {
                     "已有服务器密钥记录"
+                } else if self.updating {
+                    "服务器指纹已变化，是否更新？"
                 } else {
                     "信任此服务器？"
                 });
-                ui.label(format!("{}:{}", self.target.host, self.target.port));
+                let endpoint = format!("{}:{}", self.target.host, self.target.port);
+                ui.add(egui::Label::new(&endpoint).truncate()).on_hover_text(&endpoint);
                 match &self.stage {
                     Stage::ExistingEntry => {
                         ui.label("此主机已有密钥记录，无需再次导入。");
                         ui.label("连接时会自动校验服务器密钥。若密钥变更或已撤销，将拒绝连接。");
+                        if ui.button("检查指纹更新").clicked() {
+                            self.updating = true;
+                            action = Some(Action::Request(ProfileClientCommand::PreviewHostKeyUpdate {
+                                profile_id: self.target.profile_id, expected_revision: self.revision,
+                            }));
+                        }
                         if ui.button("关闭").clicked() {
                             action = Some(Action::Dismiss);
                         }
                     }
                     Stage::Ready(preview) => {
+                        egui::ScrollArea::vertical().id_salt("host-key-details")
+                            .max_height((context.content_rect().height() - 180.0).max(60.0)).show(ui, |ui| {
+                        if self.updating {
+                            ui.label("原来保存的指纹");
+                            egui::ScrollArea::vertical().id_salt("previous-host-keys").max_height(80.0).show(ui, |ui| {
+                            for fingerprint in &preview.previous_fingerprints {
+                                ui.add(egui::Label::new(egui::RichText::new(fingerprint).monospace()).wrap());
+                            }
+                            });
+                            ui.label("服务器当前提供的新指纹");
+                        }
                         ui.label(format!("密钥算法：{}", preview.algorithm));
                         ui.label("SHA256 指纹");
                         ui.add(
                             egui::Label::new(egui::RichText::new(&preview.fingerprint).monospace())
                                 .wrap(),
                         );
-                        ui.label("首次连接此服务器。确认后保存此密钥，今后连接自动校验。");
+                        ui.label(if self.updating {
+                            "服务器重装可能导致指纹变化。请通过服务器控制台或管理员核实新指纹；确认后仅更新此地址与端口的记录。"
+                        } else { "首次连接此服务器。确认后保存此密钥，今后连接自动校验。" });
+                        });
                         ui.horizontal(|ui| {
                             if ui.button("取消").clicked() {
                                 action = Some(Action::Dismiss);
                             }
                             if ui
-                                .button(if self.reconnect {
+                                .button(if self.updating && self.reconnect {
+                                    "确认更新并连接"
+                                } else if self.updating {
+                                    "确认更新"
+                                } else if self.reconnect {
                                     "确认并连接"
                                 } else {
                                     "确认并保存"
@@ -357,12 +456,15 @@ impl HostKeyPrompt {
                                 .clicked()
                             {
                                 action =
-                                    Some(Action::Request(ProfileClientCommand::ConfirmHostKey {
+                                    Some(Action::Request(if self.updating { ProfileClientCommand::ConfirmHostKeyUpdate {
+                                        profile_id: self.target.profile_id, expected_revision: self.revision,
+                                        token: Zeroizing::new(preview.token.clone()), fingerprint: preview.fingerprint.clone(),
+                                    } } else { ProfileClientCommand::ConfirmHostKey {
                                         profile_id: self.target.profile_id,
                                         expected_revision: self.revision,
                                         token: Zeroizing::new(preview.token.clone()),
                                         fingerprint: preview.fingerprint.clone(),
-                                    }));
+                                    } }));
                             }
                         });
                     }
@@ -394,9 +496,11 @@ impl HostKeyPrompt {
         }
         if matches!(
             action,
-            Some(Action::Request(ProfileClientCommand::ConfirmHostKey { .. }))
+            Some(Action::Request(ProfileClientCommand::ConfirmHostKey { .. } | ProfileClientCommand::ConfirmHostKeyUpdate { .. }))
         ) {
             self.stage = Stage::Confirming;
+        } else if matches!(action, Some(Action::Request(ProfileClientCommand::PreviewHostKeyUpdate { .. }))) {
+            self.stage = Stage::Scanning;
         }
         action
     }

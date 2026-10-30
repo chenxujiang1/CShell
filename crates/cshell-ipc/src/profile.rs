@@ -78,6 +78,8 @@ pub enum ProfileOperation {
     CommitThemes = 13,
     ExportThemes = 14,
     ExportOpenSsh = 15,
+    PreviewHostKeyUpdate = 16,
+    ConfirmHostKeyUpdate = 17,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -128,6 +130,8 @@ impl std::fmt::Debug for ProfileResponse {
 #[derive(Clone, PartialEq, Message)]
 #[prost(skip_debug)]
 pub struct HostKeyPreviewData {
+    #[prost(string, repeated, tag = "9")]
+    pub previous_fingerprints: Vec<String>,
     #[prost(bytes = "vec", tag = "1")]
     pub profile_id: Vec<u8>,
     #[prost(string, tag = "2")]

@@ -83,6 +83,7 @@ for _ in $(seq 1 600); do
 done
 if [[ "${server_ready}" -ne 1 ]]; then
   docker logs "${container_name}"
+  echo "::error title=OpenSSH historical interoperability::sshd did not become ready"
   exit 1
 fi
 
