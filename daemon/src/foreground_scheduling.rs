@@ -4,7 +4,7 @@
 
 #[cfg(windows)]
 #[derive(Debug, Default)]
-pub(crate) struct ForegroundScheduling {
+pub struct ForegroundScheduling {
     requested: bool,
     held: bool,
 }
@@ -33,10 +33,21 @@ impl ForegroundScheduling {
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Default)]
-pub(crate) struct ForegroundScheduling {
+pub struct ForegroundScheduling {
     token: Option<
         objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>,
     >,
+    original_qos: Option<(u32, i32)>,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn pthread_get_qos_class_np(
+        thread: libc::pthread_t,
+        class: *mut u32,
+        relative: *mut i32,
+    ) -> i32;
+    fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
 }
 
 #[cfg(target_os = "macos")]
@@ -45,6 +56,28 @@ impl ForegroundScheduling {
         use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
         if active == self.token.is_some() {
             return;
+        }
+        if active {
+            let (mut class, mut relative) = (0, 0);
+            // SAFETY: the current pthread is live and both outputs are valid.
+            let read = unsafe {
+                pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative)
+            };
+            // Apple qos.h: USER_INTERACTIVE=0x21, DEFAULT=0x15. Unspecified
+            // threads can be promoted, but cannot be restored to the sentinel 0.
+            if read == 0 {
+                // SAFETY: this changes only this parser/caller thread using a valid class.
+                let set = unsafe { pthread_set_qos_class_self_np(0x21, 0) };
+                if set == 0 {
+                    self.original_qos = Some(if class == 0 {
+                        (0x15, 0)
+                    } else {
+                        (class, relative)
+                    });
+                } else {
+                    tracing::debug!(code = set, "native terminal QoS request unavailable");
+                }
+            }
         }
         // Parser threads have no Cocoa event loop to drain autoreleased objects.
         objc2::rc::autoreleasepool(|_| {
@@ -61,6 +94,10 @@ impl ForegroundScheduling {
                 unsafe { process.endActivity(&token) };
             }
         });
+        if !active && let Some((class, relative)) = self.original_qos.take() {
+            // SAFETY: restore the QoS captured on this same thread above.
+            unsafe { pthread_set_qos_class_self_np(class, relative) };
+        }
     }
 }
 
@@ -73,11 +110,21 @@ impl Drop for ForegroundScheduling {
 
 #[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Debug, Default)]
-pub(crate) struct ForegroundScheduling {
+pub struct ForegroundScheduling {
     _private: (),
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl ForegroundScheduling {
     pub(crate) fn update(&mut self, _active: bool) {}
+}
+
+impl ForegroundScheduling {
+    /// Scope a foreground consumer on its current thread. Native state is
+    /// restored on drop; keep the scope on the thread that created it.
+    pub fn enter() -> Self {
+        let mut scope = Self::default();
+        scope.update(true);
+        scope
+    }
 }

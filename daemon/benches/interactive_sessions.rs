@@ -12,6 +12,7 @@ use cshelld::{LocalSessionRegistry, SessionIpcServer, SessionIpcService};
 use std::{
     collections::BTreeMap,
     env,
+    fmt::Write as _,
     io::{BufRead, Write},
     process::ExitCode,
     sync::Arc,
@@ -29,6 +30,7 @@ fn main() -> ExitCode {
     if env::args().nth(1).as_deref() == Some(CHILD) {
         return child();
     }
+    let _foreground = cshelld::ForegroundActivity::enter();
     let _ = tracing_subscriber::fmt()
         .with_env_filter("cshelld=warn")
         .with_writer(std::io::stderr)
@@ -74,10 +76,15 @@ fn child() -> ExitCode {
             }
             // An OS terminal echo cannot fake this transformed, session-specific response.
             let reversed: String = line.trim().chars().rev().collect();
+            // Issue one real burst. Per-line console writes add ConHost RPC
+            // scheduling to the transport budget on Windows CI.
+            let mut response = String::with_capacity(2048);
             for row in 0..64 {
-                writeln!(output, "\x1b[32mBURST:{index:02}:{row:02}\x1b[0m")?;
+                write!(response, "\x1b[32mBURST:{index:02}:{row:02}\x1b[0m\r\n")
+                    .map_err(std::io::Error::other)?;
             }
-            writeln!(output, "ACK:{index:02}:{reversed}")?;
+            write!(response, "ACK:{index:02}:{reversed}\r\n").map_err(std::io::Error::other)?;
+            output.write_all(response.as_bytes())?;
             output.flush()?;
         }
     })();

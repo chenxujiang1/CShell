@@ -314,9 +314,9 @@ mod activity_tests {
         let view =
             crate::TerminalFrameSubscription::new(cshell_domain::SessionId::new(), latest.clone());
         let second = view.clone();
-        assert_eq!(latest.publication_interval().as_millis(), 16);
+        assert_eq!(latest.publication_interval().as_millis(), 8);
         drop(view);
-        assert_eq!(latest.publication_interval().as_millis(), 16);
+        assert_eq!(latest.publication_interval().as_millis(), 8);
         drop(second);
         assert_eq!(latest.publication_interval().as_millis(), 100);
     }

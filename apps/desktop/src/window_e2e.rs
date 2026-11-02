@@ -193,7 +193,9 @@ impl WindowE2e {
             return true;
         }
         let done = self.complete();
-        let timeout = if self.multi_window {
+        // Recovery deliberately switches to CPU rendering. Give that functional
+        // path the multi-window completion budget, retaining every frame assertion.
+        let timeout = if self.multi_window || self.software_recoveries > 0 {
             Duration::from_secs(60)
         } else {
             Duration::from_secs(30)

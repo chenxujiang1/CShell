@@ -140,6 +140,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod foreground_scheduling;
+pub use foreground_scheduling::ForegroundScheduling as ForegroundActivity;
 
 pub enum SubmitError {
     Backpressure(Vec<u8>),
@@ -479,7 +480,9 @@ impl LatestSnapshot {
         Arc::new(SnapshotActivity(Arc::clone(&self.subscribers)))
     }
     fn publication_interval(&self) -> Duration {
-        Duration::from_millis(if self.has_subscribers() { 16 } else { 100 })
+        // Reserve part of a 16.7 ms interactive frame for IPC and GPU completion.
+        // Consumers still poll at display cadence and coalesce generations.
+        Duration::from_millis(if self.has_subscribers() { 8 } else { 100 })
     }
     fn has_subscribers(&self) -> bool {
         self.subscribers.load(Ordering::Relaxed) > 0
