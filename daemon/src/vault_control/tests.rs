@@ -25,6 +25,16 @@ fn generation(controller: &VaultController) -> u64 {
 }
 
 #[test]
+fn directory_preparation_failure_is_not_reported_as_lock_contention() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("file");
+    std::fs::write(&file, b"unchanged").unwrap();
+    let controller = VaultController::new(file.join("master.vault"));
+    assert!(matches!(controller.ensure_owned(), Err(VaultError::Io(_))));
+    assert_eq!(std::fs::read(file).unwrap(), b"unchanged");
+}
+
+#[test]
 fn native_system_root_vault_reopens_locked_and_unlocks_only_with_the_keychain() {
     if std::env::var_os("CSHELL_KEYCHAIN_NATIVE_TEST").is_none() {
         return;
@@ -36,6 +46,8 @@ fn native_system_root_vault_reopens_locked_and_unlocks_only_with_the_keychain() 
         }
     }
     let directory = tempfile::tempdir().unwrap();
+    // Surface the precise OS/security error if this isolated fixture cannot be secured.
+    cshell_ipc::RuntimePaths::prepare(directory.path().to_owned()).unwrap();
     let path = directory.path().join("system-vault");
     let controller = VaultController::new(path.clone());
     controller.create_system(generation(&controller)).unwrap();

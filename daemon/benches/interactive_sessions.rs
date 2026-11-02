@@ -92,6 +92,8 @@ struct Observer {
     index: usize,
     stream: transport::ClientStream,
     replica: TerminalSubscriptionReplica,
+    native: cshelld::LatestSnapshot,
+    journal: std::path::PathBuf,
 }
 
 impl Observer {
@@ -139,8 +141,17 @@ impl Observer {
         })
         .await
         .map_err(|_| {
+            let native = self.native.latest().map(|s| {
+                let text: String = s.cells.iter().map(|c| c.character).collect();
+                (s.generation, text.contains(marker), text)
+            });
+            let journal = cshell_output_store::scan(&self.journal, false).map(|report| {
+                let bytes: Vec<_> = report.records.into_iter().flat_map(|r| r.payload).collect();
+                let tail = &bytes[bytes.len().saturating_sub(2048)..];
+                (bytes.len(), String::from_utf8_lossy(tail).into_owned())
+            });
             format!(
-                "session {} did not publish {marker:?} at {}x{} within 5 seconds; last snapshot {observed}",
+                "session {} did not publish {marker:?} at {}x{} within 5 seconds; last snapshot {observed}; native={native:?}; journal={journal:?}",
                 self.index, size.rows, size.cols
             )
         })?
@@ -228,7 +239,7 @@ async fn run() -> ProbeResult<()> {
     };
     let mut observers = Vec::with_capacity(sessions);
     for (index, session) in ids.iter().copied().enumerate() {
-        let mut observer = subscribe(&endpoint, token, index, session).await?;
+        let mut observer = subscribe(&endpoint, token, index, session, &registry).await?;
         observer
             .observe(&format!("READY:{index:02}"), TerminalSize::cells(14, 80))
             .await?;
@@ -299,7 +310,7 @@ async fn run() -> ProbeResult<()> {
             observers.clear();
             assert_sessions(&mut control, &ids).await?;
             for (index, session) in ids.iter().copied().enumerate() {
-                let mut observer = subscribe(&endpoint, token, index, session).await?;
+                let mut observer = subscribe(&endpoint, token, index, session, &registry).await?;
                 observer
                     .observe(&format!("ACK:{index:02}:{}", responses[index]), size)
                     .await?;
@@ -410,6 +421,7 @@ async fn subscribe(
     token: [u8; 32],
     index: usize,
     session: SessionId,
+    registry: &LocalSessionRegistry,
 ) -> ProbeResult<Observer> {
     let mut stream = authenticated(endpoint, token).await?;
     let replica = TerminalSubscriptionReplica::new(session);
@@ -428,6 +440,8 @@ async fn subscribe(
         index,
         stream,
         replica,
+        native: registry.attach(session)?.snapshots(),
+        journal: registry.journal_path(session),
     })
 }
 struct Control {

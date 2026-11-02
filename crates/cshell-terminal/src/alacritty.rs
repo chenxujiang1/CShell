@@ -14,6 +14,7 @@ use alacritty_terminal::vte::ansi::{
 };
 use cshell_domain::TerminalSize;
 use std::collections::HashMap;
+use std::time::Instant;
 pub const DEFAULT_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TERMINAL_COLUMNS: u16 = 1024;
 pub const MAX_TERMINAL_ROWS: u16 = 512;
@@ -250,6 +251,40 @@ impl HistorySlice {
 }
 
 impl AlacrittyTerminalEngine {
+    pub fn synchronized_output_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    fn stop_synchronized_output(&mut self) -> bool {
+        if self.parser.sync_timeout().sync_timeout().is_none() {
+            return false;
+        }
+        self.parser.stop_sync(&mut self.terminal);
+        self.enforce_history_budget();
+        true
+    }
+
+    fn expire_synchronized_output(&mut self, now: Instant) -> bool {
+        if self
+            .synchronized_output_deadline()
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+        self.stop_synchronized_output()
+    }
+
+    /// Release an incomplete synchronized update even if the transport goes idle.
+    /// VTE records the deadline; its caller must expire it and publish the result.
+    pub fn flush_expired_synchronized_output(&mut self, now: Instant) -> Option<FrameDelta> {
+        self.expire_synchronized_output(now).then(|| self.feed(&[]))
+    }
+
+    /// Preserve the last buffered update when the output stream ends.
+    pub fn finish_synchronized_output(&mut self) -> Option<FrameDelta> {
+        self.stop_synchronized_output().then(|| self.feed(&[]))
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -373,6 +408,7 @@ impl AlacrittyTerminalEngine {
 impl TerminalEngine for AlacrittyTerminalEngine {
     fn feed(&mut self, bytes: &[u8]) -> FrameDelta {
         let base_generation = self.generation;
+        self.expire_synchronized_output(Instant::now());
         // Parse bounded slices, enforcing retained allocation limits between slices.
         for chunk in bytes.chunks(64 * 1024) {
             let filtered = self.output_guard.filter(chunk);
@@ -594,6 +630,62 @@ mod tests {
     use super::AlacrittyTerminalEngine;
     use crate::{CellWidth, Color, CursorAppearance, CursorShape, TerminalEngine};
     use cshell_domain::TerminalSize;
+
+    #[test]
+    fn synchronized_update_flushes_at_deadline_with_responses_and_monotonic_generation() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(4, 40));
+        terminal.feed(b"prefix\x1b[?2026htail\x1b[6n");
+        let deadline = terminal.parser.sync_timeout().sync_timeout().unwrap();
+        let before = terminal.generation();
+        assert!(
+            terminal
+                .flush_expired_synchronized_output(deadline - std::time::Duration::from_millis(1))
+                .is_none()
+        );
+        let delta = terminal
+            .flush_expired_synchronized_output(deadline)
+            .unwrap();
+        assert_eq!(delta.base_generation, before);
+        assert_eq!(delta.generation, before + 1);
+        assert_eq!(delta.terminal_responses, vec![b"\x1b[1;11R".to_vec()]);
+        let text: String = terminal
+            .snapshot()
+            .row(0)
+            .unwrap()
+            .iter()
+            .map(|c| c.character)
+            .collect();
+        assert!(text.starts_with("prefixtail"), "{text:?}");
+        assert!(
+            terminal
+                .flush_expired_synchronized_output(deadline)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn completed_synchronized_update_is_not_flushed_twice() {
+        let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(4, 40));
+        terminal.feed(b"\x1b[?2026hone");
+        let deadline = terminal.parser.sync_timeout().sync_timeout().unwrap();
+        terminal.feed(b"two\x1b[?2026l");
+        let text: String = terminal
+            .snapshot()
+            .row(0)
+            .unwrap()
+            .iter()
+            .map(|c| c.character)
+            .collect();
+        assert!(text.starts_with("onetwo"), "{text:?}");
+        let generation = terminal.generation();
+        assert!(
+            terminal
+                .flush_expired_synchronized_output(deadline)
+                .is_none()
+        );
+        assert!(terminal.finish_synchronized_output().is_none());
+        assert_eq!(terminal.generation(), generation);
+    }
 
     #[test]
     fn produces_project_owned_cells_and_true_color() {

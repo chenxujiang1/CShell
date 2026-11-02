@@ -577,16 +577,16 @@ mod tests {
     #[test]
     fn local_scan_is_read_only_and_rejects_parent_paths_and_reserved_names() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("empty")).unwrap();
-        std::fs::write(root.path().join("keep"), b"unchanged").unwrap();
-        let inventory = local_inventory(root.path().to_str().unwrap(), &[]).unwrap();
+        // macOS's temporary-directory spelling can contain /var -> /private/var.
+        // Test a real directory; the production no-symlink policy stays intact.
+        let directory = root.path().canonicalize().unwrap();
+        std::fs::create_dir(directory.join("empty")).unwrap();
+        std::fs::write(directory.join("keep"), b"unchanged").unwrap();
+        let inventory = local_inventory(directory.to_str().unwrap(), &[]).unwrap();
         assert_eq!(inventory.len(), 2);
         assert!(inventory["empty"].directory);
-        assert_eq!(
-            std::fs::read(root.path().join("keep")).unwrap(),
-            b"unchanged"
-        );
-        assert!(local_inventory(root.path().join("../other").to_str().unwrap(), &[]).is_err());
+        assert_eq!(std::fs::read(directory.join("keep")).unwrap(), b"unchanged");
+        assert!(local_inventory(directory.join("../other").to_str().unwrap(), &[]).is_err());
         let mut seen = BTreeSet::new();
         assert!(check_name("../escape", &mut seen).is_err());
         assert!(check_name("a/b", &mut seen).is_ok());

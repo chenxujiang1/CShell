@@ -38,7 +38,7 @@ struct State {
 pub(crate) struct VaultController {
     pub(crate) keyboard_auth: Arc<crate::keyboard_auth::Broker>,
     path: PathBuf,
-    _ownership: Option<std::fs::File>,
+    _ownership: Result<std::fs::File, VaultError>,
     state: Mutex<State>,
     epoch: AtomicU64,
     changes: tokio::sync::watch::Sender<u64>,
@@ -121,7 +121,7 @@ impl VaultController {
         Arc::new(Self {
             keyboard_auth: Arc::new(crate::keyboard_auth::Broker::default()),
             path,
-            _ownership: ownership.ok(),
+            _ownership: ownership,
             state: Mutex::new(State {
                 path: active_path,
                 backend,
@@ -148,10 +148,7 @@ impl VaultController {
             .unwrap_or(VaultSessionState::Unavailable)
     }
     pub(crate) fn ensure_owned(&self) -> Result<(), VaultError> {
-        if self._ownership.is_none() {
-            return Err(VaultError::Busy);
-        }
-        Ok(())
+        self._ownership.as_ref().map(|_| ()).map_err(|error| *error)
     }
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     pub(crate) fn observe_desktop_session(&self, observed: VaultSessionState) {
@@ -185,9 +182,7 @@ impl VaultController {
         Ok(commit())
     }
     fn begin_unlock(&self, expected: u64) -> Result<u64, VaultError> {
-        if self._ownership.is_none() {
-            return Err(VaultError::Busy);
-        }
+        self.ensure_owned()?;
         let _gate = self
             .commit_gate
             .lock()
@@ -365,9 +360,7 @@ impl VaultController {
         Ok(())
     }
     pub(crate) fn reload(&self) -> Result<(), VaultError> {
-        if self._ownership.is_none() {
-            return Err(VaultError::Busy);
-        }
+        self.ensure_owned()?;
         if !self.enabled() {
             return Err(VaultError::InvalidInput);
         }

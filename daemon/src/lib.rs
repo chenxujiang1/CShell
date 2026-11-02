@@ -678,33 +678,47 @@ impl TerminalPipeline {
                 loop {
                     let interval = worker_latest.publication_interval();
                     publish_at = publish_at.min(Instant::now() + interval);
-                    let message = match receiver.recv_timeout(if dirty {
+                    let mut wait = if dirty {
                         publish_at.saturating_duration_since(Instant::now())
                     } else {
                         Duration::from_millis(100)
-                    }) {
+                    };
+                    if let Some(deadline) = terminal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .synchronized_output_deadline()
+                    {
+                        wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+                    }
+                    let message = match receiver.recv_timeout(wait) {
                         Ok(message) => message,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let mut terminal = terminal
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if let Some(delta) =
+                                terminal.flush_expired_synchronized_output(Instant::now())
+                            {
+                                worker_responses.publish(delta.terminal_responses)?;
+                                dirty = true;
+                            }
                             if dirty {
-                                worker_latest.publish(
-                                    terminal
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .snapshot(),
-                                );
+                                worker_latest.publish(terminal.snapshot());
                                 dirty = false;
                                 publish_at = Instant::now() + interval;
                             }
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            let mut terminal = terminal
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if let Some(delta) = terminal.finish_synchronized_output() {
+                                worker_responses.publish(delta.terminal_responses)?;
+                                dirty = true;
+                            }
                             if dirty {
-                                worker_latest.publish(
-                                    terminal
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .snapshot(),
-                                );
+                                worker_latest.publish(terminal.snapshot());
                             }
                             break;
                         }
@@ -878,6 +892,55 @@ mod tests {
     use cshell_domain::TerminalSize;
     use cshell_output_store::scan;
     use std::time::Duration;
+
+    #[test]
+    fn synchronized_output_tail_survives_immediate_pipeline_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let pipeline = TerminalPipeline::spawn(
+            directory.path().join("sync-close.csjr"),
+            TerminalSize::cells(4, 40),
+            8,
+        )
+        .unwrap();
+        let snapshots = pipeline.snapshots();
+        pipeline.try_submit(b"\x1b[?2026htail".to_vec()).unwrap();
+        pipeline.shutdown().unwrap();
+        let snapshot = snapshots.latest().unwrap();
+        let text: String = snapshot
+            .row(0)
+            .unwrap()
+            .iter()
+            .map(|c| c.character)
+            .collect();
+        assert!(text.starts_with("tail"), "{text:?}");
+    }
+
+    #[test]
+    fn incomplete_synchronized_output_flushes_while_transport_is_idle() {
+        let directory = tempfile::tempdir().unwrap();
+        let pipeline = TerminalPipeline::spawn(
+            directory.path().join("sync.csjr"),
+            TerminalSize::cells(4, 40),
+            8,
+        )
+        .unwrap();
+        pipeline
+            .try_submit(b"prefix\x1b[?2026htail\x1b[6n".to_vec())
+            .unwrap();
+        let snapshot = pipeline
+            .snapshots()
+            .wait_for_generation(2, Duration::from_secs(2))
+            .unwrap();
+        let text: String = snapshot
+            .row(0)
+            .unwrap()
+            .iter()
+            .map(|c| c.character)
+            .collect();
+        assert!(text.starts_with("prefixtail"), "{text:?}");
+        assert_eq!(pipeline.responses().drain(), vec![b"\x1b[1;11R".to_vec()]);
+        pipeline.shutdown().unwrap();
+    }
 
     #[test]
     fn bytes_are_journaled_and_published_as_latest_snapshot() {

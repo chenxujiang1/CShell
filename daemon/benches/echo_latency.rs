@@ -1,9 +1,9 @@
-use cshell_domain::{InputAction, TerminalSize};
+use cshell_domain::{InputAction, SessionId, TerminalSize};
 use cshell_local::{LocalProfile, WorkingDirectoryPolicy};
 use cshell_render::{HeadlessTerminalRenderer, TerminalSurfaceModel};
-use cshell_ssh::{PinnedHostKey, RusshClient, TerminalDataStream, TerminalEvent};
+use cshell_ssh::{PinnedHostKey, RusshClient, TerminalEvent};
 use cshell_terminal::FrameSnapshot;
-use cshelld::{LocalSessionRegistry, TerminalPipeline};
+use cshelld::{LocalSessionRegistry, TerminalFrameSubscription, TerminalPipeline};
 use rand::rng;
 use russh::keys::ssh_key::{Algorithm, HashAlg, PrivateKey};
 use russh::server::{Auth, Msg, Session};
@@ -148,6 +148,8 @@ fn benchmark_local_pty(
     let attachment = registry.spawn_local(&profile, TerminalSize::cells(24, 80))?;
     let session_id = attachment.session_id();
     let snapshots = attachment.snapshots();
+    // A rendered terminal is visible: register the same activity as a GUI feed.
+    let _visible = TerminalFrameSubscription::new(session_id, snapshots.clone());
     let mut latest = snapshots
         .wait_for_generation(1, SAMPLE_TIMEOUT)
         .ok_or("local PTY child did not publish its ready frame")?;
@@ -193,6 +195,7 @@ async fn benchmark_ssh(
         .ingress()
         .ok_or("SSH terminal pipeline ingress was unavailable")?;
     let snapshots = pipeline.snapshots();
+    let _visible = TerminalFrameSubscription::new(SessionId::new(), snapshots.clone());
     ingress
         .submit_blocking(b"CSHELL_SSH_READY\r\n".to_vec())
         .map_err(|_| "SSH terminal pipeline rejected its ready frame")?;
@@ -202,6 +205,21 @@ async fn benchmark_ssh(
     let mut surface = TerminalSurfaceModel::default();
     let mut values = Vec::with_capacity(samples);
     let mut gpu_values = Vec::with_capacity(samples);
+    // Keep receiving while the foreground waits for a coalesced frame. Waiting
+    // for publication after every SSH packet serializes fragmented ACKs and
+    // measures the probe's backpressure instead of the product's receive path.
+    let receiver = tokio::spawn(async move {
+        while let Some(event) = reader.next_event().await {
+            match event {
+                TerminalEvent::Data { data, .. } => ingress
+                    .submit_blocking(data)
+                    .map_err(|_| "SSH output pipeline closed during echo")?,
+                TerminalEvent::Eof | TerminalEvent::Closed => break,
+                _ => {}
+            }
+        }
+        Ok::<_, &'static str>(())
+    });
     for index in 0..samples.saturating_add(warmup) {
         let token = format!("SSH-{index:05}");
         let marker = format!("ACK:{token}");
@@ -209,44 +227,7 @@ async fn benchmark_ssh(
         writer
             .send_input(format!("{token}\r\n").into_bytes())
             .await?;
-        loop {
-            let event = tokio::time::timeout(SAMPLE_TIMEOUT, reader.next_event())
-                .await
-                .map_err(|_| {
-                    format!(
-                        "timed out waiting for SSH terminal output at sample {index}; server task finished={}",
-                        server.is_finished()
-                    )
-                })?
-                .ok_or_else(|| {
-                    format!("SSH terminal channel closed before echo at sample {index}")
-                })?;
-            match event {
-                TerminalEvent::Data {
-                    stream: TerminalDataStream::Stdout,
-                    data,
-                }
-                | TerminalEvent::Data {
-                    stream: TerminalDataStream::Extended(_),
-                    data,
-                } => {
-                    let minimum_generation = latest.generation.saturating_add(1);
-                    ingress
-                        .submit_blocking(data)
-                        .map_err(|_| "SSH output pipeline closed during echo")?;
-                    latest = snapshots
-                        .wait_for_generation(minimum_generation, SAMPLE_TIMEOUT)
-                        .ok_or("SSH output did not produce a terminal frame")?;
-                    if snapshot_contains(&latest, &marker) {
-                        break;
-                    }
-                }
-                TerminalEvent::Eof | TerminalEvent::Closed => {
-                    return Err("SSH terminal closed before all latency samples".into());
-                }
-                _ => {}
-            }
-        }
+        latest = wait_for_marker(&snapshots, latest.generation, &marker)?;
         let gpu = render_snapshot(renderer, &mut surface, latest.clone())?;
         let latency = started.elapsed();
         if index >= warmup {
@@ -256,6 +237,10 @@ async fn benchmark_ssh(
     }
     writer.close().await?;
     client.disconnect().await?;
+    tokio::time::timeout(SAMPLE_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "SSH output receiver did not stop")??
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     pipeline.shutdown()?;
     tokio::time::timeout(SAMPLE_TIMEOUT, server)
         .await

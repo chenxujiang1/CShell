@@ -53,6 +53,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
       - name: Install Linux Secret Service
         if: runner.os == 'Linux'
@@ -69,9 +71,11 @@ jobs:
           '
       - name: Native Windows/macOS keychain round trip
         if: runner.os != 'Linux'
+        shell: bash
         env:
           CSHELL_KEYCHAIN_NATIVE_TEST: '1'
         run: |
+          set -euo pipefail
           cargo test -p cshell-vault native_ --locked --target ${{ matrix.target }} -- --test-threads=1
           cargo test -p cshelld --lib saved_profile_ipc_uses_keychain_and_verified_host --locked --target ${{ matrix.target }}
           cargo test -p cshelld --lib native_system_root_vault --locked --target ${{ matrix.target }}
@@ -92,6 +96,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install Linux software Vulkan adapter
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes libvulkan1 mesa-vulkan-drivers
