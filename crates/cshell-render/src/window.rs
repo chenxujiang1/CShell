@@ -1264,6 +1264,13 @@ impl HeadlessTerminalRenderer {
         self.device_type == "Cpu"
     }
 
+    /// Metal reports Apple's paravirtual adapter as IntegratedGpu or DiscreteGpu; it is still
+    /// virtual hardware and must not be described as a physical reference GPU.
+    #[must_use]
+    pub fn is_virtual_adapter(&self) -> bool {
+        virtual_adapter(&self.adapter_name, &self.backend, &self.device_type)
+    }
+
     pub fn render_frame(
         &mut self,
         frame: &TerminalSurfaceFrame,
@@ -1373,6 +1380,11 @@ impl HeadlessTerminalRenderer {
             gpu_completion,
         })
     }
+}
+
+fn virtual_adapter(name: &str, backend: &str, device_type: &str) -> bool {
+    device_type == "VirtualGpu"
+        || (backend == "Metal" && name.eq_ignore_ascii_case("Apple Paravirtual device"))
 }
 
 pub struct WindowRenderer {
@@ -2832,6 +2844,36 @@ mod tests {
     };
     use guillotiere::{AtlasAllocator, size2};
     use std::sync::Arc;
+
+    #[test]
+    fn apple_paravirtual_is_not_a_physical_integrated_gpu() {
+        assert!(super::virtual_adapter(
+            "Apple Paravirtual device",
+            "Metal",
+            "IntegratedGpu"
+        ));
+        assert!(super::virtual_adapter(
+            "Apple Paravirtual device",
+            "Metal",
+            "DiscreteGpu"
+        ));
+        assert!(super::virtual_adapter(
+            "Virtual adapter",
+            "Vulkan",
+            "VirtualGpu"
+        ));
+        assert!(!super::virtual_adapter(
+            "Apple M4",
+            "Metal",
+            "IntegratedGpu"
+        ));
+        assert!(!super::virtual_adapter(
+            "NVIDIA RTX 4060",
+            "Vulkan",
+            "DiscreteGpu"
+        ));
+        assert!(!super::virtual_adapter("llvmpipe", "Vulkan", "Cpu"));
+    }
 
     fn cache_key(glyph_id: u16) -> CacheKey {
         CacheKey::new(

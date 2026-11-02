@@ -104,6 +104,7 @@ jobs:
       - name: Run native resource gates
         env:
           CSHELL_ALLOW_SOFTWARE_GPU: '1'
+          CSHELL_ALLOW_VIRTUAL_GPU: ${{ runner.os == 'macOS' && '1' || '' }}
         run: bash .github/scripts/run-with-diagnostics.sh cargo xtask native-ci-bench
 
   window-recovery-gates:

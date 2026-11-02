@@ -92,29 +92,40 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "terminal GPU adapter: {} ({}, {})",
         adapter.0, adapter.1, adapter.2
     );
-    let budgets = if renderer.is_cpu_adapter() {
+    let budgets = if renderer.is_virtual_adapter() {
+        if env::var("CSHELL_ALLOW_VIRTUAL_GPU").as_deref() != Ok("1") {
+            return Err("virtual GPU cannot certify physical performance; opt in explicitly with CSHELL_ALLOW_VIRTUAL_GPU=1 for functional/resource CI".into());
+        }
+        None
+    } else if renderer.is_cpu_adapter() {
         if env::var_os("CSHELL_ALLOW_SOFTWARE_GPU").is_none() {
             return Err(
                 "CPU rendering adapter is not a hardware performance gate; set CSHELL_ALLOW_SOFTWARE_GPU=1 only for software-adapter CI"
                     .into(),
             );
         }
-        LatencyBudgets {
+        Some(LatencyBudgets {
             tier: "CPU fallback",
             p95_ms: SOFTWARE_P95_BUDGET_MS,
             p99_ms: SOFTWARE_P99_BUDGET_MS,
-        }
+        })
     } else {
-        LatencyBudgets {
+        Some(LatencyBudgets {
             tier: "hardware GPU",
             p95_ms: P95_BUDGET_MS,
             p99_ms: P99_BUDGET_MS,
-        }
+        })
     };
-    println!(
-        "terminal latency budgets ({}): p95 < {:.1} ms, p99 < {:.1} ms",
-        budgets.tier, budgets.p95_ms, budgets.p99_ms
-    );
+    if let Some(budgets) = budgets {
+        println!(
+            "terminal latency budgets ({}): p95 < {:.1} ms, p99 < {:.1} ms",
+            budgets.tier, budgets.p95_ms, budgets.p99_ms
+        );
+    } else {
+        println!(
+            "virtual GPU functional/resource validation: latency is reported; physical-Mac performance acceptance remains required"
+        );
+    }
     let local = benchmark_local_pty(&mut renderer, samples, warmup)?;
     let ssh = benchmark_ssh(&mut renderer, samples, warmup).await?;
     print_report(
@@ -125,7 +136,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "loopback SSH input -> journal/snapshot -> GPU completion",
         &ssh,
     );
-    if env::var_os("CSHELL_ENFORCE_PERF").is_some() {
+    if env::var_os("CSHELL_ENFORCE_PERF").is_some()
+        && let Some(budgets) = budgets
+    {
         enforce("local PTY", &local, budgets)?;
         enforce("loopback SSH", &ssh, budgets)?;
     }
@@ -157,21 +170,33 @@ fn benchmark_local_pty(
     let mut surface = TerminalSurfaceModel::default();
     let mut values = Vec::with_capacity(samples);
     let mut gpu_values = Vec::with_capacity(samples);
+    let mut frame_values = Vec::with_capacity(samples);
+    let mut render_values = Vec::with_capacity(samples);
     for index in 0..samples.saturating_add(warmup) {
         let token = format!("LOCAL-{index:05}");
         let marker = format!("ACK:{token}");
         let started = Instant::now();
         attachment.send_input(&InputAction::Text(format!("{token}\r")))?;
         latest = wait_for_marker(&snapshots, latest.generation, &marker)?;
+        let frame_ready = started.elapsed();
+        let render_started = Instant::now();
         let gpu = render_snapshot(renderer, &mut surface, latest.clone())?;
+        let render_elapsed = render_started.elapsed();
         let latency = started.elapsed();
         if index >= warmup {
             values.push(latency);
             gpu_values.push(gpu);
+            frame_values.push(frame_ready);
+            render_values.push(render_elapsed);
         }
     }
     registry.close(session_id)?;
-    Ok(LatencyReport::new(values, gpu_values))
+    Ok(LatencyReport::new(
+        values,
+        gpu_values,
+        frame_values,
+        render_values,
+    ))
 }
 
 async fn benchmark_ssh(
@@ -206,6 +231,8 @@ async fn benchmark_ssh(
     let mut surface = TerminalSurfaceModel::default();
     let mut values = Vec::with_capacity(samples);
     let mut gpu_values = Vec::with_capacity(samples);
+    let mut frame_values = Vec::with_capacity(samples);
+    let mut render_values = Vec::with_capacity(samples);
     // Keep receiving while the foreground waits for a coalesced frame. Waiting
     // for publication after every SSH packet serializes fragmented ACKs and
     // measures the probe's backpressure instead of the product's receive path.
@@ -229,11 +256,16 @@ async fn benchmark_ssh(
             .send_input(format!("{token}\r\n").into_bytes())
             .await?;
         latest = wait_for_marker(&snapshots, latest.generation, &marker)?;
+        let frame_ready = started.elapsed();
+        let render_started = Instant::now();
         let gpu = render_snapshot(renderer, &mut surface, latest.clone())?;
+        let render_elapsed = render_started.elapsed();
         let latency = started.elapsed();
         if index >= warmup {
             values.push(latency);
             gpu_values.push(gpu);
+            frame_values.push(frame_ready);
+            render_values.push(render_elapsed);
         }
     }
     writer.close().await?;
@@ -248,7 +280,12 @@ async fn benchmark_ssh(
         .map_err(|_| "SSH echo server did not stop")?
         .map_err(|error| format!("SSH echo server task failed: {error}"))?
         .map_err(|error| format!("SSH echo server failed: {error}"))?;
-    Ok(LatencyReport::new(values, gpu_values))
+    Ok(LatencyReport::new(
+        values,
+        gpu_values,
+        frame_values,
+        render_values,
+    ))
 }
 
 fn wait_for_marker(
@@ -314,6 +351,8 @@ struct LatencyReport {
     maximum_ms: f64,
     gpu_p95_ms: f64,
     gpu_p99_ms: f64,
+    frame_p95_ms: f64,
+    render_p95_ms: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -324,9 +363,16 @@ struct LatencyBudgets {
 }
 
 impl LatencyReport {
-    fn new(mut values: Vec<Duration>, mut gpu_values: Vec<Duration>) -> Self {
+    fn new(
+        mut values: Vec<Duration>,
+        mut gpu_values: Vec<Duration>,
+        mut frame_values: Vec<Duration>,
+        mut render_values: Vec<Duration>,
+    ) -> Self {
         values.sort_unstable();
         gpu_values.sort_unstable();
+        frame_values.sort_unstable();
+        render_values.sort_unstable();
         Self {
             samples: values.len(),
             p50_ms: percentile_ms(&values, 50),
@@ -337,6 +383,8 @@ impl LatencyReport {
                 .map_or(0.0, |value| value.as_secs_f64() * 1_000.0),
             gpu_p95_ms: percentile_ms(&gpu_values, 95),
             gpu_p99_ms: percentile_ms(&gpu_values, 99),
+            frame_p95_ms: percentile_ms(&frame_values, 95),
+            render_p95_ms: percentile_ms(&render_values, 95),
         }
     }
 }
@@ -355,14 +403,16 @@ fn percentile_ms(values: &[Duration], percentile: usize) -> f64 {
 
 fn print_report(label: &str, report: &LatencyReport) {
     println!(
-        "{label}: {} samples, p50/p95/p99/max {:.3}/{:.3}/{:.3}/{:.3} ms; GPU completion p95/p99 {:.3}/{:.3} ms",
+        "{label}: {} samples, p50/p95/p99/max {:.3}/{:.3}/{:.3}/{:.3} ms; GPU completion p95/p99 {:.3}/{:.3} ms; frame-ready p95 {:.3} ms; render-total p95 {:.3} ms",
         report.samples,
         report.p50_ms,
         report.p95_ms,
         report.p99_ms,
         report.maximum_ms,
         report.gpu_p95_ms,
-        report.gpu_p99_ms
+        report.gpu_p99_ms,
+        report.frame_p95_ms,
+        report.render_p95_ms
     );
 }
 
