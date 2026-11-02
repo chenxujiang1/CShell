@@ -3177,6 +3177,14 @@ mod tests {
             );
             expected_pins.extend(atlas.pinned_glyphs.iter().copied());
         }
+        // Font ink may extend left of its cell (for example, a bold face with
+        // negative bearing). Exercise it deterministically on every platform.
+        for cached in atlas.dynamic_glyphs.values_mut() {
+            cached.glyph.offset_x = -super::CELL_PADDING_X - 2.0;
+        }
+        for shaped in atlas.shaped_cells.values_mut().flatten() {
+            shaped.offset_x = 0.0;
+        }
         let (vertices, batches) = super::build_pane_geometry(&panes, &mut atlas, 200, 100);
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].0, viewport(10));
@@ -3191,10 +3199,37 @@ mod tests {
                 [0.0, 1.0, 0.0, 1.0]
             };
             assert!(batch.iter().any(|v| v.color == color));
-            assert!(batch.iter().all(|v| {
-                let x = (v.position[0] + 1.0) * 100.0;
-                x >= viewport.x as f32 - 0.01 && x <= (viewport.x + viewport.width) as f32 + 0.01
-            }));
+            let left = viewport.x as f32;
+            let right = (viewport.x + viewport.width) as f32;
+            let top = viewport.y as f32;
+            let bottom = (viewport.y + viewport.height) as f32;
+            let white = super::white_uv();
+            // Backgrounds belong inside the pane; font ink can overhang and
+            // is clipped by the independent scissor paired with this batch.
+            for quad in batch.chunks_exact(6) {
+                let points: Vec<_> = quad
+                    .iter()
+                    .map(|v| ((v.position[0] + 1.0) * 100.0, (1.0 - v.position[1]) * 50.0))
+                    .collect();
+                if quad[0].uv == [white[0], white[1]] {
+                    assert!(points.iter().all(|&(x, y)| {
+                        x >= left - 0.01
+                            && x <= right + 0.01
+                            && y >= top - 0.01
+                            && y <= bottom + 0.01
+                    }));
+                } else {
+                    assert!(points.iter().any(|&(x, _)| x > left));
+                    assert!(points.iter().any(|&(x, _)| x < right));
+                    assert!(points.iter().any(|&(_, y)| y > top));
+                    assert!(points.iter().any(|&(_, y)| y < bottom));
+                }
+            }
+            assert!(
+                batch.iter().any(|v| {
+                    v.uv != [white[0], white[1]] && (v.position[0] + 1.0) * 100.0 < left
+                })
+            );
         }
         assert!(expected_pins.len() >= 2);
         assert_eq!(atlas.pinned_glyphs, expected_pins);
