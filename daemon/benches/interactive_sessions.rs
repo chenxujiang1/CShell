@@ -96,6 +96,7 @@ struct Observer {
 
 impl Observer {
     async fn observe(&mut self, marker: &str, size: TerminalSize) -> ProbeResult<()> {
+        let mut observed = String::from("no snapshot received");
         tokio::time::timeout(TIMEOUT, async {
             loop {
                 if let Some(snapshot) = self.replica.snapshot() {
@@ -105,6 +106,7 @@ impl Observer {
                         .map(|row| row.iter().map(|cell| cell.character).collect::<String>())
                         .collect::<Vec<_>>()
                         .join("\n");
+                    observed = format!("{}x{}: {text:?}", snapshot.rows, snapshot.cols);
                     for index in 0..64 {
                         if index != self.index && text.contains(&format!("ACK:{index:02}:")) {
                             return Err("output crossed session identities".into());
@@ -138,8 +140,8 @@ impl Observer {
         .await
         .map_err(|_| {
             format!(
-                "session {} did not publish the expected output/size within 5 seconds",
-                self.index
+                "session {} did not publish {marker:?} at {}x{} within 5 seconds; last snapshot {observed}",
+                self.index, size.rows, size.cols
             )
         })?
     }

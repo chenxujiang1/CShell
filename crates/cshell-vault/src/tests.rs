@@ -124,7 +124,10 @@ fn native_secret_tool_interop_on_current_thread_runtime() {
             .output()
             .expect("independent oracle lookup");
         assert!(output.status.success());
-        assert_eq!(output.stdout, b"updated-oracle-secret\n");
+        assert_eq!(
+            output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout),
+            b"updated-oracle-secret"
+        );
         store.delete(&id).expect("remove test entry");
         assert_eq!(store.read(&id).err(), Some(KeychainError::Missing));
         drop(cleanup);

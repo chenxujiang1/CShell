@@ -256,6 +256,9 @@ fn local_components(seconds: u32) -> Option<[i32; 6]> {
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn local_components(seconds: u32) -> Option<[i32; 6]> {
+    #[cfg(target_pointer_width = "64")]
+    let timestamp = libc::time_t::from(seconds);
+    #[cfg(not(target_pointer_width = "64"))]
     let timestamp = libc::time_t::try_from(seconds).ok()?;
     let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
     // SAFETY: timestamp and output storage are live; successful localtime_r initializes the output.
