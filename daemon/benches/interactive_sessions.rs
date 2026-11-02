@@ -264,30 +264,30 @@ async fn run() -> ProbeResult<()> {
             .map(|nonce| nonce.chars().rev().collect())
             .collect();
         last_responses.clone_from(&responses);
-        let mut started = Vec::with_capacity(sessions);
-        for (index, session) in ids.iter().enumerate() {
+        let mut readers = tokio::task::JoinSet::new();
+        for mut observer in observers.drain(..) {
+            let index = observer.index;
+            let session = ids[index];
             accepted(
                 &mut control,
                 envelope::Payload::TerminalResizeRequest(TerminalResizeRequest::from_size(
-                    *session, size,
+                    session, size,
                 )),
             )
             .await?;
-            started.push(Instant::now());
+            let start = Instant::now();
             accepted(
                 &mut control,
                 envelope::Payload::TerminalInputRequest(TerminalInputRequest::from_action(
-                    *session,
+                    session,
                     &InputAction::Text(format!("{}\r", nonces[index])),
                 )?),
             )
             .await?;
-        }
-        // All children receive input before any subscriber drains its output burst.
-        let mut readers = tokio::task::JoinSet::new();
-        for mut observer in observers.drain(..) {
+            // Measure a live consumer immediately. Deliberately withholding reads
+            // while dispatching later resizes conflates fixture delay with echo
+            // latency. Slow-client backpressure has a dedicated IPC flood test.
             let marker = format!("ACK:{:02}:{}", observer.index, responses[observer.index]);
-            let start = started[observer.index];
             readers.spawn(async move {
                 observer.observe(&marker, size).await?;
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>((observer, start.elapsed()))
@@ -296,10 +296,10 @@ async fn run() -> ProbeResult<()> {
         while let Some(result) = readers.join_next().await {
             let (observer, latency) = result??;
             if latency > TIMEOUT {
-                return Err(
-                    "interactive input-to-frame time exceeded the 5-second functional budget"
-                        .into(),
-                );
+                return Err(format!(
+                    "session {} round {round} input-to-frame time {:.3}s exceeded the 5-second functional budget",
+                    observer.index, latency.as_secs_f64()
+                ).into());
             }
             latencies.push(latency);
             observers.push(observer);
@@ -380,7 +380,8 @@ async fn run() -> ProbeResult<()> {
         "{}",
         serde_json::json!({
         "gate": "p1-interactive-sessions", "mode": if full { "full" } else { "smoke" },
-        "version": 1,
+        "version": 2,
+            "readers_active_during_dispatch": true,
             "os": env::consts::OS, "arch": env::consts::ARCH,
             "sessions": sessions, "rounds": rounds, "acknowledged_samples": latencies.len(),
             "resize_checks": sessions * rounds, "reconnected_sessions": reconnects,

@@ -139,6 +139,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+mod foreground_scheduling;
+
 pub enum SubmitError {
     Backpressure(Vec<u8>),
     TooLarge(Vec<u8>),
@@ -477,11 +479,10 @@ impl LatestSnapshot {
         Arc::new(SnapshotActivity(Arc::clone(&self.subscribers)))
     }
     fn publication_interval(&self) -> Duration {
-        Duration::from_millis(if self.subscribers.load(Ordering::Relaxed) > 0 {
-            16
-        } else {
-            100
-        })
+        Duration::from_millis(if self.has_subscribers() { 16 } else { 100 })
+    }
+    fn has_subscribers(&self) -> bool {
+        self.subscribers.load(Ordering::Relaxed) > 0
     }
     pub(crate) fn history_page(
         &self,
@@ -675,7 +676,14 @@ impl TerminalPipeline {
                 let _close_queue = terminal_resources::CloseQueue(worker_byte_queue);
                 let mut publish_at = Instant::now();
                 let mut dirty = false;
+                let mut last_output: Option<Instant> = None;
+                let mut scheduling = foreground_scheduling::ForegroundScheduling::default();
                 loop {
+                    scheduling.update(
+                        worker_latest.has_subscribers()
+                            && last_output
+                                .is_some_and(|last| last.elapsed() < Duration::from_millis(250)),
+                    );
                     let interval = worker_latest.publication_interval();
                     publish_at = publish_at.min(Instant::now() + interval);
                     let mut wait = if dirty {
@@ -729,6 +737,8 @@ impl TerminalPipeline {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match message {
                         PipelineMessage::Output(bytes, _permit) => {
+                            last_output = Some(Instant::now());
+                            scheduling.update(worker_latest.has_subscribers());
                             let byte_count = bytes.len();
                             if let (Some(journal), Some(timing)) = (&mut journal, &mut timing) {
                                 let sequence = journal.line_index().record_count();
