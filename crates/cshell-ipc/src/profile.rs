@@ -412,7 +412,7 @@ pub struct SshConnectionData {
 pub struct SshConnectionOptionsData {
     #[prost(uint32, optional, tag = "10")]
     pub sftp_verification: Option<u32>,
-    #[prost(uint32,repeated,tag="9")]
+    #[prost(uint32, repeated, tag = "9")]
     pub authentication_order: Vec<u32>,
     #[prost(bool, tag = "8")]
     pub keyboard_interactive: bool,
@@ -435,8 +435,15 @@ pub struct SshConnectionOptionsData {
 impl From<&cshell_domain::SshConnectionOptions> for SshConnectionOptionsData {
     fn from(value: &cshell_domain::SshConnectionOptions) -> Self {
         Self {
-            sftp_verification: value.sftp_verification.map(|mode|match mode {cshell_domain::SftpVerification::Standard=>0,cshell_domain::SftpVerification::Full=>1}),
-            authentication_order: value.authentication_order.iter().map(|m|*m as u32).collect(),
+            sftp_verification: value.sftp_verification.map(|mode| match mode {
+                cshell_domain::SftpVerification::Standard => 0,
+                cshell_domain::SftpVerification::Full => 1,
+            }),
+            authentication_order: value
+                .authentication_order
+                .iter()
+                .map(|m| *m as u32)
+                .collect(),
             keyboard_interactive: value.keyboard_interactive,
             zmodem_download_directory: value.zmodem_download_directory.clone(),
             keepalive_enabled: value.keepalive_enabled,
@@ -452,8 +459,23 @@ impl From<&cshell_domain::SshConnectionOptions> for SshConnectionOptionsData {
 impl From<SshConnectionOptionsData> for cshell_domain::SshConnectionOptions {
     fn from(value: SshConnectionOptionsData) -> Self {
         Self {
-            sftp_verification: value.sftp_verification.and_then(|mode|match mode {0=>Some(cshell_domain::SftpVerification::Standard),1=>Some(cshell_domain::SftpVerification::Full),_=>None}),
-            authentication_order: value.authentication_order.iter().filter_map(|m|match m {0=>Some(cshell_domain::SshAuthStep::KeyboardInteractive),1=>Some(cshell_domain::SshAuthStep::Password),2=>Some(cshell_domain::SshAuthStep::PrivateKey),3=>Some(cshell_domain::SshAuthStep::Certificate),4=>Some(cshell_domain::SshAuthStep::Agent),_=>None}).collect(),
+            sftp_verification: value.sftp_verification.and_then(|mode| match mode {
+                0 => Some(cshell_domain::SftpVerification::Standard),
+                1 => Some(cshell_domain::SftpVerification::Full),
+                _ => None,
+            }),
+            authentication_order: value
+                .authentication_order
+                .iter()
+                .filter_map(|m| match m {
+                    0 => Some(cshell_domain::SshAuthStep::KeyboardInteractive),
+                    1 => Some(cshell_domain::SshAuthStep::Password),
+                    2 => Some(cshell_domain::SshAuthStep::PrivateKey),
+                    3 => Some(cshell_domain::SshAuthStep::Certificate),
+                    4 => Some(cshell_domain::SshAuthStep::Agent),
+                    _ => None,
+                })
+                .collect(),
             keyboard_interactive: value.keyboard_interactive,
             zmodem_download_directory: value.zmodem_download_directory,
             keepalive_enabled: value.keepalive_enabled,
@@ -800,7 +822,13 @@ impl From<&SshConnectionRecord> for SshConnectionData {
 impl TryFrom<SshConnectionData> for SshConnectionRecord {
     type Error = ProfileCodecError;
     fn try_from(value: SshConnectionData) -> Result<Self, Self::Error> {
-        if value.options.as_ref().is_some_and(|o|o.authentication_order.len()>5 || o.authentication_order.iter().any(|m|*m>4) || o.sftp_verification.is_some_and(|m|m>1)) {return Err(ProfileCodecError::InvalidAuthMethod);}
+        if value.options.as_ref().is_some_and(|o| {
+            o.authentication_order.len() > 5
+                || o.authentication_order.iter().any(|m| *m > 4)
+                || o.sftp_verification.is_some_and(|m| m > 1)
+        }) {
+            return Err(ProfileCodecError::InvalidAuthMethod);
+        }
 
         Ok(Self {
             profile_id: ProfileId::from_bytes(decode_id(&value.profile_id)?),
@@ -843,13 +871,20 @@ pub fn decode_id(bytes: &[u8]) -> Result<[u8; 16], ProfileCodecError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod theme_tests {
     use super::*;
     #[test]
     fn ssh_connection_options_wire_round_trip_and_legacy_defaults() {
         let legacy = SshConnectionData {
             profile_id: ProfileId::new().as_uuid().as_bytes().to_vec(),
-            host: "example.test".into(), port: 22, username: "operator".into(),
+            host: "example.test".into(),
+            port: 22,
+            username: "operator".into(),
             ..Default::default()
         };
         let old = SshConnectionRecord::try_from(legacy.clone()).unwrap();
@@ -859,14 +894,23 @@ mod theme_tests {
             sftp_verification: Some(cshell_domain::SftpVerification::Full),
             keyboard_interactive: true,
             zmodem_download_directory: Some("D:/downloads/profile".into()),
-            keepalive_interval_secs: 43, keepalive_max: 5,
-            reconnect_delay_secs: 9, reconnect_attempts: 7,
+            keepalive_interval_secs: 43,
+            keepalive_max: 5,
+            reconnect_delay_secs: 9,
+            reconnect_attempts: 7,
             ..cshell_domain::SshConnectionOptions::new_profile()
         };
-        let configured = SshConnectionData { options: Some((&desired).into()), ..legacy };
+        let configured = SshConnectionData {
+            options: Some((&desired).into()),
+            ..legacy
+        };
         let decoded = SshConnectionData::decode(configured.encode_to_vec().as_slice()).unwrap();
-        assert_eq!(SshConnectionRecord::try_from(decoded).unwrap().options, desired);
-        let mut invalid=SshConnectionData::from(&old);invalid.options.as_mut().unwrap().sftp_verification=Some(2);
+        assert_eq!(
+            SshConnectionRecord::try_from(decoded).unwrap().options,
+            desired
+        );
+        let mut invalid = SshConnectionData::from(&old);
+        invalid.options.as_mut().unwrap().sftp_verification = Some(2);
         assert!(SshConnectionRecord::try_from(invalid).is_err());
     }
     #[test]

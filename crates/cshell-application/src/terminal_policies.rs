@@ -286,11 +286,16 @@ impl TerminalPolicyPreview {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 pub enum TerminalPolicyReply {
     Catalog(TerminalPolicyView),
     Preview(TerminalPolicyPreview),
     Resolved(TerminalResolutionReport),
 }
+#[derive(Debug)]
 pub enum TerminalPolicyExpectation<'a> {
     Catalog,
     Preview(&'a TerminalPolicyProposal),

@@ -51,7 +51,7 @@ libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures.workspace = true
-zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+zbus = { version = "=6.2.1", default-features = false, features = ["tokio", "proxy", "service", "default-rt"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Power", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }

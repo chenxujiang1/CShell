@@ -39,6 +39,7 @@ impl DesktopWorkspace {
         self.document = document;
         Some((id, tabs))
     }
+    #[cfg(test)]
     pub fn restore(document: WorkspaceDocument) -> Result<Self, String> {
         cshell_application::validate_workspace(&document).map_err(|e| e.to_string())?;
         if document

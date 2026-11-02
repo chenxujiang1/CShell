@@ -22,10 +22,14 @@ impl VaultController {
         for target in targets {
             let encrypted = mode(&mut state, target.profile_id)?;
             let mut kinds = Vec::new();
-            if target.uses_password() { kinds.push(Kind::Password); }
+            if target.uses_password() {
+                kinds.push(Kind::Password);
+            }
             if target.uses_private_key() {
                 kinds.push(Kind::KeyPassphrase);
-                if include_keys { kinds.push(Kind::PrivateKey); }
+                if include_keys {
+                    kinds.push(Kind::PrivateKey);
+                }
             }
             for kind in kinds {
                 let value = if encrypted {

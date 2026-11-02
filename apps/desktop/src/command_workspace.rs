@@ -1,4 +1,9 @@
 //! Layout-only preferences. Command text and temporary bookmarks stay in memory.
+#[cfg(not(test))]
+fn path() -> Option<std::path::PathBuf> {
+    crate::display_settings::settings_path().map(|p| p.with_file_name("command-workspace.json"))
+}
+
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 enum Position {
@@ -110,24 +115,22 @@ impl Dock {
         }
         if !ui.ctx().input(|i| i.pointer.any_down()) && self.last.as_ref() != Some(&self.settings) {
             #[cfg(not(test))]
-            if let Some(path) = path() {
-                if let Err(error) = save(&path, &self.settings) {
-                    ui.ctx().debug_painter().text(
-                        egui::pos2(12.0, 12.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("命令布局未保存：{error}"),
-                        egui::FontId::proportional(12.0),
-                        cshell_ui::theme::WARNING,
-                    );
-                }
+            if let Some(path) = path()
+                && let Err(error) = save(&path, &self.settings)
+            {
+                ui.ctx().debug_painter().text(
+                    egui::pos2(12.0, 12.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("命令布局未保存：{error}"),
+                    egui::FontId::proportional(12.0),
+                    cshell_ui::theme::WARNING,
+                );
             }
             self.last = Some(self.settings.clone());
         }
     }
 }
-fn path() -> Option<std::path::PathBuf> {
-    crate::display_settings::settings_path().map(|p| p.with_file_name("command-workspace.json"))
-}
+
 fn save(path: &std::path::Path, value: &Settings) -> std::io::Result<()> {
     use std::io::Write;
     let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
@@ -140,6 +143,11 @@ fn save(path: &std::path::Path, value: &Settings) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]

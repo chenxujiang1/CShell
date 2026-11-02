@@ -296,11 +296,17 @@ async fn twenty_live_tabs_preserve_copy_search_split_and_reconnect_state() {
         if index == 0 {
             assert!(app.terminal_keyboard_available());
             app.view_model.tab_navigator.show(Some(tab));
-            assert!(!app.terminal_keyboard_available(), "tab search must isolate all terminal input");
+            assert!(
+                !app.terminal_keyboard_available(),
+                "tab search must isolate all terminal input"
+            );
             assert!(!app.terminal_wheel_available(1.0));
             app.view_model.tab_navigator.close();
             app.return_focus_from_tab_navigation();
-            assert!(app.terminal_keyboard_available(), "closing search must restore the current terminal");
+            assert!(
+                app.terminal_keyboard_available(),
+                "closing search must restore the current terminal"
+            );
         }
         let nonce = format!("s{index:02}:{}", session.as_uuid().simple());
         let marker = format!("ACK:{index:02}:{}", nonce.chars().rev().collect::<String>());
@@ -370,16 +376,34 @@ async fn twenty_live_tabs_preserve_copy_search_split_and_reconnect_state() {
     }
     // Hidden tabs retain the same control attachment and report unread output.
     app.window_active = true;
-    wait_for(&mut app, "hidden attachment ready", |app| app.pane_daemons.get(&tabs[1]).is_some_and(|c| c.view().connected)).await;
+    wait_for(&mut app, "hidden attachment ready", |app| {
+        app.pane_daemons
+            .get(&tabs[1])
+            .is_some_and(|c| c.view().connected)
+    })
+    .await;
     let epoch = app.pane_daemons[&tabs[1]].view().input_epoch;
-    app.activate_workspace_tab(tabs[1]); tick(&mut app);
+    app.activate_workspace_tab(tabs[1]);
+    tick(&mut app);
     assert_eq!(app.daemon.as_ref().unwrap().view().input_epoch, epoch);
-    app.activate_workspace_tab(tabs[0]); tick(&mut app);
-    assert_eq!(app.pane_daemons[&tabs[1]].view().input_epoch, epoch, "switching must not rebuild the hidden attachment");
-    assert!(app.pane_daemons[&tabs[1]].send_input(InputAction::Paste { text: "s01:background-activity\r".into(), bracketed: false }));
-    wait_for(&mut app, "background output red dot", |app| app.view_model.unread_output_tabs.contains(&tabs[1])).await;
+    app.activate_workspace_tab(tabs[0]);
+    tick(&mut app);
+    assert_eq!(
+        app.pane_daemons[&tabs[1]].view().input_epoch,
+        epoch,
+        "switching must not rebuild the hidden attachment"
+    );
+    assert!(app.pane_daemons[&tabs[1]].send_input(InputAction::Paste {
+        text: "s01:background-activity\r".into(),
+        bracketed: false
+    }));
+    wait_for(&mut app, "background output red dot", |app| {
+        app.view_model.unread_output_tabs.contains(&tabs[1])
+    })
+    .await;
     assert!(!app.view_model.unread_output_tabs.contains(&tabs[0]));
-    app.activate_workspace_tab(tabs[1]); tick(&mut app);
+    app.activate_workspace_tab(tabs[1]);
+    tick(&mut app);
     assert!(!app.view_model.unread_output_tabs.contains(&tabs[1]));
 
     // Reconnect all desktop IPC workers while keeping the owned daemon and all PTYs alive.
@@ -503,7 +527,13 @@ async fn twenty_live_tabs_preserve_copy_search_split_and_reconnect_state() {
             !app.workspace.sessions.contains_key(&tab)
         })
         .await;
-        assert!(!registry.list().unwrap().iter().any(|entry| entry.session_id == session));
+        assert!(
+            !registry
+                .list()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.session_id == session)
+        );
     }
     assert!(app.workspace.document.bindings.is_empty());
     let live: BTreeSet<_> = registry
@@ -512,7 +542,10 @@ async fn twenty_live_tabs_preserve_copy_search_split_and_reconnect_state() {
         .into_iter()
         .map(|s| s.session_id)
         .collect();
-    assert!(live.is_empty(), "closed tabs must not leave retained processes");
+    assert!(
+        live.is_empty(),
+        "closed tabs must not leave retained processes"
+    );
     drop(app);
     assert!(
         registry

@@ -301,7 +301,9 @@ pub(super) async fn run(
             let mut view = shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if view.session_id!=Some(session) {return Err("传输会话已变化".into());}
+            if view.session_id != Some(session) {
+                return Err("传输会话已变化".into());
+            }
             view.batch_status = Some(format!(
                 "正在{} {}/{} 项…",
                 action.label(),

@@ -108,17 +108,59 @@ fn file_entries(view: &SftpView, local: bool) -> &[cshell_ipc::SftpDirectoryEntr
     }
 }
 impl SftpPanel {
-    pub(super) fn open_remote_editor(&mut self, session: SessionId, view: &SftpView, path: &str) -> Option<SftpClientCommand> {
-        if view.workspace_busy || self.browser.operation.is_some()
-            || (view.connection_profile.is_some() && view.connection_phase != crate::sftp_connection::ConnectionPhase::Connected)
-            || !view.entries.iter().any(|e|e.path==path && e.kind==1) {return None;}
-        self.page=2;
-        if view.edit.as_ref().is_some_and(|e|e.session==session && e.remote_path==path && !e.closed) {return None;}
-        if !self.advanced.prepare_editor(path,session) {return None;}
-        self.remote_file=path.into();
-        if let Some(id)=self.advanced.existing_document(path,session){return Some(super::super::advanced::workspace(session,None,SftpOperation::EditGet,Vec::new(),0,Some(id)));}
-        Some(super::super::advanced::workspace(session,None,SftpOperation::EditOpen,
-            serde_json::to_vec(&cshell_application::SftpBrowseOptions{local:false,path:path.into(),links:if self.advanced.follow_links{cshell_application::SftpLinkPolicy::Follow}else{cshell_application::SftpLinkPolicy::NoFollow}}).unwrap_or_default(),0,None))
+    pub(super) fn open_remote_editor(
+        &mut self,
+        session: SessionId,
+        view: &SftpView,
+        path: &str,
+    ) -> Option<SftpClientCommand> {
+        if view.workspace_busy
+            || self.browser.operation.is_some()
+            || (view.connection_profile.is_some()
+                && view.connection_phase != crate::sftp_connection::ConnectionPhase::Connected)
+            || !view.entries.iter().any(|e| e.path == path && e.kind == 1)
+        {
+            return None;
+        }
+        self.page = 2;
+        if view
+            .edit
+            .as_ref()
+            .is_some_and(|e| e.session == session && e.remote_path == path && !e.closed)
+        {
+            return None;
+        }
+        if !self.advanced.prepare_editor(path, session) {
+            return None;
+        }
+        self.remote_file = path.into();
+        if let Some(id) = self.advanced.existing_document(path, session) {
+            return Some(super::super::advanced::workspace(
+                session,
+                None,
+                SftpOperation::EditGet,
+                Vec::new(),
+                0,
+                Some(id),
+            ));
+        }
+        Some(super::super::advanced::workspace(
+            session,
+            None,
+            SftpOperation::EditOpen,
+            serde_json::to_vec(&cshell_application::SftpBrowseOptions {
+                local: false,
+                path: path.into(),
+                links: if self.advanced.follow_links {
+                    cshell_application::SftpLinkPolicy::Follow
+                } else {
+                    cshell_application::SftpLinkPolicy::NoFollow
+                },
+            })
+            .unwrap_or_default(),
+            0,
+            None,
+        ))
     }
     fn selected_entries(
         &self,
@@ -145,12 +187,12 @@ impl SftpPanel {
         } else {
             vec![entry.clone()]
         };
-        if entries.len() > 128 || entries.iter().any(|entry| !matches!(entry.kind,1|2)) {
+        if entries.len() > 128 || entries.iter().any(|entry| !matches!(entry.kind, 1 | 2)) {
             return Vec::new();
         }
         entries
             .into_iter()
-            .filter(|e| matches!(e.kind,1|2))
+            .filter(|e| matches!(e.kind, 1 | 2))
             .map(|e| DragFile {
                 session,
                 local,
@@ -161,12 +203,22 @@ impl SftpPanel {
     }
     pub(super) fn transfer_selection(&mut self, session: SessionId, view: &SftpView, local: bool) {
         let entries = self.selected_entries(view, local);
-        if entries.is_empty() || entries.len() > 128 || entries.iter().any(|e| !matches!(e.kind,1|2)) {
-            self.browser.error =
-                Some("请选择 1–128 个普通文件或文件夹。".into());
+        if entries.is_empty()
+            || entries.len() > 128
+            || entries.iter().any(|e| !matches!(e.kind, 1 | 2))
+        {
+            self.browser.error = Some("请选择 1–128 个普通文件或文件夹。".into());
             return;
         }
-        if entries.iter().any(|e|e.kind==2){self.stage_tree(session,view,local,entries.into_iter().map(|e|e.path).collect());return;}
+        if entries.iter().any(|e| e.kind == 2) {
+            self.stage_tree(
+                session,
+                view,
+                local,
+                entries.into_iter().map(|e| e.path).collect(),
+            );
+            return;
+        }
         for e in entries {
             self.stage_file(
                 session,
@@ -246,16 +298,29 @@ impl SftpPanel {
     ) {
         cshell_ui::form::menu(ui);
         ui.set_max_width(260.0);
-        if local {self.default_directory_menu(ui,view);ui.separator();}
+        if local {
+            self.default_directory_menu(ui, view);
+            ui.separator();
+        }
         let entries = self.selected_entries(view, local);
-        let connected=view.connection_profile.is_none() || view.connection_phase==crate::sftp_connection::ConnectionPhase::Connected;
-        let ready = connected && !view.workspace_busy
+        let connected = view.connection_profile.is_none()
+            || view.connection_phase == crate::sftp_connection::ConnectionPhase::Connected;
+        let ready = connected
+            && !view.workspace_busy
             && self.browser.operation.is_none()
             && !view.file_job.as_ref().is_some_and(|j| {
                 matches!(j.state, SftpFileState::Inspecting | SftpFileState::Applying)
             });
-        if !local && cshell_ui::form::menu_item(ui,"编辑文件    F4",ready && entries.len()==1 && entries[0].kind==1).clicked() {
-            *command=self.open_remote_editor(session,view,&entries[0].path);ui.close();
+        if !local
+            && cshell_ui::form::menu_item(
+                ui,
+                "编辑文件    F4",
+                ready && entries.len() == 1 && entries[0].kind == 1,
+            )
+            .clicked()
+        {
+            *command = self.open_remote_editor(session, view, &entries[0].path);
+            ui.close();
         }
         if entries.len() == 1 && entries[0].kind == 2 && ui.button("打开目录").clicked() {
             *command = Some(self.navigate(session, local, entries[0].path.clone()));
@@ -263,7 +328,10 @@ impl SftpPanel {
         }
         if ui
             .add_enabled(
-                connected && !entries.is_empty() && entries.len() <= 128 && entries.iter().all(|e| matches!(e.kind,1|2)),
+                connected
+                    && !entries.is_empty()
+                    && entries.len() <= 128
+                    && entries.iter().all(|e| matches!(e.kind, 1 | 2)),
                 egui::Button::new(if local {
                     "上传所选文件"
                 } else {
@@ -286,7 +354,12 @@ impl SftpPanel {
             (SftpFileAction::Inspect, "属性 / 权限", !entries.is_empty()),
         ] {
             if ui
-                .add_enabled(ready && enabled, egui::Button::new(label).min_size(egui::vec2(ui.available_width(),28.0)).right_text(()))
+                .add_enabled(
+                    ready && enabled,
+                    egui::Button::new(label)
+                        .min_size(egui::vec2(ui.available_width(), 28.0))
+                        .right_text(()),
+                )
                 .clicked()
             {
                 self.open_file_dialog(view, local, action);
@@ -313,8 +386,18 @@ impl SftpPanel {
             ui.close();
         }
     }
-    pub(super) fn file_shortcuts(&mut self, ui: &egui::Ui, session: SessionId, view: &SftpView, command: &mut Option<SftpClientCommand>) {
-        if view.connection_profile.is_some() && view.connection_phase!=crate::sftp_connection::ConnectionPhase::Connected {return;}
+    pub(super) fn file_shortcuts(
+        &mut self,
+        ui: &egui::Ui,
+        session: SessionId,
+        view: &SftpView,
+        command: &mut Option<SftpClientCommand>,
+    ) {
+        if view.connection_profile.is_some()
+            && view.connection_phase != crate::sftp_connection::ConnectionPhase::Connected
+        {
+            return;
+        }
         let ctx = ui.ctx();
         if ctx.text_edit_focused()
             || egui::Popup::is_any_open(ctx)
@@ -323,29 +406,64 @@ impl SftpPanel {
             return;
         }
         let pressed = |modifiers, key| ctx.input_mut(|input| input.consume_key(modifiers, key));
-        if pressed(egui::Modifiers::NONE,egui::Key::Tab) || pressed(egui::Modifiers::SHIFT,egui::Key::Tab) {
+        if pressed(egui::Modifiers::NONE, egui::Key::Tab)
+            || pressed(egui::Modifiers::SHIFT, egui::Key::Tab)
+        {
             self.browser.navigation.active ^= 1;
-            ctx.memory_mut(|m|{if let Some(id)=m.focused(){m.surrender_focus(id);}});return;
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+            return;
         }
         let local = self.browser.navigation.active == 0;
-        let side=usize::from(!local);
-        let order=self.browser.sort[side].unwrap_or_else(||columns::SortState::initial(local)).sorted(file_entries(view,local));
-        for (key,delta,absolute) in [(egui::Key::ArrowUp,-1,false),(egui::Key::ArrowDown,1,false),(egui::Key::Home,-1,true),(egui::Key::End,1,true),(egui::Key::PageUp,-10,false),(egui::Key::PageDown,10,false)] {
-            for modifiers in [egui::Modifiers::SHIFT,egui::Modifiers::NONE] {
-                if pressed(modifiers,key) {
-                    if let Some(path)=self.browser.selection[side].move_cursor(&order,delta,absolute,modifiers) {if local{self.local_file=path;}else{self.remote_file=path;}}
+        let side = usize::from(!local);
+        let order = self.browser.sort[side]
+            .unwrap_or_else(|| columns::SortState::initial(local))
+            .sorted(file_entries(view, local));
+        for (key, delta, absolute) in [
+            (egui::Key::ArrowUp, -1, false),
+            (egui::Key::ArrowDown, 1, false),
+            (egui::Key::Home, -1, true),
+            (egui::Key::End, 1, true),
+            (egui::Key::PageUp, -10, false),
+            (egui::Key::PageDown, 10, false),
+        ] {
+            for modifiers in [egui::Modifiers::SHIFT, egui::Modifiers::NONE] {
+                if pressed(modifiers, key) {
+                    if let Some(path) =
+                        self.browser.selection[side].move_cursor(&order, delta, absolute, modifiers)
+                    {
+                        if local {
+                            self.local_file = path;
+                        } else {
+                            self.remote_file = path;
+                        }
+                    }
                     return;
                 }
             }
         }
-        if pressed(egui::Modifiers::NONE,egui::Key::Space) {
-            if let Some(path)=self.browser.selection[side].cursor.clone(){self.browser.selection[side].click(&path,&order,egui::Modifiers::CTRL);}return;
+        if pressed(egui::Modifiers::NONE, egui::Key::Space) {
+            if let Some(path) = self.browser.selection[side].cursor.clone() {
+                self.browser.selection[side].click(&path, &order, egui::Modifiers::CTRL);
+            }
+            return;
         }
-        if pressed(egui::Modifiers::NONE,egui::Key::Enter) {
-            if let Some(entry)=self.browser.selection[side].cursor.as_ref().and_then(|p|file_entries(view,local).iter().find(|e|&e.path==p)) {
-                if entry.kind==2{*command=Some(self.navigate(session,local,entry.path.clone()));}
-                else if !local && entry.kind==1{*command=self.open_remote_editor(session,view,&entry.path);}
-            }return;
+        if pressed(egui::Modifiers::NONE, egui::Key::Enter) {
+            if let Some(entry) = self.browser.selection[side]
+                .cursor
+                .as_ref()
+                .and_then(|p| file_entries(view, local).iter().find(|e| &e.path == p))
+            {
+                if entry.kind == 2 {
+                    *command = Some(self.navigate(session, local, entry.path.clone()));
+                } else if !local && entry.kind == 1 {
+                    *command = self.open_remote_editor(session, view, &entry.path);
+                }
+            }
+            return;
         }
         if pressed(egui::Modifiers::CTRL, egui::Key::A) {
             self.browser.selection[usize::from(!local)].paths = file_entries(view, local)
@@ -357,9 +475,11 @@ impl SftpPanel {
                 matches!(j.state, SftpFileState::Inspecting | SftpFileState::Applying)
             })
         {
-            if !local && pressed(egui::Modifiers::NONE,egui::Key::F4) {
-                let entries=self.selected_entries(view,false);
-                if entries.len()==1 { *command=self.open_remote_editor(session,view,&entries[0].path); }
+            if !local && pressed(egui::Modifiers::NONE, egui::Key::F4) {
+                let entries = self.selected_entries(view, false);
+                if entries.len() == 1 {
+                    *command = self.open_remote_editor(session, view, &entries[0].path);
+                }
             } else if pressed(egui::Modifiers::NONE, egui::Key::F2) {
                 self.open_file_dialog(view, local, SftpFileAction::Rename);
             } else if pressed(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::N) {
@@ -639,10 +759,11 @@ impl SftpPanel {
                 ui.separator();
                 let drafts = dialog.drafts();
                 let editing = dialog.run.is_none();
-                if editing && dialog.action != SftpFileAction::Inspect {
-                    if let Err(error) = &drafts {
-                        ui.add(egui::Label::new(*error).wrap());
-                    }
+                if editing
+                    && dialog.action != SftpFileAction::Inspect
+                    && let Err(error) = &drafts
+                {
+                    ui.add(egui::Label::new(*error).wrap());
                 }
                 ui.horizontal(|ui| {
                     if editing
@@ -707,7 +828,11 @@ impl SftpPanel {
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.browser.operation = None;
-            ctx.memory_mut(|m|{if let Some(id)=m.focused(){m.surrender_focus(id);}});
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
         }
         if active {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));

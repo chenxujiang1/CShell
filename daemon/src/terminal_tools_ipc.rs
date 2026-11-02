@@ -206,10 +206,21 @@ impl TerminalToolsService {
         profiles: Option<&Arc<ProfileIpcService>>,
     ) -> Result<TerminalToolsReply, &'static str> {
         if op == Op::ShellHistory {
-            let id=session.ok_or("missing session scope")?;
-            let snapshots=if let Ok(s)=ssh.get(id){s.history_snapshots()}else{local.attach(id).map_err(|_|"terminal session unavailable")?.snapshots()};
-            let data=snapshots.shell_history(id,request.cursor).ok_or("terminal history unavailable")?;
-            if !data.validate(id,request.cursor){return Err("command is no longer retained; refresh history");}
+            let id = session.ok_or("missing session scope")?;
+            let snapshots = if let Ok(s) = ssh.get(id) {
+                s.history_snapshots()
+            } else {
+                local
+                    .attach(id)
+                    .map_err(|_| "terminal session unavailable")?
+                    .snapshots()
+            };
+            let data = snapshots
+                .shell_history(id, request.cursor)
+                .ok_or("terminal history unavailable")?;
+            if !data.validate(id, request.cursor) {
+                return Err("command is no longer retained; refresh history");
+            }
             return Ok(TerminalToolsReply::Shell(data));
         }
         if op == Op::RawJournal {

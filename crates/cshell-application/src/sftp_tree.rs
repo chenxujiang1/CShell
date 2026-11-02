@@ -25,7 +25,7 @@ pub struct SftpTreeSnapshot {
     pub detail: String,
     pub retryable: bool,
     pub label: String,
-    pub destination:String,
+    pub destination: String,
 }
 impl std::fmt::Debug for SftpTreeStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

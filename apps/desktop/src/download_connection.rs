@@ -264,16 +264,15 @@ impl DownloadConnection {
         {
             return false;
         }
-        if let Operation::Act(id, action) = &operation {
-            if view.cancel_busy
+        if let Operation::Act(id, action) = &operation
+            && (view.cancel_busy
                 || !view.available
                 || view
                     .document
                     .as_ref()
-                    .is_none_or(|document| document.id != *id || !action.allowed(document))
-            {
-                return false;
-            }
+                    .is_none_or(|document| document.id != *id || !action.allowed(document)))
+        {
+            return false;
         }
         let queued = QueuedOperation {
             operation,
@@ -355,6 +354,10 @@ fn block_writes(view: &mut DownloadView) {
     view.writes_allowed = false;
     view.authority_epoch = view.authority_epoch.saturating_add(1);
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 enum Outcome {
     List(Vec<DownloadRunSummary>, Option<TaskRunId>),
     Document(DownloadStatusDocument, bool),

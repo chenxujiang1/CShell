@@ -1,6 +1,13 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
-use crate::{LocalSessionRegistry, SshSession};
 use crate::ssh_session::SshConnect;
+use crate::{LocalSessionRegistry, SshSession};
 use cshell_domain::{InputAction, SessionId, TerminalSize};
 use cshell_ipc::{Envelope, LogPageRequest, envelope, features, read_envelope, write_envelope};
 use cshell_ssh::{KnownHostsVerifier, SshAuthentication};

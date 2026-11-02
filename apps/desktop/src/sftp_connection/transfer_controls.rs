@@ -356,10 +356,13 @@ pub(super) async fn poll(config: &DesktopConnectionConfig, shared: &Arc<Mutex<Sf
         view.paused_items
             .retain(|id| queue.items.iter().any(|item| item.id == *id));
         view.stopping_items.retain(|id| {
-            queue
-                .items
-                .iter()
-                .any(|item| item.id == *id && matches!(item.state, SftpQueueState::Running | SftpQueueState::Unknown))
+            queue.items.iter().any(|item| {
+                item.id == *id
+                    && matches!(
+                        item.state,
+                        SftpQueueState::Running | SftpQueueState::Unknown
+                    )
+            })
         });
         let ids: Vec<_> = queue
             .items

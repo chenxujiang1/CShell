@@ -158,10 +158,10 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
             let input = bytes(&args[5], 16 * 1024)?;
             let input = input.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&input);
             let peer =
-                if let Ok(peer) = serde_json::from_slice::<cshell_domain::ClipboardTrust>(&input) {
+                if let Ok(peer) = serde_json::from_slice::<cshell_domain::ClipboardTrust>(input) {
                     peer
                 } else {
-                    match decode_sftp_workspace(&input)? {
+                    match decode_sftp_workspace(input)? {
                         SftpWorkspaceReply::Peer { session, peer } if session == target => peer,
                         _ => return Err("peer file must describe the target session"),
                     }
@@ -358,7 +358,11 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
         object.is_empty() || id.as_uuid().as_bytes().as_slice() == object.as_slice()
     };
     let valid = match &value {
-        SftpWorkspaceReply::Review(review)=>operation==SftpOperation::EditReview as i32&&review.session==scope&&same_id(review.id),
+        SftpWorkspaceReply::Review(review) => {
+            operation == SftpOperation::EditReview as i32
+                && review.session == scope
+                && same_id(review.id)
+        }
         SftpWorkspaceReply::Peer { session, .. } => {
             operation == SftpOperation::PeerGet as i32 && *session == scope
         }

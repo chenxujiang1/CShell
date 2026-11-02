@@ -164,7 +164,7 @@ impl TerminalPolicyPanel {
         }
         let Some(policy) = view.catalog.as_ref() else {
             let mut open = self.open;
-            cshell_ui::form::dialog(&context, "标签 / Host / 临时终端继承")
+            cshell_ui::form::dialog(context, "标签 / Host / 临时终端继承")
                 .open(&mut open)
                 .show(context, |ui| {
                     if let Some(error) = self.error.as_ref().or(view.error.as_ref()) {
@@ -206,7 +206,7 @@ impl TerminalPolicyPanel {
             && view.writable
             && profiles.is_some_and(|p| p.revision == policy.profile_revision);
         let mut open = self.open;
-        cshell_ui::form::dialog(&context, "标签 / Host / 临时终端继承").open(&mut open).default_size([850.0,750.0]).show(context,|ui|{
+        cshell_ui::form::dialog(context, "标签 / Host / 临时终端继承").open(&mut open).default_size([850.0,750.0]).show(context,|ui|{
             ui.weak("全局 → 文件夹 → 标签（priority、UUID 升序）→ Profile → Host → 临时。当前标签按钮只改显示主题；另行确认打开新会话会使用解析的 TERM / Logging。Host 上下文不改变连接地址。");
             if let Some(error)=self.error.as_ref().or(view.error.as_ref()){ui.colored_label(cshell_ui::theme::WARNING,error);}
             if view.busy{ui.spinner();}
@@ -235,9 +235,8 @@ impl TerminalPolicyPanel {
                     egui::ScrollArea::vertical().max_height(90.0).show(ui,|ui|{for id in &preview.matched_profiles{ui.label(profiles.and_then(|p|p.profiles.iter().find(|p|p.id==*id)).map_or_else(||id.to_string(),|p|format!("{} · {id}",p.name)));}});
                     ui.checkbox(&mut self.confirm,"确认保存这份完整策略目录");
                     let now=SystemTime::now().duration_since(UNIX_EPOCH).map_or(u64::MAX,|t|t.as_secs());
-                    if ui.add_enabled(ready && self.confirm && now<preview.expires_unix,egui::Button::new("保存策略")).clicked() && let Some(c)=&self.connection && let Ok(sha)=preview.fingerprint() {
-                        if c.request(Request{operation:Op::Apply as i32,expected_revision:policy.catalog.revision,profile_revision:policy.profile_revision,host_revision:policy.host_revision,preview_token:preview.token.to_vec(),review_sha256:sha.to_vec(),confirmed:true,..Default::default()},self.epoch,false,None) {self.confirm=false;}
-                    }
+                    if ui.add_enabled(ready && self.confirm && now<preview.expires_unix,egui::Button::new("保存策略")).clicked() && let Some(c)=&self.connection && let Ok(sha)=preview.fingerprint()
+                        && c.request(Request{operation:Op::Apply as i32,expected_revision:policy.catalog.revision,profile_revision:policy.profile_revision,host_revision:policy.host_revision,preview_token:preview.token.to_vec(),review_sha256:sha.to_vec(),confirmed:true,..Default::default()},self.epoch,false,None) {self.confirm=false;}
                 } else {ui.weak("草稿或目录变化，请重新预览。");}
             }
             // Adopt a saved acknowledgement only when it describes the unchanged submitted draft.

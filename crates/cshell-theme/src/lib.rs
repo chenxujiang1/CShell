@@ -22,7 +22,7 @@ pub fn decode_theme_text(bytes: &[u8]) -> Result<String, &'static str> {
     }
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         let little = bytes[0] == 0xff;
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return Err("invalid UTF-16 theme");
         }
         let words = bytes[2..]

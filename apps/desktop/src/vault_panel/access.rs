@@ -2,7 +2,11 @@ use super::*;
 use cshell_ipc::VaultControlStatus;
 
 impl VaultPanel {
-    pub(super) fn request(&self, operation: Op, selected: Option<(ProfileId, u64)>) -> VaultRequest {
+    pub(super) fn request(
+        &self,
+        operation: Op,
+        selected: Option<(ProfileId, u64)>,
+    ) -> VaultRequest {
         let mut request = VaultRequest::new(operation);
         if let Some((id, revision)) = selected {
             request.profile_id = id.as_uuid().as_bytes().to_vec();

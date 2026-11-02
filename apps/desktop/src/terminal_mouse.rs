@@ -171,8 +171,17 @@ impl DesktopApp {
             self.release_remote_mouse();
             return false;
         }
-        let over_current=self.cursor_position.zip(self.terminal_viewport).is_some_and(|(p,v)|p.x>=f64::from(v.x)&&p.x<f64::from(v.x+v.width)&&p.y>=f64::from(v.y)&&p.y<f64::from(v.y+v.height));
-        let available = self.clipboard_pointer_available(window.scale_factor() as f32)&&over_current;
+        let over_current = self
+            .cursor_position
+            .zip(self.terminal_viewport)
+            .is_some_and(|(p, v)| {
+                p.x >= f64::from(v.x)
+                    && p.x < f64::from(v.x + v.width)
+                    && p.y >= f64::from(v.y)
+                    && p.y < f64::from(v.y + v.height)
+            });
+        let available =
+            self.clipboard_pointer_available(window.scale_factor() as f32) && over_current;
         match event {
             WindowEvent::MouseInput { state, button, .. } => {
                 let button = match button {

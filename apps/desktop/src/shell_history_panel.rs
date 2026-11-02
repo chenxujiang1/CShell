@@ -49,147 +49,6 @@ pub(super) fn preview(session: SessionId) -> (Panel, View) {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ui_layout_gate::{bounds, check_window, context, frame};
-    #[test]
-    fn search_failure_and_bookmark_filters_and_tab_switch_keep_scope() {
-        let ctx = context();
-        let session = SessionId::new();
-        let (mut panel, mut view) = preview(session);
-        let mut second = view.shell.as_ref().unwrap().commands[0].clone();
-        second.id = 2;
-        second.command = "echo healthy".into();
-        second.exit_status = Some(0);
-        view.shell.as_mut().unwrap().commands.push(second);
-        panel.query = "HEALTHY".into();
-        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
-            cshell_ui::form::dialog(c, "filter test")
-                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
-        });
-        assert_eq!(panel.selected, Some(2));
-        panel.query.clear();
-        panel.failed_only = true;
-        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
-            cshell_ui::form::dialog(c, "filter test")
-                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
-        });
-        assert_eq!(panel.selected, Some(1));
-        panel.failed_only = false;
-        panel.bookmarks.insert(2);
-        panel.bookmarks_only = true;
-        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
-            cshell_ui::form::dialog(c, "filter test")
-                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
-        });
-        assert_eq!(panel.selected, Some(2));
-        let other = SessionId::new();
-        let (_, other_view) = preview(other);
-        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
-            cshell_ui::form::dialog(c, "filter test")
-                .show(c, |ui| panel.draw(ui, Some(other), &other_view, None));
-        });
-        assert!(panel.bookmarks.is_empty());
-        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
-            cshell_ui::form::dialog(c, "filter test")
-                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
-        });
-        assert!(panel.bookmarks.contains(&2));
-    }
-    #[test]
-    fn incomplete_command_text_cannot_be_copied_as_a_complete_command() {
-        let ctx = context();
-        let session = SessionId::new();
-        let (mut panel, mut view) = preview(session);
-        view.shell.as_mut().unwrap().commands[0].command_complete = false;
-        let tree = frame(&ctx, egui::vec2(720.0, 480.0), |c| {
-            cshell_ui::form::dialog(c, "命令文本检查")
-                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
-        });
-        assert!(
-            tree.nodes
-                .iter()
-                .find(|(_, n)| n.role() == egui::accesskit::Role::Button
-                    && n.label() == Some("复制命令"))
-                .unwrap()
-                .1
-                .is_disabled()
-        );
-    }
-    #[test]
-    fn direct_output_copy_accepts_only_the_requested_session_command_and_receipt() {
-        let ctx = context();
-        let session = SessionId::new();
-        let (mut panel, mut view) = preview(session);
-        view.shell_epoch = 7;
-        panel.pending_copy = Some((session, 1, 7));
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(720.0, 480.0),
-                )),
-                ..Default::default()
-            },
-            |ui| panel.draw(ui, Some(session), &view, None),
-        );
-        assert!(output.platform_output.commands.iter().any(
-            |c| matches!(c,egui::OutputCommand::CopyText(text) if text.contains("nginx.service"))
-        ));
-        output.textures_delta.clear();
-        panel.pending_copy = Some((SessionId::new(), 1, 7));
-        let mut output = ctx.run_ui(Default::default(), |ui| {
-            panel.draw(ui, Some(session), &view, None)
-        });
-        assert!(
-            !output
-                .platform_output
-                .commands
-                .iter()
-                .any(|c| matches!(c, egui::OutputCommand::CopyText(_)))
-        );
-        output.textures_delta.clear();
-    }
-    #[test]
-    fn command_history_actions_fit_and_switching_session_discards_selection() {
-        for size in [egui::vec2(720.0, 480.0), egui::vec2(1280.0, 800.0)] {
-            let ctx = context();
-            let session = SessionId::new();
-            let (mut panel, view) = preview(session);
-            let mut render = |c: &egui::Context| {
-                cshell_ui::form::dialog(c, "命令历史检查")
-                    .show(c, |ui| panel.draw(ui, Some(session), &view, None));
-            };
-            for _ in 0..3 {
-                frame(&ctx, size, &mut render);
-            }
-            let tree = frame(&ctx, size, &mut render);
-            check_window(&ctx, size, "命令历史检查", &tree);
-            for label in ["定位到终端", "复制命令", "复制输出"] {
-                let node = tree
-                    .nodes
-                    .iter()
-                    .find(|(_, n)| {
-                        n.role() == egui::accesskit::Role::Button && n.label() == Some(label)
-                    })
-                    .unwrap();
-                let rect = bounds(&node.1);
-                assert!(
-                    rect.height() > 10.0 && rect.bottom() < size.y,
-                    "{label}: {rect:?}"
-                );
-            }
-            let other = SessionId::new();
-            frame(&ctx, size, |c| {
-                cshell_ui::form::dialog(c, "命令历史检查")
-                    .show(c, |ui| panel.draw(ui, Some(other), &view, None));
-            });
-            assert!(panel.selected.is_none());
-            assert!(panel.jump.is_none());
-        }
-    }
-}
 impl Panel {
     fn request(&mut self, connection: Option<&Connection>, session: SessionId, id: u64) -> bool {
         let epoch = self.epoch.wrapping_add(1);
@@ -351,10 +210,9 @@ impl Panel {
                             "添加书签"
                         })
                         .clicked()
+                        && !self.bookmarks.remove(&c.id)
                     {
-                        if !self.bookmarks.remove(&c.id) {
-                            self.bookmarks.insert(c.id);
-                        }
+                        self.bookmarks.insert(c.id);
                     }
                     if ui
                         .add_enabled(c.command_complete, egui::Button::new("载入命令栏"))
@@ -425,28 +283,29 @@ impl Panel {
                         ui.weak("等待下一条命令；不补造启用前或已淘汰的历史。");
                     }
                 });
-            if data.output_id != 0 && Some(data.output_id) == self.selected {
-                if let Some(output) = &data.output {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.strong("命令输出");
-                        if ui.button("复制输出").clicked() {
-                            ui.ctx().copy_text(output.clone());
-                        }
-                    });
-                    if data.truncated {
-                        ui.colored_label(
-                            cshell_ui::theme::WARNING,
-                            "只展示保留范围内的前 64 KiB / 513 行；内容不完整。",
-                        );
+            if data.output_id != 0
+                && Some(data.output_id) == self.selected
+                && let Some(output) = &data.output
+            {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.strong("命令输出");
+                    if ui.button("复制输出").clicked() {
+                        ui.ctx().copy_text(output.clone());
                     }
-                    egui::ScrollArea::both()
-                        .id_salt("shell-command-output")
-                        .max_height((ui.ctx().content_rect().height() * 0.25).clamp(70.0, 240.0))
-                        .show(ui, |ui| {
-                            ui.monospace(output);
-                        });
+                });
+                if data.truncated {
+                    ui.colored_label(
+                        cshell_ui::theme::WARNING,
+                        "只展示保留范围内的前 64 KiB / 513 行；内容不完整。",
+                    );
                 }
+                egui::ScrollArea::both()
+                    .id_salt("shell-command-output")
+                    .max_height((ui.ctx().content_rect().height() * 0.25).clamp(70.0, 240.0))
+                    .show(ui, |ui| {
+                        ui.monospace(output);
+                    });
             }
         }
         if !view.busy
@@ -458,5 +317,152 @@ impl Panel {
             self.request(connection, session, 0);
         }
         ui.ctx().request_repaint_after(Duration::from_millis(250));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+mod tests {
+    use super::*;
+    use crate::ui_layout_gate::{bounds, check_window, context, frame};
+    #[test]
+    fn search_failure_and_bookmark_filters_and_tab_switch_keep_scope() {
+        let ctx = context();
+        let session = SessionId::new();
+        let (mut panel, mut view) = preview(session);
+        let mut second = view.shell.as_ref().unwrap().commands[0].clone();
+        second.id = 2;
+        second.command = "echo healthy".into();
+        second.exit_status = Some(0);
+        view.shell.as_mut().unwrap().commands.push(second);
+        panel.query = "HEALTHY".into();
+        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
+            cshell_ui::form::dialog(c, "filter test")
+                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
+        });
+        assert_eq!(panel.selected, Some(2));
+        panel.query.clear();
+        panel.failed_only = true;
+        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
+            cshell_ui::form::dialog(c, "filter test")
+                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
+        });
+        assert_eq!(panel.selected, Some(1));
+        panel.failed_only = false;
+        panel.bookmarks.insert(2);
+        panel.bookmarks_only = true;
+        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
+            cshell_ui::form::dialog(c, "filter test")
+                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
+        });
+        assert_eq!(panel.selected, Some(2));
+        let other = SessionId::new();
+        let (_, other_view) = preview(other);
+        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
+            cshell_ui::form::dialog(c, "filter test")
+                .show(c, |ui| panel.draw(ui, Some(other), &other_view, None));
+        });
+        assert!(panel.bookmarks.is_empty());
+        let _ = frame(&ctx, egui::vec2(900.0, 600.0), |c| {
+            cshell_ui::form::dialog(c, "filter test")
+                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
+        });
+        assert!(panel.bookmarks.contains(&2));
+    }
+    #[test]
+    fn incomplete_command_text_cannot_be_copied_as_a_complete_command() {
+        let ctx = context();
+        let session = SessionId::new();
+        let (mut panel, mut view) = preview(session);
+        view.shell.as_mut().unwrap().commands[0].command_complete = false;
+        let tree = frame(&ctx, egui::vec2(720.0, 480.0), |c| {
+            cshell_ui::form::dialog(c, "命令文本检查")
+                .show(c, |ui| panel.draw(ui, Some(session), &view, None));
+        });
+        assert!(
+            tree.nodes
+                .iter()
+                .find(|(_, n)| n.role() == egui::accesskit::Role::Button
+                    && n.label() == Some("复制命令"))
+                .unwrap()
+                .1
+                .is_disabled()
+        );
+    }
+    #[test]
+    fn direct_output_copy_accepts_only_the_requested_session_command_and_receipt() {
+        let ctx = context();
+        let session = SessionId::new();
+        let (mut panel, mut view) = preview(session);
+        view.shell_epoch = 7;
+        panel.pending_copy = Some((session, 1, 7));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(720.0, 480.0),
+                )),
+                ..Default::default()
+            },
+            |ui| panel.draw(ui, Some(session), &view, None),
+        );
+        assert!(output.platform_output.commands.iter().any(
+            |c| matches!(c,egui::OutputCommand::CopyText(text) if text.contains("nginx.service"))
+        ));
+        output.textures_delta.clear();
+        panel.pending_copy = Some((SessionId::new(), 1, 7));
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            panel.draw(ui, Some(session), &view, None)
+        });
+        assert!(
+            !output
+                .platform_output
+                .commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::CopyText(_)))
+        );
+        output.textures_delta.clear();
+    }
+    #[test]
+    fn command_history_actions_fit_and_switching_session_discards_selection() {
+        for size in [egui::vec2(720.0, 480.0), egui::vec2(1280.0, 800.0)] {
+            let ctx = context();
+            let session = SessionId::new();
+            let (mut panel, view) = preview(session);
+            let mut render = |c: &egui::Context| {
+                cshell_ui::form::dialog(c, "命令历史检查")
+                    .show(c, |ui| panel.draw(ui, Some(session), &view, None));
+            };
+            for _ in 0..3 {
+                frame(&ctx, size, &mut render);
+            }
+            let tree = frame(&ctx, size, &mut render);
+            check_window(&ctx, size, "命令历史检查", &tree);
+            for label in ["定位到终端", "复制命令", "复制输出"] {
+                let node = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| {
+                        n.role() == egui::accesskit::Role::Button && n.label() == Some(label)
+                    })
+                    .unwrap();
+                let rect = bounds(&node.1);
+                assert!(
+                    rect.height() > 10.0 && rect.bottom() < size.y,
+                    "{label}: {rect:?}"
+                );
+            }
+            let other = SessionId::new();
+            frame(&ctx, size, |c| {
+                cshell_ui::form::dialog(c, "命令历史检查")
+                    .show(c, |ui| panel.draw(ui, Some(other), &view, None));
+            });
+            assert!(panel.selected.is_none());
+            assert!(panel.jump.is_none());
+        }
     }
 }

@@ -209,7 +209,10 @@ fn corpus() -> Vec<CorpusCase> {
                 spec(0, 0, "a"),
                 spec(0, 1, "b"),
                 spec(0, 2, "c"),
-                CellSpec { soft_wrap: true, ..spec(0, 3, "X\u{301}") },
+                CellSpec {
+                    soft_wrap: true,
+                    ..spec(0, 3, "X\u{301}")
+                },
                 spec(1, 0, "Y"),
             ],
         },
@@ -327,7 +330,10 @@ fn corpus() -> Vec<CorpusCase> {
                 spec(0, 0, "A"),
                 spec(0, 1, "B"),
                 spec(0, 2, "C"),
-                CellSpec { soft_wrap: true, ..spec(0, 3, "D") },
+                CellSpec {
+                    soft_wrap: true,
+                    ..spec(0, 3, "D")
+                },
                 spec(1, 0, "E"),
             ],
         },
@@ -363,7 +369,8 @@ fn corpus() -> Vec<CorpusCase> {
 fn expected_cell(spec: &CellSpec) -> Cell {
     let mut characters = spec.text.chars();
     let character = characters.next().unwrap_or(' ');
-    let mut cell = Cell::with_zerowidth(character, characters, spec.width, spec.style).with_soft_wrap(spec.soft_wrap);
+    let mut cell = Cell::with_zerowidth(character, characters, spec.width, spec.style)
+        .with_soft_wrap(spec.soft_wrap);
     if let Some(uri) = spec.hyperlink_uri {
         cell = cell.with_hyperlink_uri(uri);
     }

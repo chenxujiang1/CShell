@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 
 fn take_wire(protocol: &mut Protocol) -> Vec<u8> {
@@ -130,7 +137,7 @@ fn download_streams_binary_and_empty_files_and_publishes_without_overwriting() {
 fn upload_multiple_files_matches_peer_bytes_and_finishes_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     let data: Vec<_> = (0..160 * 1024).map(|i| (i % 251) as u8).collect();
-    let paths = vec![dir.path().join("upload.bin"), dir.path().join("empty")];
+    let paths = [dir.path().join("upload.bin"), dir.path().join("empty")];
     std::fs::write(&paths[0], &data).unwrap();
     std::fs::write(&paths[1], b"").unwrap();
     let mut peer = Protocol::Receive(Receiver::new().unwrap());
@@ -345,10 +352,8 @@ fn original_linux_lrzsz_upload_and_download_interoperate() {
                     .unwrap();
             }
             let wire = transfer.pump();
-            if !wire.is_empty() {
-                if input.write_all(&wire).and_then(|_| input.flush()).is_err() {
-                    break;
-                }
+            if !wire.is_empty() && input.write_all(&wire).and_then(|_| input.flush()).is_err() {
+                break;
             }
             if let Some(exit) = child.try_wait().unwrap() {
                 exited = Some(exit);
@@ -360,8 +365,8 @@ fn original_linux_lrzsz_upload_and_download_interoperate() {
         }
         if exited.is_none() {
             let _ = child.kill();
-            exited = Some(child.wait().unwrap());
         }
+        exited = Some(child.wait().unwrap());
         drop(input);
         thread.join().unwrap();
         assert!(

@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use cshell_ipc::{
     Envelope, Handshake, HandshakePolicy, client_handshake, envelope, read_envelope,
@@ -182,7 +189,7 @@ async fn keyboard_saved_vault_password_after_code_authenticates_through_real_ssh
                         id: challenge.id,
                         answers: vec![answer.into()],
                         cancel: false,
-                        username:challenge.username,
+                        username: challenge.username,
                         ..Default::default()
                     });
                     assert_eq!(ipc(&service, request).await.status, Status::Ok as i32);

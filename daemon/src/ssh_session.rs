@@ -1,6 +1,11 @@
-mod recovery;
 mod directory;
+mod recovery;
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod recovery_tests;
 use crate::{LatestSnapshot, PipelineIngress, TerminalFrameSubscription, TerminalPipeline};
 use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
@@ -88,18 +93,30 @@ pub struct SshSession {
 }
 
 impl SshSession {
-    pub(crate) fn history_snapshots(&self)->LatestSnapshot {self.snapshots.clone()}
+    pub(crate) fn history_snapshots(&self) -> LatestSnapshot {
+        self.snapshots.clone()
+    }
     pub(crate) fn zmodem_status(&self) -> Option<cshell_ipc::ZmodemTransfer> {
-        self.zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status.clone().map(|mut s| {
-            s.session_id = self.id.as_uuid().as_bytes().to_vec();
-            s.profile_id = self.profile_id.map(|id| id.as_uuid().as_bytes().to_vec());
-            s.session_title = self.title.clone();
-            s
-        })
+        self.zmodem
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status
+            .clone()
+            .map(|mut s| {
+                s.session_id = self.id.as_uuid().as_bytes().to_vec();
+                s.profile_id = self.profile_id.map(|id| id.as_uuid().as_bytes().to_vec());
+                s.session_title = self.title.clone();
+                s
+            })
     }
     pub(crate) fn zmodem_control(&self, request: &cshell_ipc::ZmodemRequest) -> Result<(), String> {
-        if !self.running() { return Err("SSH 连接已断开".into()); }
-        self.zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).control(request)
+        if !self.running() {
+            return Err("SSH 连接已断开".into());
+        }
+        self.zmodem
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .control(request)
     }
     pub(crate) async fn start_tunnel(
         &self,
@@ -112,7 +129,10 @@ impl SshSession {
         address: &str,
         port: u16,
     ) -> Result<(), SshError> {
-        self.active_transport().client.cancel_remote_forward(address, port).await
+        self.active_transport()
+            .client
+            .cancel_remote_forward(address, port)
+            .await
     }
     pub async fn connect(
         id: SessionId,
@@ -161,6 +181,10 @@ impl SshSession {
         .await
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
     pub(crate) async fn from_connection_configured(
         id: SessionId,
         title: String,
@@ -170,20 +194,53 @@ impl SshSession {
         ingress_capacity: usize,
         terminal_type: &str,
         logging: bool,
-        recovery_config: Option<(crate::ssh_route::SshConnectionPlan, std::path::PathBuf, Arc<crate::vault_control::VaultController>)>,
+        recovery_config: Option<(
+            crate::ssh_route::SshConnectionPlan,
+            std::path::PathBuf,
+            Arc<crate::vault_control::VaultController>,
+        )>,
     ) -> Result<Self, SshSessionError> {
-        Self::from_transport_configured(id, title, crate::shared_ssh::TransportLease::new(connection), size, journal_path, ingress_capacity, terminal_type, logging, recovery_config).await
+        Self::from_transport_configured(
+            id,
+            title,
+            crate::shared_ssh::TransportLease::new(connection),
+            size,
+            journal_path,
+            ingress_capacity,
+            terminal_type,
+            logging,
+            recovery_config,
+        )
+        .await
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
     async fn from_transport_configured(
-        id: SessionId, title: String, lease: crate::shared_ssh::TransportLease,
-        size: TerminalSize, journal_path: &Path, ingress_capacity: usize,
-        terminal_type: &str, logging: bool,
-        recovery_config: Option<(crate::ssh_route::SshConnectionPlan, std::path::PathBuf, Arc<crate::vault_control::VaultController>)>,
+        id: SessionId,
+        title: String,
+        lease: crate::shared_ssh::TransportLease,
+        size: TerminalSize,
+        journal_path: &Path,
+        ingress_capacity: usize,
+        terminal_type: &str,
+        logging: bool,
+        recovery_config: Option<(
+            crate::ssh_route::SshConnectionPlan,
+            std::path::PathBuf,
+            Arc<crate::vault_control::VaultController>,
+        )>,
     ) -> Result<Self, SshSessionError> {
         let client = lease.client();
         let jump = lease.jump();
         let terminal = client
-            .open_terminal_tracked(u32::from(size.rows), u32::from(size.cols), terminal_type, Some(&id.to_string()))
+            .open_terminal_tracked(
+                u32::from(size.rows),
+                u32::from(size.cols),
+                terminal_type,
+                Some(&id.to_string()),
+            )
             .await?;
         let (mut reader, writer) = terminal.split();
         let writer = Arc::new(writer);
@@ -207,12 +264,27 @@ impl SshSession {
             "Output recording is disabled for this session".into()
         }));
         let active = Arc::new(RwLock::new(recovery::ActiveTransport {
-            lease, client: Arc::clone(&client), jump: jump.clone(), writer: Arc::clone(&writer) }));
-        let recovery_plan = recovery_config.map(|(plan, known_hosts, vault)| {
-            let plan=plan.authenticated_plan(&client,jump.as_ref());
-            let peer = plan.verified_peer(&client, jump.as_ref()).map_err(|_| SshSessionError::PeerIdentity)?;
-            Ok::<_, SshSessionError>(recovery::RecoveryPlan { plan, known_hosts, vault, peer, terminal_type: terminal_type.to_owned(), directory_marker:id.to_string() })
-        }).transpose()?;
+            lease,
+            client: Arc::clone(&client),
+            jump: jump.clone(),
+            writer: Arc::clone(&writer),
+        }));
+        let recovery_plan = recovery_config
+            .map(|(plan, known_hosts, vault)| {
+                let plan = plan.authenticated_plan(&client, jump.as_ref());
+                let peer = plan
+                    .verified_peer(&client, jump.as_ref())
+                    .map_err(|_| SshSessionError::PeerIdentity)?;
+                Ok::<_, SshSessionError>(recovery::RecoveryPlan {
+                    plan,
+                    known_hosts,
+                    vault,
+                    peer,
+                    terminal_type: terminal_type.to_owned(),
+                    directory_marker: id.to_string(),
+                })
+            })
+            .transpose()?;
         let reconnecting = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
         let connection_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -221,8 +293,8 @@ impl SshSession {
         let reader_detail = Arc::clone(&terminal_detail);
         let (commands, mut receiver) = tokio::sync::mpsc::channel(256);
         let zmodem = Arc::new(Mutex::new(crate::zmodem::Transfer::default()));
-        let directory=Arc::new(Mutex::new(directory::DirectoryTracker::default()));
-        let reader_directory=directory.clone();
+        let directory = Arc::new(Mutex::new(directory::DirectoryTracker::default()));
+        let reader_directory = directory.clone();
         let reader_zmodem = Arc::clone(&zmodem);
         let reader_ingress = ingress.clone();
         let reader_closed = Arc::clone(&closed);
@@ -246,52 +318,117 @@ impl SshSession {
                         TerminalEvent::Data { data, .. } => {
                             let ingress = reader_ingress.clone();
                             let transfer = Arc::clone(&reader_zmodem);
-                            let directory=reader_directory.clone();
-                            if !matches!(tokio::task::spawn_blocking(move || {
-                                let data = transfer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).incoming(&data);
-                                directory.lock().unwrap_or_else(std::sync::PoisonError::into_inner).feed(&data);
-                                if data.is_empty() { Ok(()) } else { ingress.submit_blocking(data) }
-                            }).await, Ok(Ok(()))) {
-                                replace_terminal_detail(&reader_detail, "SSH output storage failed; the terminal is disconnected".into());
+                            let directory = reader_directory.clone();
+                            if !matches!(
+                                tokio::task::spawn_blocking(move || {
+                                    let data = transfer
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .incoming(&data);
+                                    directory
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .feed(&data);
+                                    if data.is_empty() {
+                                        Ok(())
+                                    } else {
+                                        ingress.submit_blocking(data)
+                                    }
+                                })
+                                .await,
+                                Ok(Ok(()))
+                            ) {
+                                replace_terminal_detail(
+                                    &reader_detail,
+                                    "SSH output storage failed; the terminal is disconnected"
+                                        .into(),
+                                );
                                 unexpected = false;
                                 break;
                             }
                             // Let SSH's channel window provide backpressure when
                             // disk I/O is slower than the network. Do not abort
                             // healthy LAN downloads merely because they are fast.
-                            while reader_zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).buffered_bytes() >= 256 * 1024 {
-                                if reader_stopped.load(Ordering::Acquire) || reader_closed.load(Ordering::Acquire) { break; }
+                            while reader_zmodem
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .buffered_bytes()
+                                >= 256 * 1024
+                            {
+                                if reader_stopped.load(Ordering::Acquire)
+                                    || reader_closed.load(Ordering::Acquire)
+                                {
+                                    break;
+                                }
                                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                             }
                         }
                         TerminalEvent::ExitStatus(code) => {
                             unexpected = false;
-                            replace_terminal_detail(&reader_detail, format!("Remote shell exited with status {code}"));
+                            replace_terminal_detail(
+                                &reader_detail,
+                                format!("Remote shell exited with status {code}"),
+                            );
                         }
                         TerminalEvent::ExitSignal { .. } => {
                             unexpected = false;
-                            replace_terminal_detail(&reader_detail, "Remote shell exited due to a signal".into());
+                            replace_terminal_detail(
+                                &reader_detail,
+                                "Remote shell exited due to a signal".into(),
+                            );
                         }
                         TerminalEvent::Closed => break,
                         _ => {}
                     }
                 }
-                reader_directory.lock().unwrap_or_else(std::sync::PoisonError::into_inner).reset();
+                reader_directory
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .reset();
                 reader_closed.store(true, Ordering::Release);
-                reader_zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).disconnected();
+                reader_zmodem
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .disconnected();
                 reader_epoch.fetch_add(1, Ordering::AcqRel);
                 reader_clipboard.handle(cshell_ipc::ClipboardOperation::Poll, &[], false);
-                let old = reader_active.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                let old = reader_active
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 old.lease.release().await;
-                if !unexpected || reader_stopped.load(Ordering::Acquire) { break; }
-                replace_terminal_detail(&reader_detail, "SSH disconnected without an exit status; remote process outcome is unknown".into());
+                if !unexpected || reader_stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                replace_terminal_detail(
+                    &reader_detail,
+                    "SSH disconnected without an exit status; remote process outcome is unknown"
+                        .into(),
+                );
                 let plan = reader_recovery.clone();
-                let Some(plan) = plan.filter(|p| p.plan.target.options.auto_reconnect) else { break; };
-                if connected_since.elapsed() >= std::time::Duration::from_secs(30) { attempts_used = 0; }
+                let Some(plan) = plan.filter(|p| p.plan.target.options.auto_reconnect) else {
+                    break;
+                };
+                if connected_since.elapsed() >= std::time::Duration::from_secs(30) {
+                    attempts_used = 0;
+                }
                 reader_reconnecting.store(true, Ordering::Release);
-                let restored = recovery::restore(&plan, &reader_active, &reader_size, &reader_ingress, &reader_detail, &reader_closed, &reader_epoch, &reader_input_generation, &mut attempts_used).await;
+                let restored = recovery::restore(
+                    &plan,
+                    &reader_active,
+                    &reader_size,
+                    &reader_ingress,
+                    &reader_detail,
+                    &reader_closed,
+                    &reader_epoch,
+                    &reader_input_generation,
+                    &mut attempts_used,
+                )
+                .await;
                 reader_reconnecting.store(false, Ordering::Release);
-                let Some(next_reader) = restored else { break; };
+                let Some(next_reader) = restored else {
+                    break;
+                };
                 reader = next_reader;
                 connected_since = std::time::Instant::now();
             }
@@ -324,45 +461,104 @@ impl SshSession {
                     }
                 };
                 if command_closed.load(Ordering::Acquire) {
-                    if io_finished.load(Ordering::Acquire) { return; }
+                    if io_finished.load(Ordering::Acquire) {
+                        return;
+                    }
                     while receiver.try_recv().is_ok() {}
                     let _ = responses.drain();
                     continue;
                 }
-                let current = command_active.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                let current = command_active
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 let transfer = Arc::clone(&command_zmodem);
                 let ingress = command_ingress.clone();
-                let needs_service = command_zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).needs_service();
-                let transfer_epoch = command_zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).input_epoch();
-                let (wire, transferring, transfer_epoch) = if needs_service { match tokio::task::spawn_blocking(move || {
-                    let mut transfer = transfer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let was_busy = transfer.busy();
-                    let wire = transfer.pump();
-                    let mut tail = transfer.terminal_tail();
-                    tail.extend(transfer.flush_candidate());
-                    if !tail.is_empty() { let _ = ingress.submit_blocking(tail); }
-                    (wire, was_busy || transfer.busy(), transfer.input_epoch())
-                }).await { Ok(result)=>result, Err(_)=>break } } else {(Vec::new(),false,transfer_epoch)};
+                let needs_service = command_zmodem
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .needs_service();
+                let transfer_epoch = command_zmodem
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .input_epoch();
+                let (wire, transferring, transfer_epoch) = if needs_service {
+                    match tokio::task::spawn_blocking(move || {
+                        let mut transfer = transfer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let was_busy = transfer.busy();
+                        let wire = transfer.pump();
+                        let mut tail = transfer.terminal_tail();
+                        tail.extend(transfer.flush_candidate());
+                        if !tail.is_empty() {
+                            let _ = ingress.submit_blocking(tail);
+                        }
+                        (wire, was_busy || transfer.busy(), transfer.input_epoch())
+                    })
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => break,
+                    }
+                } else {
+                    (Vec::new(), false, transfer_epoch)
+                };
                 let send = async {
-                    if !wire.is_empty() { current.writer.send_input(wire).await?; }
-                    for bytes in responses.drain() { if !transferring { current.writer.send_input(bytes).await?; } }
+                    if !wire.is_empty() {
+                        current.writer.send_input(wire).await?;
+                    }
+                    for bytes in responses.drain() {
+                        if !transferring {
+                            current.writer.send_input(bytes).await?;
+                        }
+                    }
                     match command {
-                        Some(Command::Input(epoch, input_transfer_epoch, bytes)) if !transferring && epoch == command_epoch.load(Ordering::Acquire) && input_transfer_epoch == transfer_epoch => current.writer.send_input(bytes).await,
-                        Some(Command::Resize(size)) => current.writer.resize(u32::from(size.rows), u32::from(size.cols), u32::from(size.pixel_width), u32::from(size.pixel_height)).await,
+                        Some(Command::Input(epoch, input_transfer_epoch, bytes))
+                            if !transferring
+                                && epoch == command_epoch.load(Ordering::Acquire)
+                                && input_transfer_epoch == transfer_epoch =>
+                        {
+                            current.writer.send_input(bytes).await
+                        }
+                        Some(Command::Resize(size)) => {
+                            current
+                                .writer
+                                .resize(
+                                    u32::from(size.rows),
+                                    u32::from(size.cols),
+                                    u32::from(size.pixel_width),
+                                    u32::from(size.pixel_height),
+                                )
+                                .await
+                        }
                         _ => Ok(()),
                     }
                 };
-                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5), send).await, Ok(Ok(()))) {
+                if !matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), send).await,
+                    Ok(Ok(()))
+                ) {
                     let failed_current = {
-                        let active = command_active.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let active = command_active
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if Arc::ptr_eq(&active.client, &current.client) {
-                            replace_terminal_detail(&command_detail, "SSH input delivery failed; remote process outcome is unknown".into());
+                            replace_terminal_detail(
+                                &command_detail,
+                                "SSH input delivery failed; remote process outcome is unknown"
+                                    .into(),
+                            );
                             command_closed.store(true, Ordering::Release);
                             command_epoch.fetch_add(1, Ordering::AcqRel);
                             true
-                        } else { false }
+                        } else {
+                            false
+                        }
                     };
-                    if failed_current { current.lease.release().await; }
+                    if failed_current {
+                        current.lease.release().await;
+                    }
                 }
             }
         });
@@ -396,7 +592,10 @@ impl SshSession {
     }
 
     fn active_transport(&self) -> recovery::ActiveTransport {
-        self.active.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.active
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub fn id(&self) -> SessionId {
         self.id
@@ -428,7 +627,10 @@ impl SshSession {
         mut self,
         plan: &crate::ssh_route::SshConnectionPlan,
     ) -> Result<Self, serde_json::Error> {
-        self.clipboard_trust = Some(plan.verified_peer(&self.active_transport().client, self.active_transport().jump.as_ref())?);
+        self.clipboard_trust = Some(plan.verified_peer(
+            &self.active_transport().client,
+            self.active_transport().jump.as_ref(),
+        )?);
         Ok(self)
     }
     pub(crate) fn clipboard_trust(&self) -> Option<&cshell_domain::ClipboardTrust> {
@@ -470,16 +672,49 @@ impl SshSession {
                 .clone(),
         }
     }
-    pub(crate) fn fork_transport(&self) -> Result<crate::shared_ssh::TransportLease, SshSessionError> {
-        if !self.running() { return Err(SshSessionError::Closed); }
-        self.active_transport().lease.fork().map_err(SshSessionError::ChannelReuse)
+    pub(crate) fn fork_transport(
+        &self,
+    ) -> Result<crate::shared_ssh::TransportLease, SshSessionError> {
+        if !self.running() {
+            return Err(SshSessionError::Closed);
+        }
+        self.active_transport()
+            .lease
+            .fork()
+            .map_err(SshSessionError::ChannelReuse)
     }
-    pub(crate) fn transport_generation(&self)->u64 {self.connection_epoch.load(Ordering::Acquire)}
-    pub(crate) async fn duplicate_channel(&self, id:SessionId, size:TerminalSize, journal:&Path) -> Result<Self,SshSessionError> {
+    pub(crate) fn transport_generation(&self) -> u64 {
+        self.connection_epoch.load(Ordering::Acquire)
+    }
+    pub(crate) async fn duplicate_channel(
+        &self,
+        id: SessionId,
+        size: TerminalSize,
+        journal: &Path,
+    ) -> Result<Self, SshSessionError> {
         let lease = self.fork_transport()?;
-        let title=format!("{} · SSH 渠道",self.title.strip_suffix(" · SSH 渠道").unwrap_or(&self.title));
-        let mut session = Self::from_transport_configured(id, title, lease, size, journal, 256, &self.terminal_type, self.logging, None).await?;
-        replace_terminal_detail(&session.terminal_detail,"SSH 渠道已连接：复用原 SSH 认证，Shell 与输入输出独立。".into());
+        let title = format!(
+            "{} · SSH 渠道",
+            self.title
+                .strip_suffix(" · SSH 渠道")
+                .unwrap_or(&self.title)
+        );
+        let mut session = Self::from_transport_configured(
+            id,
+            title,
+            lease,
+            size,
+            journal,
+            256,
+            &self.terminal_type,
+            self.logging,
+            None,
+        )
+        .await?;
+        replace_terminal_detail(
+            &session.terminal_detail,
+            "SSH 渠道已连接：复用原 SSH 认证，Shell 与输入输出独立。".into(),
+        );
         session.profile_id = self.profile_id;
         session.clipboard_host = self.clipboard_host.clone();
         session.clipboard_trust = self.clipboard_trust.clone();
@@ -491,8 +726,9 @@ impl SshSession {
         }
         Ok(self.active_transport().client.open_sftp().await?)
     }
-    pub(crate) fn checksum_connection(&self)->Option<Arc<cshell_ssh::SshConnection>> {
-        self.running().then(||self.active_transport().client.clone())
+    pub(crate) fn checksum_connection(&self) -> Option<Arc<cshell_ssh::SshConnection>> {
+        self.running()
+            .then(|| self.active_transport().client.clone())
     }
 
     pub fn title(&self) -> &str {
@@ -516,17 +752,31 @@ impl SshSession {
         TerminalFrameSubscription::new(self.id, self.snapshots.clone())
     }
     pub fn send_input(&self, action: &InputAction) -> Result<(), SshSessionError> {
-        self.send_input_observed(action, self.snapshots.latest().map(|snapshot| snapshot.generation))
+        self.send_input_observed(
+            action,
+            self.snapshots.latest().map(|snapshot| snapshot.generation),
+        )
     }
-    pub(crate) fn send_input_observed(&self, action: &InputAction, observed_generation: Option<u64>) -> Result<(), SshSessionError> {
+    pub(crate) fn send_input_observed(
+        &self,
+        action: &InputAction,
+        observed_generation: Option<u64>,
+    ) -> Result<(), SshSessionError> {
         let transfer_epoch = {
-            let transfer = self.zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if transfer.busy() { return Err(SshSessionError::Backpressure); }
+            let transfer = self
+                .zmodem
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if transfer.busy() {
+                return Err(SshSessionError::Backpressure);
+            }
             transfer.input_epoch()
         };
         let epoch = self.connection_epoch.load(Ordering::Acquire);
         let minimum = self.input_generation.load(Ordering::Acquire);
-        if !self.running() || (minimum > 0 && observed_generation.is_none_or(|generation| generation < minimum)) {
+        if !self.running()
+            || (minimum > 0 && observed_generation.is_none_or(|generation| generation < minimum))
+        {
             return Err(SshSessionError::Closed);
         }
         let modes = self
@@ -542,7 +792,10 @@ impl SshSession {
         Ok(())
     }
     pub fn resize(&self, size: TerminalSize) -> Result<(), SshSessionError> {
-        *self.size.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = size;
+        *self
+            .size
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = size;
         if !self.running() {
             return Err(SshSessionError::Closed);
         }
@@ -558,7 +811,10 @@ impl SshSession {
             .map_err(|_| SshSessionError::Backpressure)
     }
     pub async fn close(&self) -> Result<(), SshSessionError> {
-        self.zmodem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).disconnected();
+        self.zmodem
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .disconnected();
         set_terminal_detail(&self.terminal_detail, "SSH session closed by user".into());
         self.stopped.store(true, Ordering::Release);
         self.reconnecting.store(false, Ordering::Release);
@@ -606,7 +862,9 @@ impl SshSession {
 }
 
 fn replace_terminal_detail(detail: &Mutex<String>, value: String) {
-    *detail.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = value;
+    *detail
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = value;
 }
 
 fn set_terminal_detail(detail: &Mutex<String>, value: String) {
@@ -655,8 +913,13 @@ pub struct SshSessionRegistry {
 impl SshSessionRegistry {
     pub fn insert(&self, session: SshSession) -> Arc<SshSession> {
         let session = Arc::new(session);
-        self.sftp_targets.write().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session.id(), Arc::new(crate::sftp_lifecycle::SftpTarget::Terminal(session.clone())));
+        self.sftp_targets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                session.id(),
+                Arc::new(crate::sftp_lifecycle::SftpTarget::Terminal(session.clone())),
+            );
         self.sessions
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -686,7 +949,10 @@ impl SshSessionRegistry {
             .collect()
     }
     pub fn remove(&self, id: SessionId) -> Result<Arc<SshSession>, SshSessionError> {
-        self.sftp_targets.write().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
+        self.sftp_targets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
         self.sessions
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -696,7 +962,7 @@ impl SshSessionRegistry {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod tests {
     mod transfer_policy;
     use super::{SshConnect, SshSession};
@@ -727,37 +993,70 @@ pub(crate) mod tests {
         pub(crate) terminal_limit: Option<usize>,
         code_verified: bool,
         opened_shells: usize,
-        directory_markers:HashMap<ChannelId,String>,
-        shell_directories:HashMap<String,Arc<Mutex<String>>>,
+        directory_markers: HashMap<ChannelId, String>,
+        shell_directories: HashMap<String, Arc<Mutex<String>>>,
     }
     impl EchoServer {
-        pub(crate) fn enable_upload_test_commands(&mut self) {self.sftp_state.lock().unwrap().checksum_exec=true;}
+        pub(crate) fn enable_upload_test_commands(&mut self) {
+            self.sftp_state.lock().unwrap().checksum_exec = true;
+        }
     }
     impl russh::server::Handler for EchoServer {
         type Error = russh::Error;
-        async fn auth_none(&mut self, _: &str) -> Result<Auth,Self::Error> {
-            if self.mfa_codes.is_some() {return Ok(Auth::Reject{proceed_with_methods:Some((&[russh::MethodKind::KeyboardInteractive][..]).into()),partial_success:false});}
+        async fn auth_none(&mut self, _: &str) -> Result<Auth, Self::Error> {
+            if self.mfa_codes.is_some() {
+                return Ok(Auth::Reject {
+                    proceed_with_methods: Some(
+                        (&[russh::MethodKind::KeyboardInteractive][..]).into(),
+                    ),
+                    partial_success: false,
+                });
+            }
             Ok(Auth::reject())
         }
-        async fn auth_keyboard_interactive<'a>(&'a mut self,_:&str,_:&str,response:Option<russh::server::Response<'a>>)->Result<Auth,Self::Error> {
-            let Some(counter)=&self.mfa_codes else {return Ok(Auth::reject());};
-            if let Some(mut response)=response {
-                if response.next().is_some_and(|v|v.as_ref()==b"654321") {
-                    self.code_verified=true;
-                    return Ok(Auth::Reject{proceed_with_methods:Some((&[russh::MethodKind::Password][..]).into()),partial_success:true});
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            _: &str,
+            _: &str,
+            response: Option<russh::server::Response<'a>>,
+        ) -> Result<Auth, Self::Error> {
+            let Some(counter) = &self.mfa_codes else {
+                return Ok(Auth::reject());
+            };
+            if let Some(mut response) = response {
+                if response.next().is_some_and(|v| v.as_ref() == b"654321") {
+                    self.code_verified = true;
+                    return Ok(Auth::Reject {
+                        proceed_with_methods: Some((&[russh::MethodKind::Password][..]).into()),
+                        partial_success: true,
+                    });
                 }
                 return Ok(Auth::reject());
             }
-            counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-            Ok(Auth::Partial{name:std::borrow::Cow::Borrowed("MFA"),instructions:std::borrow::Cow::Borrowed(""),prompts:std::borrow::Cow::Owned(vec![(std::borrow::Cow::Borrowed("Verification code: "),false)])})
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Auth::Partial {
+                name: std::borrow::Cow::Borrowed("MFA"),
+                instructions: std::borrow::Cow::Borrowed(""),
+                prompts: std::borrow::Cow::Owned(vec![(
+                    std::borrow::Cow::Borrowed("Verification code: "),
+                    false,
+                )]),
+            })
         }
         async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-            if let Some(counter)=&self.mfa_passwords {counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
-            Ok(if user == "cshell" && password == "phase1" && (self.mfa_codes.is_none() || self.code_verified) {
-                Auth::Accept
-            } else {
-                Auth::reject()
-            })
+            if let Some(counter) = &self.mfa_passwords {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(
+                if user == "cshell"
+                    && password == "phase1"
+                    && (self.mfa_codes.is_none() || self.code_verified)
+                {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                },
+            )
         }
         async fn auth_publickey(
             &mut self,
@@ -782,68 +1081,165 @@ pub(crate) mod tests {
             reply.accept().await;
             Ok(())
         }
-        async fn env_request(&mut self,channel:ChannelId,name:&str,value:&str,_session:&mut Session)->Result<(),Self::Error> {
-            if name=="LC_CSHELL_SESSION" {self.directory_markers.insert(channel,value.to_owned());}
+        async fn env_request(
+            &mut self,
+            channel: ChannelId,
+            name: &str,
+            value: &str,
+            _session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            if name == "LC_CSHELL_SESSION" {
+                self.directory_markers.insert(channel, value.to_owned());
+            }
             Ok(())
         }
-        async fn exec_request(&mut self,channel:ChannelId,data:&[u8],session:&mut Session)->Result<(),Self::Error> {
-            let command=String::from_utf8_lossy(data);
-            if let Some(directory)=command.strip_prefix("cd -- '").and_then(|s|s.strip_suffix("' && exec rz -E")) {
-                let directory=directory.replace("'\\''","'");
-                let Some(stream)=self.channels.remove(&channel) else {return Ok(());};
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            let command = String::from_utf8_lossy(data);
+            if let Some(directory) = command
+                .strip_prefix("cd -- '")
+                .and_then(|s| s.strip_suffix("' && exec rz -E"))
+            {
+                let directory = directory.replace("'\\''", "'");
+                let Some(stream) = self.channels.remove(&channel) else {
+                    return Ok(());
+                };
                 session.channel_success(channel)?;
-                let handle=session.handle();let state=self.sftp_state.clone();
+                let handle = session.handle();
+                let state = self.sftp_state.clone();
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
-                    let mut stream=stream.into_stream();let mut receiver=zmodem2::Receiver::new().unwrap();
-                    let mut pending=Vec::new();let mut current=Vec::new();let mut name=String::new();
+                    let mut stream = stream.into_stream();
+                    let mut receiver = zmodem2::Receiver::new().unwrap();
+                    let mut pending = Vec::new();
+                    let mut current = Vec::new();
+                    let mut name = String::new();
                     for _ in 0..100_000 {
                         match receiver.poll() {
-                            zmodem2::Action::WriteWire(bytes)=>{let bytes=bytes.to_vec();receiver.wire_written(bytes.len());if stream.write_all(&bytes).await.is_err(){break;}},
-                            zmodem2::Action::WriteFile(bytes)=>{let length=bytes.len();current.extend_from_slice(bytes);receiver.file_written(length).unwrap();},
-                            zmodem2::Action::Event(zmodem2::Event::FileStarted(info))=>{name=String::from_utf8(info.name.to_vec()).unwrap();current.clear();},
-                            zmodem2::Action::Event(zmodem2::Event::FileCompleted)=>{state.lock().unwrap().files.insert(format!("{directory}/{name}"),std::mem::take(&mut current));},
-                            zmodem2::Action::Event(zmodem2::Event::SessionCompleted)=>{
-                                while let zmodem2::Action::WriteWire(bytes)=receiver.poll() {let bytes=bytes.to_vec();receiver.wire_written(bytes.len());if stream.write_all(&bytes).await.is_err(){break;}}
+                            zmodem2::Action::WriteWire(bytes) => {
+                                let bytes = bytes.to_vec();
+                                receiver.wire_written(bytes.len());
+                                if stream.write_all(&bytes).await.is_err() {
+                                    break;
+                                }
+                            }
+                            zmodem2::Action::WriteFile(bytes) => {
+                                let length = bytes.len();
+                                current.extend_from_slice(bytes);
+                                receiver.file_written(length).unwrap();
+                            }
+                            zmodem2::Action::Event(zmodem2::Event::FileStarted(info)) => {
+                                name = String::from_utf8(info.name.to_vec()).unwrap();
+                                current.clear();
+                            }
+                            zmodem2::Action::Event(zmodem2::Event::FileCompleted) => {
+                                state.lock().unwrap().files.insert(
+                                    format!("{directory}/{name}"),
+                                    std::mem::take(&mut current),
+                                );
+                            }
+                            zmodem2::Action::Event(zmodem2::Event::SessionCompleted) => {
+                                while let zmodem2::Action::WriteWire(bytes) = receiver.poll() {
+                                    let bytes = bytes.to_vec();
+                                    receiver.wire_written(bytes.len());
+                                    if stream.write_all(&bytes).await.is_err() {
+                                        break;
+                                    }
+                                }
                                 // Sender finishes after our ZFIN with OO; consume it before closing.
-                                let mut tail=[0u8;32];let _=tokio::time::timeout(std::time::Duration::from_secs(2),stream.read(&mut tail)).await;
+                                let mut tail = [0u8; 32];
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_secs(2),
+                                    stream.read(&mut tail),
+                                )
+                                .await;
                                 break;
-                            },
-                            zmodem2::Action::Idle=>{if pending.is_empty(){let mut buffer=vec![0;65536];let n=match stream.read(&mut buffer).await{Ok(n) if n>0=>n,_=>break};pending.extend_from_slice(&buffer[..n]);}let n=receiver.submit_wire(&pending).unwrap();pending.drain(..n);},
-                            _=>{},
+                            }
+                            zmodem2::Action::Idle => {
+                                if pending.is_empty() {
+                                    let mut buffer = vec![0; 65536];
+                                    let n = match stream.read(&mut buffer).await {
+                                        Ok(n) if n > 0 => n,
+                                        _ => break,
+                                    };
+                                    pending.extend_from_slice(&buffer[..n]);
+                                }
+                                let n = receiver.submit_wire(&pending).unwrap();
+                                pending.drain(..n);
+                            }
+                            _ => {}
                         }
                     }
-                    let _=handle.exit_status_request(channel,0).await;let _=handle.close(channel).await;
+                    let _ = handle.exit_status_request(channel, 0).await;
+                    let _ = handle.close(channel).await;
                 });
                 return Ok(());
             }
-            let checksum_output={
+            let checksum_output = {
                 use sha2::Digest;
-                let mut state=self.sftp_state.lock().unwrap();
+                let mut state = self.sftp_state.lock().unwrap();
                 if state.checksum_exec {
-                    if let Some(path)=command.strip_prefix("LC_ALL=C cat -- '").and_then(|v|v.strip_suffix('\'')) {
-                        Some(if state.checksum_wrong_namespace {b"different filesystem".to_vec()}else{state.files.get(path).cloned().unwrap_or_default()})
-                    } else if let Some(path)=command.strip_prefix("LC_ALL=C sha256sum < '").and_then(|v|v.strip_suffix('\'')) {
-                        state.checksum_commands+=1;
-                        state.files.get(path).map(|bytes| {
-                            let mut digest:[u8;32]=sha2::Sha256::digest(bytes).into();
-                            if state.checksum_corrupt {digest[0]^=1;}
-                            format!("{}  -\n",digest.iter().map(|b|format!("{b:02x}")).collect::<String>()).into_bytes()
+                    if let Some(path) = command
+                        .strip_prefix("LC_ALL=C cat -- '")
+                        .and_then(|v| v.strip_suffix('\''))
+                    {
+                        Some(if state.checksum_wrong_namespace {
+                            b"different filesystem".to_vec()
+                        } else {
+                            state.files.get(path).cloned().unwrap_or_default()
                         })
-                    }else{None}
-                }else{None}
+                    } else if let Some(path) = command
+                        .strip_prefix("LC_ALL=C sha256sum < '")
+                        .and_then(|v| v.strip_suffix('\''))
+                    {
+                        state.checksum_commands += 1;
+                        state.files.get(path).map(|bytes| {
+                            let mut digest: [u8; 32] = sha2::Sha256::digest(bytes).into();
+                            if state.checksum_corrupt {
+                                digest[0] ^= 1;
+                            }
+                            format!(
+                                "{}  -\n",
+                                digest
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<String>()
+                            )
+                            .into_bytes()
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             };
-            if let Some(output)=checksum_output {
-                session.channel_success(channel)?;session.data(channel,output)?;session.exit_status_request(channel,0)?;session.close(channel)?;
-                self.channels.remove(&channel);return Ok(());
-            }
-            let path=self.shell_directories.iter().find(|(marker,_)|command.contains(marker.as_str())).map(|(_,cwd)|cwd.lock().unwrap().clone());
-            if let Some(path)=path {
+            if let Some(output) = checksum_output {
                 session.channel_success(channel)?;
-                session.data(channel,format!("\0CSHELL_CWD\0{path}\n").into_bytes())?;
-                session.exit_status_request(channel,0)?;
+                session.data(channel, output)?;
+                session.exit_status_request(channel, 0)?;
                 session.close(channel)?;
-            } else {session.channel_failure(channel)?;session.close(channel)?;}
+                self.channels.remove(&channel);
+                return Ok(());
+            }
+            let path = self
+                .shell_directories
+                .iter()
+                .find(|(marker, _)| command.contains(marker.as_str()))
+                .map(|(_, cwd)| cwd.lock().unwrap().clone());
+            if let Some(path) = path {
+                session.channel_success(channel)?;
+                session.data(channel, format!("\0CSHELL_CWD\0{path}\n").into_bytes())?;
+                session.exit_status_request(channel, 0)?;
+                session.close(channel)?;
+            } else {
+                session.channel_failure(channel)?;
+                session.close(channel)?;
+            }
             self.channels.remove(&channel);
             Ok(())
         }
@@ -883,8 +1279,18 @@ pub(crate) mod tests {
             _modes: &[(russh::Pty, u32)],
             session: &mut Session,
         ) -> Result<(), Self::Error> {
-            if let Some(count)=&self.terminal_requests {count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
-            if self.deny_terminal || self.terminal_limit.is_some_and(|limit| self.opened_shells>=limit) {session.channel_failure(channel)?;} else {session.channel_success(channel)?;}
+            if let Some(count) = &self.terminal_requests {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if self.deny_terminal
+                || self
+                    .terminal_limit
+                    .is_some_and(|limit| self.opened_shells >= limit)
+            {
+                session.channel_failure(channel)?;
+            } else {
+                session.channel_success(channel)?;
+            }
             Ok(())
         }
         async fn shell_request(
@@ -892,11 +1298,18 @@ pub(crate) mod tests {
             channel: ChannelId,
             session: &mut Session,
         ) -> Result<(), Self::Error> {
-            if let Some(count)=&self.terminal_requests {count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
-            if self.deny_terminal {session.channel_failure(channel)?;return Ok(());}
-            self.opened_shells+=1;
-            let cwd=Arc::new(Mutex::new("/home/cshell".to_owned()));
-            if let Some(marker)=self.directory_markers.remove(&channel) {self.shell_directories.insert(marker,cwd.clone());}
+            if let Some(count) = &self.terminal_requests {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if self.deny_terminal {
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
+            self.opened_shells += 1;
+            let cwd = Arc::new(Mutex::new("/home/cshell".to_owned()));
+            if let Some(marker) = self.directory_markers.remove(&channel) {
+                self.shell_directories.insert(marker, cwd.clone());
+            }
             let channel = self.channels.remove(&channel).unwrap();
             session.channel_success(channel.id())?;
             let handle = session.handle();
@@ -907,14 +1320,21 @@ pub(crate) mod tests {
                     use tokio::io::AsyncReadExt;
                     let (mut reader, mut writer) = tokio::io::split(channel.into_stream());
                     let _ = writer.write_all(&greeting).await;
-                    let mut bytes = [0;4096];
+                    let mut bytes = [0; 4096];
                     let mut cancelled = false;
-                    loop {
-                        let Ok(n) = reader.read(&mut bytes).await else {break;};
-                        if n==0 {break;}
-                        if let Some(capture)=&received_input {capture.lock().unwrap().extend_from_slice(&bytes[..n]);}
-                        if !cancelled && bytes[..n].contains(&0x18) {cancelled=true;let _=writer.write_all(b"ready$ ").await;}
-                        else if cancelled {let _=writer.write_all(&bytes[..n]).await;}
+                    while let Ok(n) = reader.read(&mut bytes).await {
+                        if n == 0 {
+                            break;
+                        }
+                        if let Some(capture) = &received_input {
+                            capture.lock().unwrap().extend_from_slice(&bytes[..n]);
+                        }
+                        if !cancelled && bytes[..n].contains(&0x18) {
+                            cancelled = true;
+                            let _ = writer.write_all(b"ready$ ").await;
+                        } else if cancelled {
+                            let _ = writer.write_all(&bytes[..n]).await;
+                        }
                     }
                 });
                 return Ok(());
@@ -934,7 +1354,13 @@ pub(crate) mod tests {
                     if let Some(received) = &received_input {
                         received.lock().unwrap().extend_from_slice(&line);
                     }
-                    if let Some(path)=line.strip_prefix(b"cd ").and_then(|p|std::str::from_utf8(p).ok()).and_then(|p|p.strip_suffix('\n')) { *cwd.lock().unwrap()=path.to_owned(); }
+                    if let Some(path) = line
+                        .strip_prefix(b"cd ")
+                        .and_then(|p| std::str::from_utf8(p).ok())
+                        .and_then(|p| p.strip_suffix('\n'))
+                    {
+                        *cwd.lock().unwrap() = path.to_owned();
+                    }
                     if line == b"exit\n" {
                         let _ = handle.exit_status_request(channel_id, 42).await;
                         let _ = handle.close(channel_id).await;
@@ -994,8 +1420,13 @@ pub(crate) mod tests {
         ) -> Result<russh_sftp::protocol::Version, Self::Error> {
             let mut version = russh_sftp::protocol::Version::new();
             if self.state.lock().unwrap().checksum_extension {
-                let mut supported=vec![0;28];supported.extend_from_slice(&1u32.to_be_bytes());supported.extend_from_slice(&10u32.to_be_bytes());supported.extend_from_slice(b"check-file");
-                version.extensions.insert("supported2".into(),String::from_utf8(supported).unwrap());
+                let mut supported = vec![0; 28];
+                supported.extend_from_slice(&1u32.to_be_bytes());
+                supported.extend_from_slice(&10u32.to_be_bytes());
+                supported.extend_from_slice(b"check-file");
+                version
+                    .extensions
+                    .insert("supported2".into(), String::from_utf8(supported).unwrap());
             }
             for extension in [
                 "posix-rename@openssh.com",
@@ -1029,19 +1460,28 @@ pub(crate) mod tests {
             let mut data = data.as_slice();
             let mut state = self.state.lock().unwrap();
             match request.as_str() {
-                "check-file-handle" if state.checksum_extension=>{
+                "check-file-handle" if state.checksum_extension => {
                     use sha2::Digest;
-                    let handle=string(&mut data)?;let algorithm=string(&mut data)?;
-                    if algorithm!="sha256" || data!=[0;20] {return Err(StatusCode::Failure);}
-                    let path=state.handles.get(&handle).ok_or(StatusCode::Failure)?;
-                    let bytes=state.files.get(path).ok_or(StatusCode::NoSuchFile)?;
-                    let mut digest:[u8;32]=sha2::Sha256::digest(bytes).into();if state.checksum_corrupt {digest[0]^=1;}
-                    state.checksum_commands+=1;
-                    let mut reply=b"\0\0\0\x06sha256".to_vec();reply.extend_from_slice(&digest);
-                    return Ok(russh_sftp::protocol::Packet::ExtendedReply(russh_sftp::protocol::ExtendedReply{id,data:reply}));
-                },
+                    let handle = string(&mut data)?;
+                    let algorithm = string(&mut data)?;
+                    if algorithm != "sha256" || data != [0; 20] {
+                        return Err(StatusCode::Failure);
+                    }
+                    let path = state.handles.get(&handle).ok_or(StatusCode::Failure)?;
+                    let bytes = state.files.get(path).ok_or(StatusCode::NoSuchFile)?;
+                    let mut digest: [u8; 32] = sha2::Sha256::digest(bytes).into();
+                    if state.checksum_corrupt {
+                        digest[0] ^= 1;
+                    }
+                    state.checksum_commands += 1;
+                    let mut reply = b"\0\0\0\x06sha256".to_vec();
+                    reply.extend_from_slice(&digest);
+                    return Ok(russh_sftp::protocol::Packet::ExtendedReply(
+                        russh_sftp::protocol::ExtendedReply { id, data: reply },
+                    ));
+                }
                 russh_sftp::extensions::FSYNC => {
-                    state.flushes+=1;
+                    state.flushes += 1;
                     let handle = string(&mut data)?;
                     if !state.handles.contains_key(&handle) {
                         return Err(StatusCode::Failure);
@@ -1058,17 +1498,27 @@ pub(crate) mod tests {
                         .get(&source)
                         .ok_or(StatusCode::NoSuchFile)?
                         .clone();
-                    if let Some(mode)=state.modes.get(&source).copied(){state.modes.insert(target.clone(),mode);}
-                    if let Some(time)=state.times.get(&source).copied(){state.times.insert(target.clone(),time);}
+                    if let Some(mode) = state.modes.get(&source).copied() {
+                        state.modes.insert(target.clone(), mode);
+                    }
+                    if let Some(time) = state.times.get(&source).copied() {
+                        state.times.insert(target.clone(), time);
+                    }
                     state.files.insert(target, bytes);
                 }
                 "posix-rename@openssh.com" => {
-                    let source=string(&mut data)?;let target=string(&mut data)?;
-                    let bytes=state.files.remove(&source).ok_or(StatusCode::NoSuchFile)?;
-                    state.modes.remove(&target);state.times.remove(&target);
-                    if let Some(mode)=state.modes.remove(&source){state.modes.insert(target.clone(),mode);}
-                    if let Some(time)=state.times.remove(&source){state.times.insert(target.clone(),time);}
-                    state.files.insert(target,bytes);
+                    let source = string(&mut data)?;
+                    let target = string(&mut data)?;
+                    let bytes = state.files.remove(&source).ok_or(StatusCode::NoSuchFile)?;
+                    state.modes.remove(&target);
+                    state.times.remove(&target);
+                    if let Some(mode) = state.modes.remove(&source) {
+                        state.modes.insert(target.clone(), mode);
+                    }
+                    if let Some(time) = state.times.remove(&source) {
+                        state.times.insert(target.clone(), time);
+                    }
+                    state.files.insert(target, bytes);
                 }
                 _ => return Err(StatusCode::OpUnsupported),
             }
@@ -1079,14 +1529,27 @@ pub(crate) mod tests {
             StatusCode::OpUnsupported
         }
 
-        async fn realpath(&mut self,id:u32,path:String)->Result<Name,Self::Error> {
-            let path=if path=="." {"/home/cshell".into()} else {path};
-            Ok(Name{id,files:vec![File::new(path,FileAttributes::default())]})
+        async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+            let path = if path == "." {
+                "/home/cshell".into()
+            } else {
+                path
+            };
+            Ok(Name {
+                id,
+                files: vec![File::new(path, FileAttributes::default())],
+            })
         }
         async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
             if path != "/" {
-                if !self.state.lock().unwrap().directories.contains_key(&path){return Err(StatusCode::NoSuchFile);}
-                self.listed=false;return Ok(Handle{id,handle:format!("directory:{path}")});
+                if !self.state.lock().unwrap().directories.contains_key(&path) {
+                    return Err(StatusCode::NoSuchFile);
+                }
+                self.listed = false;
+                return Ok(Handle {
+                    id,
+                    handle: format!("directory:{path}"),
+                });
             }
             Ok(Handle {
                 id,
@@ -1095,12 +1558,48 @@ pub(crate) mod tests {
         }
 
         async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
-            if let Some(directory)=handle.strip_prefix("directory:") {
-                if self.listed{return Err(StatusCode::Eof);}self.listed=true;
-                let prefix=format!("{}/",directory.trim_end_matches('/'));let state=self.state.lock().unwrap();let mut files=Vec::new();
-                for (path,bytes) in &state.files {if let Some(name)=path.strip_prefix(&prefix).filter(|p|!p.is_empty()&&!p.contains('/')) {files.push(File::new(name,FileAttributes{size:Some(bytes.len() as u64),permissions:Some(0o100000|state.modes.get(path).copied().unwrap_or(0o644)),mtime:state.times.get(path).copied(),atime:state.times.get(path).copied(),..Default::default()}));}}
-                for (path,mode) in &state.directories {if let Some(name)=path.strip_prefix(&prefix).filter(|p|!p.is_empty()&&!p.contains('/')) {files.push(File::new(name,FileAttributes{permissions:Some(0o040000|mode),..Default::default()}));}}
-                return Ok(Name{id,files});
+            if let Some(directory) = handle.strip_prefix("directory:") {
+                if self.listed {
+                    return Err(StatusCode::Eof);
+                }
+                self.listed = true;
+                let prefix = format!("{}/", directory.trim_end_matches('/'));
+                let state = self.state.lock().unwrap();
+                let mut files = Vec::new();
+                for (path, bytes) in &state.files {
+                    if let Some(name) = path
+                        .strip_prefix(&prefix)
+                        .filter(|p| !p.is_empty() && !p.contains('/'))
+                    {
+                        files.push(File::new(
+                            name,
+                            FileAttributes {
+                                size: Some(bytes.len() as u64),
+                                permissions: Some(
+                                    0o100000 | state.modes.get(path).copied().unwrap_or(0o644),
+                                ),
+                                mtime: state.times.get(path).copied(),
+                                atime: state.times.get(path).copied(),
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                }
+                for (path, mode) in &state.directories {
+                    if let Some(name) = path
+                        .strip_prefix(&prefix)
+                        .filter(|p| !p.is_empty() && !p.contains('/'))
+                    {
+                        files.push(File::new(
+                            name,
+                            FileAttributes {
+                                permissions: Some(0o040000 | mode),
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                }
+                return Ok(Name { id, files });
             }
             if handle != "directory" {
                 return Err(StatusCode::Failure);
@@ -1167,8 +1666,9 @@ pub(crate) mod tests {
                 return Err(StatusCode::Eof);
             }
             let end = start.saturating_add(len as usize).min(bytes.len());
-            let data=bytes[start..end].to_vec();state.read_bytes+=data.len() as u64;
-            Ok(Data {id,data})
+            let data = bytes[start..end].to_vec();
+            state.read_bytes += data.len() as u64;
+            Ok(Data { id, data })
         }
 
         async fn write(
@@ -1179,7 +1679,7 @@ pub(crate) mod tests {
             data: Vec<u8>,
         ) -> Result<Status, Self::Error> {
             let mut state = self.state.lock().unwrap();
-            let corrupt=state.corrupt_writes;
+            let corrupt = state.corrupt_writes;
             let path = state
                 .handles
                 .get(&handle)
@@ -1192,12 +1692,16 @@ pub(crate) mod tests {
                 bytes.resize(end, 0);
             }
             bytes[start..end].copy_from_slice(&data);
-            if corrupt && !data.is_empty(){bytes[start]^=1;}
+            if corrupt && !data.is_empty() {
+                bytes[start] ^= 1;
+            }
             Ok(Self::status(id))
         }
 
         async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-            if ["/","/home","/home/cshell","/srv","/srv/one","/srv/two"].contains(&path.as_str()) {
+            if ["/", "/home", "/home/cshell", "/srv", "/srv/one", "/srv/two"]
+                .contains(&path.as_str())
+            {
                 return Ok(Attrs {
                     id,
                     attrs: FileAttributes {
@@ -1208,7 +1712,13 @@ pub(crate) mod tests {
             }
             let state = self.state.lock().unwrap();
             if let Some(mode) = state.directories.get(&path) {
-                return Ok(Attrs { id, attrs: FileAttributes { permissions: Some(0o040000 | mode), ..Default::default() } });
+                return Ok(Attrs {
+                    id,
+                    attrs: FileAttributes {
+                        permissions: Some(0o040000 | mode),
+                        ..Default::default()
+                    },
+                });
             }
             let bytes = state.files.get(&path).ok_or(StatusCode::NoSuchFile)?;
             Ok(Attrs {
@@ -1216,7 +1726,8 @@ pub(crate) mod tests {
                 attrs: FileAttributes {
                     size: Some(bytes.len() as u64),
                     permissions: Some(0o100000 | state.modes.get(&path).copied().unwrap_or(0o644)),
-                    mtime:state.times.get(&path).copied(),atime:state.times.get(&path).copied(),
+                    mtime: state.times.get(&path).copied(),
+                    atime: state.times.get(&path).copied(),
                     ..FileAttributes::default()
                 },
             })
@@ -1237,12 +1748,31 @@ pub(crate) mod tests {
                 .ok_or(StatusCode::Failure)?;
             self.stat(id, path).await
         }
-        async fn fsetstat(&mut self,id:u32,handle:String,attrs:FileAttributes)->Result<Status,Self::Error> {
-            let mut state=self.state.lock().unwrap();
-            let path=state.handles.get(&handle).cloned().ok_or(StatusCode::Failure)?;
-            if let Some(size)=attrs.size {state.files.get_mut(&path).ok_or(StatusCode::NoSuchFile)?.resize(size as usize,0);}
-            if let Some(mode)=attrs.permissions {state.modes.insert(path.clone(),mode&0o7777);}
-            if let Some(time)=attrs.mtime {state.times.insert(path,time);}
+        async fn fsetstat(
+            &mut self,
+            id: u32,
+            handle: String,
+            attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            let path = state
+                .handles
+                .get(&handle)
+                .cloned()
+                .ok_or(StatusCode::Failure)?;
+            if let Some(size) = attrs.size {
+                state
+                    .files
+                    .get_mut(&path)
+                    .ok_or(StatusCode::NoSuchFile)?
+                    .resize(size as usize, 0);
+            }
+            if let Some(mode) = attrs.permissions {
+                state.modes.insert(path.clone(), mode & 0o7777);
+            }
+            if let Some(time) = attrs.mtime {
+                state.times.insert(path, time);
+            }
             Ok(Self::status(id))
         }
 
@@ -1253,18 +1783,36 @@ pub(crate) mod tests {
             Ok(Self::status(id))
         }
 
-        async fn mkdir(&mut self, id:u32, path:String, attrs:FileAttributes) -> Result<Status,Self::Error> {
-            let mut state=self.state.lock().unwrap();
-            if state.files.contains_key(&path) || state.directories.contains_key(&path) { return Err(StatusCode::Failure); }
-            state.directories.insert(path,attrs.permissions.unwrap_or(0o755)&0o7777);
+        async fn mkdir(
+            &mut self,
+            id: u32,
+            path: String,
+            attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            if state.files.contains_key(&path) || state.directories.contains_key(&path) {
+                return Err(StatusCode::Failure);
+            }
+            state
+                .directories
+                .insert(path, attrs.permissions.unwrap_or(0o755) & 0o7777);
             Ok(Self::status(id))
         }
-        async fn setstat(&mut self,id:u32,path:String,attrs:FileAttributes)->Result<Status,Self::Error> {
-            let mut state=self.state.lock().unwrap();
-            let mode=attrs.permissions.ok_or(StatusCode::Failure)? & 0o7777;
-            if let Some(current)=state.directories.get_mut(&path) { *current=mode; }
-            else if state.files.contains_key(&path) {state.modes.insert(path,mode);}
-            else {return Err(StatusCode::NoSuchFile);}
+        async fn setstat(
+            &mut self,
+            id: u32,
+            path: String,
+            attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            let mode = attrs.permissions.ok_or(StatusCode::Failure)? & 0o7777;
+            if let Some(current) = state.directories.get_mut(&path) {
+                *current = mode;
+            } else if state.files.contains_key(&path) {
+                state.modes.insert(path, mode);
+            } else {
+                return Err(StatusCode::NoSuchFile);
+            }
             Ok(Self::status(id))
         }
         async fn rename(
@@ -1277,11 +1825,16 @@ pub(crate) mod tests {
             if state.files.contains_key(&newpath) || state.directories.contains_key(&newpath) {
                 return Err(StatusCode::Failure);
             }
-            if let Some(mode)=state.directories.remove(&oldpath) {state.directories.insert(newpath,mode);}
-            else {
+            if let Some(mode) = state.directories.remove(&oldpath) {
+                state.directories.insert(newpath, mode);
+            } else {
                 let bytes = state.files.remove(&oldpath).ok_or(StatusCode::NoSuchFile)?;
-                if let Some(mode)=state.modes.remove(&oldpath) {state.modes.insert(newpath.clone(),mode);}
-                if let Some(time)=state.times.remove(&oldpath) {state.times.insert(newpath.clone(),time);}
+                if let Some(mode) = state.modes.remove(&oldpath) {
+                    state.modes.insert(newpath.clone(), mode);
+                }
+                if let Some(time) = state.times.remove(&oldpath) {
+                    state.times.insert(newpath.clone(), time);
+                }
                 state.files.insert(newpath, bytes);
             }
             Ok(Self::status(id))
@@ -1335,7 +1888,11 @@ pub(crate) mod tests {
                 port: address.port(),
             },
             username: "cshell".into(),
-            host_key_sha256: session.active_transport().client.verified_host_key_fingerprint().into(),
+            host_key_sha256: session
+                .active_transport()
+                .client
+                .verified_host_key_fingerprint()
+                .into(),
             route: "direct".into(),
         });
         let registry = super::SshSessionRegistry::default();
@@ -1817,7 +2374,8 @@ pub(crate) mod tests {
                                 registry,
                             )
                             .await;
-                        let queue = cshell_application::decode_sftp_queue(&reply.document_json).unwrap();
+                        let queue =
+                            cshell_application::decode_sftp_queue(&reply.document_json).unwrap();
                         if predicate(&queue) {
                             break queue;
                         }
@@ -1857,11 +2415,11 @@ pub(crate) mod tests {
                 )
                 .await;
             assert_eq!(added.status, SftpStatus::Ok as i32, "{}", added.detail);
-            let added_queue = match cshell_application::decode_sftp_workspace(&added.document_json).unwrap()
-            {
-                cshell_application::SftpWorkspaceReply::Queue(q) => q,
-                _ => panic!("queue reply"),
-            };
+            let added_queue =
+                match cshell_application::decode_sftp_workspace(&added.document_json).unwrap() {
+                    cshell_application::SftpWorkspaceReply::Queue(q) => q,
+                    _ => panic!("queue reply"),
+                };
             tokio::fs::remove_file(&missing).await.unwrap();
             let started = sftp
                 .handle(
@@ -2022,67 +2580,218 @@ pub(crate) mod tests {
         }
         if std::env::var_os("CSHELL_SFTP_TEST_FILE_OPERATIONS").is_some() {
             assert!(std::env::var_os("CSHELL_RUNTIME_DIR").is_some());
-            exercise_reviewed_file_operations(&sftp,&registry,id,directory.path()).await;
+            exercise_reviewed_file_operations(&sftp, &registry, id, directory.path()).await;
         }
         registry.get(id).unwrap().close().await.unwrap();
         server.abort();
     }
 
-    async fn exercise_reviewed_file_operations(sftp:&crate::sftp_ipc::SftpIpcService,registry:&super::SshSessionRegistry,session:SessionId,directory:&std::path::Path) {
-        use cshell_application::{SftpFileDraft,SftpFileAction,SftpFileJob,SftpFileState,SftpWorkspaceReply,decode_sftp_workspace};
-        use cshell_ipc::{SftpOperation,SftpRequest,SftpStatus};
-        async fn call(sftp:&crate::sftp_ipc::SftpIpcService,registry:&super::SshSessionRegistry,session:SessionId,operation:SftpOperation,draft:Option<&SftpFileDraft>,job:Option<&SftpFileJob>)->SftpFileJob {
-            let reply=sftp.handle(SftpRequest {operation:operation as i32,session_id:session.as_uuid().as_bytes().to_vec(),
-                document_json:draft.map(|d|serde_json::to_vec(d).unwrap()).unwrap_or_default(),
-                transfer_id:job.map(|j|j.id.as_uuid().as_bytes().to_vec()).unwrap_or_default(),
-                expected_revision:if operation==SftpOperation::FileApply {job.unwrap().revision} else {0},
-                confirmed:operation==SftpOperation::FileApply,..Default::default()},registry).await;
-            assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-            match decode_sftp_workspace(&reply.document_json).unwrap() {SftpWorkspaceReply::File(job)=>job,_=>panic!("expected file job")}
+    async fn exercise_reviewed_file_operations(
+        sftp: &crate::sftp_ipc::SftpIpcService,
+        registry: &super::SshSessionRegistry,
+        session: SessionId,
+        directory: &std::path::Path,
+    ) {
+        use cshell_application::{
+            SftpFileAction, SftpFileDraft, SftpFileJob, SftpFileState, SftpWorkspaceReply,
+            decode_sftp_workspace,
+        };
+        use cshell_ipc::{SftpOperation, SftpRequest, SftpStatus};
+        async fn call(
+            sftp: &crate::sftp_ipc::SftpIpcService,
+            registry: &super::SshSessionRegistry,
+            session: SessionId,
+            operation: SftpOperation,
+            draft: Option<&SftpFileDraft>,
+            job: Option<&SftpFileJob>,
+        ) -> SftpFileJob {
+            let reply = sftp
+                .handle(
+                    SftpRequest {
+                        operation: operation as i32,
+                        session_id: session.as_uuid().as_bytes().to_vec(),
+                        document_json: draft
+                            .map(|d| serde_json::to_vec(d).unwrap())
+                            .unwrap_or_default(),
+                        transfer_id: job
+                            .map(|j| j.id.as_uuid().as_bytes().to_vec())
+                            .unwrap_or_default(),
+                        expected_revision: if operation == SftpOperation::FileApply {
+                            job.unwrap().revision
+                        } else {
+                            0
+                        },
+                        confirmed: operation == SftpOperation::FileApply,
+                        ..Default::default()
+                    },
+                    registry,
+                )
+                .await;
+            assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+            match decode_sftp_workspace(&reply.document_json).unwrap() {
+                SftpWorkspaceReply::File(job) => job,
+                _ => panic!("expected file job"),
+            }
         }
-        async fn wait(sftp:&crate::sftp_ipc::SftpIpcService,registry:&super::SshSessionRegistry,session:SessionId,mut job:SftpFileJob)->SftpFileJob {
-            tokio::time::timeout(std::time::Duration::from_secs(15),async {
-                while matches!(job.state,SftpFileState::Inspecting|SftpFileState::Applying) {
+        async fn wait(
+            sftp: &crate::sftp_ipc::SftpIpcService,
+            registry: &super::SshSessionRegistry,
+            session: SessionId,
+            mut job: SftpFileJob,
+        ) -> SftpFileJob {
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while matches!(
+                    job.state,
+                    SftpFileState::Inspecting | SftpFileState::Applying
+                ) {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    job=call(sftp,registry,session,SftpOperation::FileJobGet,None,Some(&job)).await;
+                    job = call(
+                        sftp,
+                        registry,
+                        session,
+                        SftpOperation::FileJobGet,
+                        None,
+                        Some(&job),
+                    )
+                    .await;
                 }
                 job
-            }).await.unwrap()
+            })
+            .await
+            .unwrap()
         }
-        for local in [true,false] {
-            let first=if local {directory.join("new-directory").to_string_lossy().into_owned()} else {"/new-directory".into()};
-            let second=if local {directory.join("renamed-directory").to_string_lossy().into_owned()} else {"/renamed-directory".into()};
-            let file=if local {directory.join("source.bin").to_string_lossy().into_owned()} else {"/uploaded.bin".into()};
+        for local in [true, false] {
+            let first = if local {
+                directory
+                    .join("new-directory")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                "/new-directory".into()
+            };
+            let second = if local {
+                directory
+                    .join("renamed-directory")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                "/renamed-directory".into()
+            };
+            let file = if local {
+                directory.join("source.bin").to_string_lossy().into_owned()
+            } else {
+                "/uploaded.bin".into()
+            };
             for draft in [
-                SftpFileDraft {local,action:SftpFileAction::Mkdir,path:first.clone(),target:String::new(),permissions:Some(0o750)},
-                SftpFileDraft {local,action:SftpFileAction::Rename,path:first.clone(),target:second.clone(),permissions:None},
-                SftpFileDraft {local,action:SftpFileAction::Rename,path:file.clone(),target:format!("{file}.renamed"),permissions:None},
+                SftpFileDraft {
+                    local,
+                    action: SftpFileAction::Mkdir,
+                    path: first.clone(),
+                    target: String::new(),
+                    permissions: Some(0o750),
+                },
+                SftpFileDraft {
+                    local,
+                    action: SftpFileAction::Rename,
+                    path: first.clone(),
+                    target: second.clone(),
+                    permissions: None,
+                },
+                SftpFileDraft {
+                    local,
+                    action: SftpFileAction::Rename,
+                    path: file.clone(),
+                    target: format!("{file}.renamed"),
+                    permissions: None,
+                },
             ] {
-                let inspected=call(sftp,registry,session,SftpOperation::FileInspect,Some(&draft),None).await;
-                let ready=wait(sftp,registry,session,inspected).await;
-                assert_eq!(ready.state,SftpFileState::Ready,"{}",ready.detail);
-                let applied=call(sftp,registry,session,SftpOperation::FileApply,None,Some(&ready)).await;
-                let finished=wait(sftp,registry,session,applied).await;
-                assert_eq!(finished.state,SftpFileState::Succeeded,"{}",finished.detail);
+                let inspected = call(
+                    sftp,
+                    registry,
+                    session,
+                    SftpOperation::FileInspect,
+                    Some(&draft),
+                    None,
+                )
+                .await;
+                let ready = wait(sftp, registry, session, inspected).await;
+                assert_eq!(ready.state, SftpFileState::Ready, "{}", ready.detail);
+                let applied = call(
+                    sftp,
+                    registry,
+                    session,
+                    SftpOperation::FileApply,
+                    None,
+                    Some(&ready),
+                )
+                .await;
+                let finished = wait(sftp, registry, session, applied).await;
+                assert_eq!(
+                    finished.state,
+                    SftpFileState::Succeeded,
+                    "{}",
+                    finished.detail
+                );
                 assert!(finished.acknowledged);
             }
             if local {
-                assert!(!std::path::Path::new(&first).exists()); assert!(std::path::Path::new(&second).is_dir());
-                assert!(!std::path::Path::new(&file).exists()); assert!(std::path::Path::new(&format!("{file}.renamed")).is_file());
+                assert!(!std::path::Path::new(&first).exists());
+                assert!(std::path::Path::new(&second).is_dir());
+                assert!(!std::path::Path::new(&file).exists());
+                assert!(std::path::Path::new(&format!("{file}.renamed")).is_file());
             } else {
-                for path in [second,format!("{file}.renamed")] {
-                    let draft=SftpFileDraft {local:false,action:SftpFileAction::Chmod,path:path.clone(),target:String::new(),permissions:Some(0o2750)};
-                    let inspected=call(sftp,registry,session,SftpOperation::FileInspect,Some(&draft),None).await;
-                    let ready=wait(sftp,registry,session,inspected).await;
-                    assert_eq!(ready.state,SftpFileState::Ready,"{}",ready.detail);
-                    let applied=call(sftp,registry,session,SftpOperation::FileApply,None,Some(&ready)).await;
-                    let finished=wait(sftp,registry,session,applied).await;
-                    assert_eq!(finished.state,SftpFileState::Succeeded,"{}",finished.detail);
-                    let inspect=SftpFileDraft {action:SftpFileAction::Inspect,permissions:None,..draft};
-                    let checked=call(sftp,registry,session,SftpOperation::FileInspect,Some(&inspect),None).await;
-                    let checked=wait(sftp,registry,session,checked).await;
-                    assert_eq!(checked.state,SftpFileState::Ready,"{}",checked.detail);
-                    assert_eq!(checked.source.unwrap().permissions,Some(0o2750));
+                for path in [second, format!("{file}.renamed")] {
+                    let draft = SftpFileDraft {
+                        local: false,
+                        action: SftpFileAction::Chmod,
+                        path: path.clone(),
+                        target: String::new(),
+                        permissions: Some(0o2750),
+                    };
+                    let inspected = call(
+                        sftp,
+                        registry,
+                        session,
+                        SftpOperation::FileInspect,
+                        Some(&draft),
+                        None,
+                    )
+                    .await;
+                    let ready = wait(sftp, registry, session, inspected).await;
+                    assert_eq!(ready.state, SftpFileState::Ready, "{}", ready.detail);
+                    let applied = call(
+                        sftp,
+                        registry,
+                        session,
+                        SftpOperation::FileApply,
+                        None,
+                        Some(&ready),
+                    )
+                    .await;
+                    let finished = wait(sftp, registry, session, applied).await;
+                    assert_eq!(
+                        finished.state,
+                        SftpFileState::Succeeded,
+                        "{}",
+                        finished.detail
+                    );
+                    let inspect = SftpFileDraft {
+                        action: SftpFileAction::Inspect,
+                        permissions: None,
+                        ..draft
+                    };
+                    let checked = call(
+                        sftp,
+                        registry,
+                        session,
+                        SftpOperation::FileInspect,
+                        Some(&inspect),
+                        None,
+                    )
+                    .await;
+                    let checked = wait(sftp, registry, session, checked).await;
+                    assert_eq!(checked.state, SftpFileState::Ready, "{}", checked.detail);
+                    assert_eq!(checked.source.unwrap().permissions, Some(0o2750));
                 }
             }
         }
@@ -2090,48 +2799,112 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn zmodem_request_is_not_rendered_and_cancel_restores_terminal_input() {
-        let key=PrivateKey::random(&mut rng(),Algorithm::Ed25519).unwrap();
-        let public=key.public_key().to_openssh().unwrap();
-        let mut config=russh::server::Config::default();config.keys.push(key);
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address=listener.local_addr().unwrap();
-        let received=Arc::new(Mutex::new(Vec::<u8>::new()));let capture=received.clone();
-        let mut receiver=zmodem2::Receiver::new().unwrap();
-        let greeting=match receiver.poll(){zmodem2::Action::WriteWire(bytes)=>bytes.to_vec(),_=>panic!("initial ZRINIT")};
-        let server=tokio::spawn(async move {
-            let (stream,_)=listener.accept().await.unwrap();
-            let running=russh::server::run_stream(Arc::new(config),stream,EchoServer{zmodem_greeting:Some(greeting),received_input:Some(capture),..Default::default()}).await.unwrap();
-            let _=running.await;
+        let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
+        let public = key.public_key().to_openssh().unwrap();
+        let mut config = russh::server::Config::default();
+        config.keys.push(key);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let capture = received.clone();
+        let mut receiver = zmodem2::Receiver::new().unwrap();
+        let greeting = match receiver.poll() {
+            zmodem2::Action::WriteWire(bytes) => bytes.to_vec(),
+            _ => panic!("initial ZRINIT"),
+        };
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let running = russh::server::run_stream(
+                Arc::new(config),
+                stream,
+                EchoServer {
+                    zmodem_greeting: Some(greeting),
+                    received_input: Some(capture),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let _ = running.await;
         });
-        let verifier=KnownHostsVerifier::parse(&format!("[127.0.0.1]:{} {public}\n",address.port()),"127.0.0.1",address.port()).unwrap();
-        let directory=tempfile::tempdir().unwrap();
-        let session=SshSession::connect(SessionId::new(),"zmodem".into(),SshConnect{
-            username:"cshell".into(),verifier,authentication:super::SshAuthentication::Password("phase1".into())
-        },TerminalSize::cells(24,80),&directory.path().join("zmodem.csjr"),16).await.unwrap();
-        let status=tokio::time::timeout(std::time::Duration::from_secs(10),async{
-            loop{if let Some(status)=session.zmodem_status(){break status;}
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
-        }).await.unwrap();
-        assert_eq!(status.direction,1);assert_eq!(status.state,1);
-        assert!(session.send_input(&InputAction::Text("should never reach rz".into())).is_err());
-        session.zmodem_control(&cshell_ipc::ZmodemRequest{operation:3,transfer_id:status.transfer_id,..Default::default()}).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10),async{
-            loop{if let Some(frame)=session.snapshots.latest(){
-                let text:String=frame.cells.iter().map(|c|c.character).collect();
-                assert!(!text.contains("**"));
-                if text.contains("ready$ "){break;}}
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
-        }).await.unwrap();
-        session.send_input(&InputAction::Text("hello".into())).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10),async{
-            loop{if received.lock().unwrap().ends_with(b"hello"){break;}
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
-        }).await.unwrap();
-        let captured=received.lock().unwrap().clone();
-        assert!(captured.starts_with(&[0x18;10]));
-        assert!(!captured.windows(6).any(|w|w==b"should"));
-        assert_eq!(session.zmodem_status().unwrap().state,4);
-        session.close().await.unwrap();server.abort();
+        let verifier = KnownHostsVerifier::parse(
+            &format!("[127.0.0.1]:{} {public}\n", address.port()),
+            "127.0.0.1",
+            address.port(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let session = SshSession::connect(
+            SessionId::new(),
+            "zmodem".into(),
+            SshConnect {
+                username: "cshell".into(),
+                verifier,
+                authentication: super::SshAuthentication::Password("phase1".into()),
+            },
+            TerminalSize::cells(24, 80),
+            &directory.path().join("zmodem.csjr"),
+            16,
+        )
+        .await
+        .unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = session.zmodem_status() {
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status.direction, 1);
+        assert_eq!(status.state, 1);
+        assert!(
+            session
+                .send_input(&InputAction::Text("should never reach rz".into()))
+                .is_err()
+        );
+        session
+            .zmodem_control(&cshell_ipc::ZmodemRequest {
+                operation: 3,
+                transfer_id: status.transfer_id,
+                ..Default::default()
+            })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(frame) = session.snapshots.latest() {
+                    let text: String = frame.cells.iter().map(|c| c.character).collect();
+                    assert!(!text.contains("**"));
+                    if text.contains("ready$ ") {
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        session
+            .send_input(&InputAction::Text("hello".into()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if received.lock().unwrap().ends_with(b"hello") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let captured = received.lock().unwrap().clone();
+        assert!(captured.starts_with(&[0x18; 10]));
+        assert!(!captured.windows(6).any(|w| w == b"should"));
+        assert_eq!(session.zmodem_status().unwrap().state, 4);
+        session.close().await.unwrap();
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2147,10 +2920,16 @@ pub(crate) mod tests {
         let capture = Arc::clone(&received);
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let running =
-                russh::server::run_stream(Arc::new(config), stream, EchoServer { received_input: Some(capture), ..Default::default() })
-                    .await
-                    .unwrap();
+            let running = russh::server::run_stream(
+                Arc::new(config),
+                stream,
+                EchoServer {
+                    received_input: Some(capture),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
             let _ = running.await;
         });
         let verifier = KnownHostsVerifier::parse(
@@ -2177,14 +2956,34 @@ pub(crate) mod tests {
         // Encode through IPC, deliver over an authenticated SSH PTY channel,
         // and compare captured server bytes (not a terminal-rendered approximation).
         use cshell_domain::{KeyCode, KeyEvent, Modifiers};
-        let mut actions = vec![InputAction::Text((b'!'..=b'~').map(char::from).collect()),
-            InputAction::Text(" 中文 e\u{301} € 🙂 ".into())];
+        let mut actions = vec![
+            InputAction::Text((b'!'..=b'~').map(char::from).collect()),
+            InputAction::Text(" 中文 e\u{301} € 🙂 ".into()),
+        ];
         let mut expected = (b'!'..=b'~').collect::<Vec<_>>();
         expected.extend_from_slice(" 中文 e\u{301} € 🙂 ".as_bytes());
         for (code, modifiers, encoded) in [
-            (KeyCode::Character(" ".into()), Modifiers::default(), b" ".as_slice()),
-            (KeyCode::Character(" ".into()), Modifiers {ctrl:true,..Default::default()}, b"\0"),
-            (KeyCode::Character(" ".into()), Modifiers {alt:true,..Default::default()}, b"\x1b "),
+            (
+                KeyCode::Character(" ".into()),
+                Modifiers::default(),
+                b" ".as_slice(),
+            ),
+            (
+                KeyCode::Character(" ".into()),
+                Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+                b"\0",
+            ),
+            (
+                KeyCode::Character(" ".into()),
+                Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+                b"\x1b ",
+            ),
             (KeyCode::Home, Modifiers::default(), b"\x1b[H"),
             (KeyCode::End, Modifiers::default(), b"\x1b[F"),
             (KeyCode::Insert, Modifiers::default(), b"\x1b[2~"),
@@ -2195,22 +2994,36 @@ pub(crate) mod tests {
             (KeyCode::Backspace, Modifiers::default(), b"\x7f"),
             (KeyCode::Enter, Modifiers::default(), b"\r"),
         ] {
-            actions.push(InputAction::Key(KeyEvent {code,modifiers,pressed:true,repeated:false}));
+            actions.push(InputAction::Key(KeyEvent {
+                code,
+                modifiers,
+                pressed: true,
+                repeated: false,
+            }));
             expected.extend_from_slice(encoded);
         }
         actions.push(InputAction::Text("\n".into()));
         expected.push(b'\n');
         for action in actions {
-            let wire = cshell_ipc::TerminalInputRequest::from_action(session.id(), &action).unwrap();
+            let wire =
+                cshell_ipc::TerminalInputRequest::from_action(session.id(), &action).unwrap();
             session.send_input(&wire.decode_action().unwrap()).unwrap();
         }
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                if received.lock().unwrap().len() >= expected.len() { break; }
+                if received.lock().unwrap().len() >= expected.len() {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
-        assert_eq!(*received.lock().unwrap(), expected, "SSH must receive every byte in order, including spaces and NUL");
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *received.lock().unwrap(),
+            expected,
+            "SSH must receive every byte in order, including spaces and NUL"
+        );
         session
             .send_input(&InputAction::Text("hello\n".into()))
             .unwrap();
@@ -2372,7 +3185,8 @@ pub(crate) mod tests {
                     channels: HashMap::new(),
                     accepted_public_key: Some(accepted_public_key),
                     sftp_state: Arc::default(),
-                    deny_terminal:false,terminal_requests:None,
+                    deny_terminal: false,
+                    terminal_requests: None,
                     ..Default::default()
                 },
             )
@@ -2440,7 +3254,8 @@ pub(crate) mod tests {
                     channels: HashMap::new(),
                     accepted_public_key: Some(accepted_public_key),
                     sftp_state: Arc::default(),
-                    deny_terminal:false,terminal_requests:None,
+                    deny_terminal: false,
+                    terminal_requests: None,
                     ..Default::default()
                 },
             )
@@ -2525,7 +3340,8 @@ pub(crate) mod tests {
                     request_id: 3,
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateRequest(
-                        SessionCreateRequest {connection_diagnostics:false,
+                        SessionCreateRequest {
+                            connection_diagnostics: false,
                             source_ssh_session_id: None,
                             local_launch: None,
                             rows: 24,
@@ -2678,7 +3494,8 @@ pub(crate) mod tests {
         assert_eq!(saved.status, 0, "{}", saved.detail);
         let result = exchange(
             &service,
-            envelope::Payload::SessionCreateRequest(SessionCreateRequest {connection_diagnostics:false,
+            envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                connection_diagnostics: false,
                 source_ssh_session_id: None,
                 local_launch: None,
                 rows: 24,

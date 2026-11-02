@@ -25,7 +25,11 @@ pub(super) fn return_button_rect(pane: egui::Rect) -> egui::Rect {
 impl DesktopApp {
     pub(super) fn handle_clipboard_lifecycle(&mut self, event: &WindowEvent) {
         match event {
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
                 self.finish_clipboard_selection();
             }
             WindowEvent::Focused(false) => {
@@ -90,6 +94,11 @@ impl DesktopApp {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
 
@@ -181,14 +190,22 @@ mod tests {
     #[test]
     fn shift_click_still_extends_a_cross_page_selection_explicitly() {
         let mut app = selected_app(true);
-        app.terminal_viewport = Some(TerminalViewport { x: 0, y: 0, width: 640, height: 100 });
+        app.terminal_viewport = Some(TerminalViewport {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 100,
+        });
         assert!(app.start_history_drag());
         app.modifiers = ModifiersState::SHIFT;
         app.cursor_position = Some(winit::dpi::PhysicalPosition::new(45.0, 35.0));
         app.begin_clipboard_selection(TerminalCellPoint { row: 3, column: 4 });
         assert!(app.cross_selection_text().is_some());
         let text = app.terminal_selection_text().unwrap().unwrap();
-        assert!(text.starts_with("history 50\nhistory 51\nhistory 52\nhisto"), "{text}");
+        assert!(
+            text.starts_with("history 50\nhistory 51\nhistory 52\nhisto"),
+            "{text}"
+        );
         app.finish_clipboard_selection();
         let before = app.terminal_selection_text().unwrap().unwrap();
         app.cursor_position = Some(winit::dpi::PhysicalPosition::new(60.0, 75.0));

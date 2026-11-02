@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 
 fn entry(
@@ -15,7 +22,7 @@ fn entry(
         ..Default::default()
     }
 }
-fn names<'a>(sort: SortState, entries: &'a [SftpDirectoryEntry]) -> Vec<&'a str> {
+fn names(sort: SortState, entries: &[SftpDirectoryEntry]) -> Vec<&str> {
     sort.sorted(entries)
         .into_iter()
         .map(|entry| entry.name.as_str())

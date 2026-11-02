@@ -85,12 +85,13 @@ impl AdvancedSftp {
                 for base in [
                     std::env::var_os("LOCALAPPDATA"),
                     std::env::var_os("ProgramFiles"),
-                ] {
-                    if let Some(base) = base {
-                        let base = std::path::PathBuf::from(base);
-                        candidates.push(base.join("Programs/Microsoft VS Code/Code.exe"));
-                        candidates.push(base.join("Microsoft VS Code/Code.exe"));
-                    }
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let base = std::path::PathBuf::from(base);
+                    candidates.push(base.join("Programs/Microsoft VS Code/Code.exe"));
+                    candidates.push(base.join("Microsoft VS Code/Code.exe"));
                 }
                 candidates.extend([
                     std::path::PathBuf::from("/usr/bin/code"),
@@ -232,7 +233,9 @@ impl AdvancedSftp {
                     .fill(cshell_ui::theme::ACCENT_FILL),
                 )
                 .clicked();
-            if ready && command.is_none() && (clicked || save_key && !recovering)
+            if ready
+                && command.is_none()
+                && (clicked || save_key && !recovering)
                 && let Some(queue) = queue
             {
                 *command = Some(workspace(
@@ -472,17 +475,15 @@ impl AdvancedSftp {
         if editable
             && replace
             && let Some(range) = self.documents.last_match.take()
+            && self.edit_buffer.get(range.clone()) == Some(self.documents.query.as_str())
+            && self.edit_buffer.len() - range.len() + self.documents.replacement.len()
+                <= MAX_SFTP_INLINE_EDIT_BYTES
         {
-            if self.edit_buffer.get(range.clone()) == Some(self.documents.query.as_str())
-                && self.edit_buffer.len() - range.len() + self.documents.replacement.len()
-                    <= MAX_SFTP_INLINE_EDIT_BYTES
-            {
-                self.edit_buffer
-                    .replace_range(range.clone(), &self.documents.replacement);
-                self.documents.search_from = range.start + self.documents.replacement.len();
-                changed = true;
-                next = true;
-            }
+            self.edit_buffer
+                .replace_range(range.clone(), &self.documents.replacement);
+            self.documents.search_from = range.start + self.documents.replacement.len();
+            changed = true;
+            next = true;
         }
         if editable && all {
             let count = self.edit_buffer.matches(&self.documents.query).count();
@@ -504,8 +505,17 @@ impl AdvancedSftp {
                 self.editor_notice = Some("替换结果超过内置编辑上限，未修改内容".into());
             }
         }
-        let reserved=if self.documents.external_footer {if self.documents.close_requested{197.0}else{161.0}}else{220.0};
-        let height = (ctx.content_rect().bottom() - ui.cursor().min.y - reserved).clamp(42.0, 320.0);
+        let reserved = if self.documents.external_footer {
+            if self.documents.close_requested {
+                197.0
+            } else {
+                161.0
+            }
+        } else {
+            220.0
+        };
+        let height =
+            (ctx.content_rect().bottom() - ui.cursor().min.y - reserved).clamp(42.0, 320.0);
         let lines = (1..=self.edit_buffer.split('\n').count())
             .map(|n| n.to_string())
             .collect::<Vec<_>>()

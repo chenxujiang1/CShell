@@ -59,10 +59,10 @@ impl AlacrittyTerminalEngine {
             return;
         };
         if let Some(uri) = value.strip_prefix("7;file://") {
-            if let Some((_, path)) = uri.split_once('/') {
-                if let Some(path) = decode_path(&format!("/{path}")) {
-                    self.shell.cwd = Some(path);
-                }
+            if let Some((_, path)) = uri.split_once('/')
+                && let Some(path) = decode_path(&format!("/{path}"))
+            {
+                self.shell.cwd = Some(path);
             }
             return;
         }
@@ -224,7 +224,7 @@ impl AlacrittyTerminalEngine {
     }
     pub fn shell_history(&self, session: SessionId, output_id: u64) -> ShellHistory {
         let first = self.terminal.grid().history_offset() + 1;
-        let commands = self.shell.commands.iter().cloned().collect();
+        let commands = self.shell.commands.to_vec();
         let mut result = ShellHistory {
             session,
             supported: self.shell.supported,
@@ -262,6 +262,11 @@ fn decode_path(value: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]

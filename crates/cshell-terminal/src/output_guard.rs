@@ -85,7 +85,9 @@ impl OutputGuard {
     }
     fn finish(&mut self, out: &mut Vec<u8>, complete: bool) {
         if complete && !self.discarded {
-            if self.buffer.len() <= 4096 && (self.buffer.starts_with(b"133;") || self.buffer.starts_with(b"7;file://")) {
+            if self.buffer.len() <= 4096
+                && (self.buffer.starts_with(b"133;") || self.buffer.starts_with(b"7;file://"))
+            {
                 self.events.push((out.len(), self.buffer.clone()));
             }
             out.extend_from_slice(b"\x1b]");

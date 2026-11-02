@@ -1,21 +1,59 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use crate::daemon_connection::ResolvedDesktopEndpoint;
+use cshell_ipc::read_envelope;
 use cshell_ipc::{HandshakePolicy, server_handshake};
 #[tokio::test]
 async fn cancelled_creation_is_confirmed_disconnected_and_retry_clears_marker() {
-    let (_root,listener,config,connection,mut receiver)=fixture();
-    let profile=cshell_domain::ProfileId::new();let session=SessionId::new();
-    assert!(connection.request(SftpClientCommand::ConnectProfile{session,profile,previous:None,source_ssh_session:None}));
-    let command=receiver.recv().await.unwrap();
-    let server=tokio::spawn(async move {
-        let mut stream=listener.accept().await.unwrap();server_handshake(&mut stream,&HandshakePolicy::with_instance_id([32;32],[13;16],u64::MAX)).await.unwrap();
-        let query=read_envelope(&mut stream).await.unwrap();
-        write_envelope(&mut stream,&Envelope{request_id:query.request_id,payload:Some(envelope::Payload::SftpResponse(SftpResponse::with_status(SftpStatus::Cancelled,"AuthenticationCancelled: cancelled"))),..Default::default()}).await.unwrap();
+    let (_root, listener, config, connection, mut receiver) = fixture();
+    let profile = cshell_domain::ProfileId::new();
+    let session = SessionId::new();
+    assert!(connection.request(SftpClientCommand::ConnectProfile {
+        session,
+        profile,
+        previous: None,
+        source_ssh_session: None
+    }));
+    let command = receiver.recv().await.unwrap();
+    let server = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        server_handshake(
+            &mut stream,
+            &HandshakePolicy::with_instance_id([32; 32], [13; 16], u64::MAX),
+        )
+        .await
+        .unwrap();
+        let query = read_envelope(&mut stream).await.unwrap();
+        write_envelope(
+            &mut stream,
+            &Envelope {
+                request_id: query.request_id,
+                payload: Some(envelope::Payload::SftpResponse(SftpResponse::with_status(
+                    SftpStatus::Cancelled,
+                    "AuthenticationCancelled: cancelled",
+                ))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     });
-    run(&config,&connection.shared,command).await;server.await.unwrap();
-    let view=connection.view();assert!(view.connection_cancelled);assert_eq!(view.connection_phase,ConnectionPhase::Disconnected);assert!(view.error.is_none());
-    assert!(connection.take_cancelled_connection());assert!(!connection.take_cancelled_connection());
-    assert!(connection.request(connect(profile,Some(session))));assert!(!connection.view().connection_cancelled);
+    run(&config, &connection.shared, command).await;
+    server.await.unwrap();
+    let view = connection.view();
+    assert!(view.connection_cancelled);
+    assert_eq!(view.connection_phase, ConnectionPhase::Disconnected);
+    assert!(view.error.is_none());
+    assert!(connection.take_cancelled_connection());
+    assert!(!connection.take_cancelled_connection());
+    assert!(connection.request(connect(profile, Some(session))));
+    assert!(!connection.view().connection_cancelled);
 }
 fn fixture() -> (
     tempfile::TempDir,
@@ -81,13 +119,22 @@ async fn respond_with_source(
     match op {
         SftpOperation::ConnectProfile | SftpOperation::ConnectionStatus => {
             if op == SftpOperation::ConnectProfile {
-                let options: cshell_application::SftpConnectRequest = serde_json::from_slice(&query.document_json).unwrap();
-                assert_eq!(options.profile,profile);
-                assert_eq!(options.source_ssh_session,source_ssh_session);
+                let options: cshell_application::SftpConnectRequest =
+                    serde_json::from_slice(&query.document_json).unwrap();
+                assert_eq!(options.profile, profile);
+                assert_eq!(options.source_ssh_session, source_ssh_session);
                 assert!(options.discover_directory);
             }
             reply.document_json = serde_json::to_vec(&cshell_application::SftpConnectionInfo {
-                shared_from: source_ssh_session, initial_directory:Some(if source_ssh_session.is_some() {"/srv/work"} else {"/home/operator"}.into()),
+                shared_from: source_ssh_session,
+                initial_directory: Some(
+                    if source_ssh_session.is_some() {
+                        "/srv/work"
+                    } else {
+                        "/home/operator"
+                    }
+                    .into(),
+                ),
                 session,
                 profile,
                 title: "SFTP host".into(),
@@ -116,7 +163,7 @@ async fn respond_with_source(
             reply.browse_directory = if options.local {
                 std::env::temp_dir().to_string_lossy().into_owned()
             } else {
-                assert!(["/srv/work","/home/operator","/"].contains(&options.path.as_str()));
+                assert!(["/srv/work", "/home/operator", "/"].contains(&options.path.as_str()));
                 options.path
             };
         }
@@ -199,9 +246,15 @@ async fn connect_loads_both_panes_and_reconnect_closes_old_transport_before_new_
     let view = connection.view();
     assert_eq!(view.connection_phase, ConnectionPhase::Connected);
     assert!(view.local_directory.is_some());
-    assert_eq!(view.remote_loaded_directory.as_deref(), Some("/home/operator"));
+    assert_eq!(
+        view.remote_loaded_directory.as_deref(),
+        Some("/home/operator")
+    );
     assert_eq!(view.peer, Some(peer()));
-    assert!(view.queue_writable, "initial queue load must permit uploads without a manual refresh");
+    assert!(
+        view.queue_writable,
+        "initial queue load must permit uploads without a manual refresh"
+    );
     poll(&config, &connection.shared).await;
     assert_eq!(
         connection.view().connection_phase,
@@ -419,30 +472,60 @@ async fn fresh_independent_and_shared_sftp_connections_accept_and_acknowledge_fi
             }
         });
         assert!(connection.request(SftpClientCommand::ConnectProfile {
-            session, profile, previous: None, source_ssh_session,
+            session,
+            profile,
+            previous: None,
+            source_ssh_session,
         }));
         run(&config, &connection.shared, receiver.recv().await.unwrap()).await;
         let loaded = connection.view();
         assert_eq!(loaded.connection_phase, ConnectionPhase::Connected);
-        assert_eq!(loaded.remote_loaded_directory.as_deref(),Some(if source_ssh_session.is_some() {"/srv/work"} else {"/home/operator"}));
-        assert!(loaded.queue_writable, "the first browser queue must be writable: shared={source_ssh_session:?}");
-        assert_eq!(loaded.connection_info.as_ref().unwrap().shared_from, source_ssh_session);
+        assert_eq!(
+            loaded.remote_loaded_directory.as_deref(),
+            Some(if source_ssh_session.is_some() {
+                "/srv/work"
+            } else {
+                "/home/operator"
+            })
+        );
+        assert!(
+            loaded.queue_writable,
+            "the first browser queue must be writable: shared={source_ssh_session:?}"
+        );
+        assert_eq!(
+            loaded.connection_info.as_ref().unwrap().shared_from,
+            source_ssh_session
+        );
         let draft = cshell_application::SftpQueueDraft {
             verified: true,
             local_path: file.to_string_lossy().into_owned(),
             remote_path: "/first-upload.txt".into(),
             ..Default::default()
         };
-        assert!(connection.request(SftpClientCommand::TransferBatch(
-            session, vec![draft.clone()], loaded.queue.unwrap().revision, true,
-        )), "first upload must be accepted without any queue refresh");
+        assert!(
+            connection.request(SftpClientCommand::TransferBatch(
+                session,
+                vec![draft.clone()],
+                loaded.queue.unwrap().revision,
+                true,
+            )),
+            "first upload must be accepted without any queue refresh"
+        );
         assert!(connection.view().queue_busy);
-        let SftpClientCommand::TransferBatch(id, drafts, revision, start) = receiver.recv().await.unwrap() else {
+        let SftpClientCommand::TransferBatch(id, drafts, revision, start) =
+            receiver.recv().await.unwrap()
+        else {
             panic!("expected upload batch");
         };
         crate::sftp_connection::transfer_controls::batch(
-            &config, &connection.shared, id, drafts, revision, start,
-        ).await;
+            &config,
+            &connection.shared,
+            id,
+            drafts,
+            revision,
+            start,
+        )
+        .await;
         let acknowledged = connection.view();
         assert!(!acknowledged.queue_busy);
         assert!(acknowledged.queue_writable);
@@ -467,15 +550,24 @@ async fn reopening_browser_does_not_unlock_an_uncertain_existing_queue() {
         view.connection_profile = Some(profile);
         view.connection_phase = ConnectionPhase::Connected;
         view.shared_local_browser = true;
-        view.queue = Some(Arc::new(cshell_application::SftpQueueSnapshot::initial(session)));
+        view.queue = Some(Arc::new(cshell_application::SftpQueueSnapshot::initial(
+            session,
+        )));
         view.queue_writable = false;
     }
     let server = tokio::spawn(async move {
-        for op in [SftpOperation::QueueGet, SftpOperation::PeerGet, SftpOperation::BrowseManaged] {
+        for op in [
+            SftpOperation::QueueGet,
+            SftpOperation::PeerGet,
+            SftpOperation::BrowseManaged,
+        ] {
             respond(&listener, op, session, profile).await;
         }
     });
     load_browser(&config, &connection.shared, session).await;
-    assert!(!connection.view().queue_writable, "reopening is not an explicit reconciliation of an uncertain write");
+    assert!(
+        !connection.view().queue_writable,
+        "reopening is not an explicit reconciliation of an uncertain write"
+    );
     server.await.unwrap();
 }

@@ -59,8 +59,13 @@ fn readable_body(text: &str) -> Zeroizing<String> {
 /// Bound font layout for a pathological single line; payload remains untouched.
 fn bounded_line(line: &str) -> std::borrow::Cow<'_, str> {
     if let Some((boundary, _)) = line.char_indices().nth(4096) {
-        std::borrow::Cow::Owned(format!("{} … [本行仅预览前 4096 字符，发送原文未截断]", &line[..boundary]))
-    } else { std::borrow::Cow::Borrowed(line) }
+        std::borrow::Cow::Owned(format!(
+            "{} … [本行仅预览前 4096 字符，发送原文未截断]",
+            &line[..boundary]
+        ))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    }
 }
 
 pub(super) fn show(
@@ -79,22 +84,32 @@ pub(super) fn show(
     };
     let preview = readable_body(text);
     let lines: Vec<_> = preview.split('\n').collect();
-    let preview_truncated = lines.iter().any(|line| line.chars().take(4097).count() > 4096);
+    let preview_truncated = lines
+        .iter()
+        .any(|line| line.chars().take(4097).count() > 4096);
     let strong_warning = extra_ack(text, risk) || preview_truncated;
     let remote = targets
         .iter()
         .all(|target| target.kind == SyncInputTargetKind::Ssh);
     let noun = if remote { "台主机" } else { "个会话" };
-    let title = if paste { format!("向 {} {noun}粘贴文本", targets.len()) } else { format!(
-        "向 {} {noun}发送{}",
-        targets.len(),
-        if risk.multiline {
-            "多行命令"
-        } else {
-            "命令"
-        }
-    ) };
-    let send_label = format!("{}到 {} {noun}", if paste { "粘贴" } else { "发送" }, targets.len());
+    let title = if paste {
+        format!("向 {} {noun}粘贴文本", targets.len())
+    } else {
+        format!(
+            "向 {} {noun}发送{}",
+            targets.len(),
+            if risk.multiline {
+                "多行命令"
+            } else {
+                "命令"
+            }
+        )
+    };
+    let send_label = format!(
+        "{}到 {} {noun}",
+        if paste { "粘贴" } else { "发送" },
+        targets.len()
+    );
     let viewport = ctx.content_rect();
     // Logical points follow native DPI. Preserve margins and bound both axes.
     let width = (viewport.width() * 0.78)
@@ -216,6 +231,11 @@ pub(super) fn show(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
@@ -225,7 +245,10 @@ mod tests {
         assert!(preview.chars().count() < 4200);
         assert!(preview.contains("发送原文未截断"));
         assert_eq!(text.chars().count(), 300_000);
-        assert!(matches!(bounded_line("hostname"), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            bounded_line("hostname"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
     #[test]
     fn display_preserves_natural_lines_but_keeps_hidden_controls_visible() {
@@ -264,7 +287,8 @@ mod tests {
                 egui::vec2(900.0, 600.0),
                 egui::vec2(1280.0, 800.0),
             ] {
-                for (complex, paste) in [(false, false), (true, false), (false, true), (true, true)] {
+                for (complex, paste) in [(false, false), (true, false), (false, true), (true, true)]
+                {
                     let ctx = crate::ui_layout_gate::context();
                     ctx.set_pixels_per_point(scale);
                     let window = WorkspaceWindowId::new();
@@ -285,10 +309,17 @@ mod tests {
                     } else {
                         "hostname\ndf -h".into()
                     };
-                    let action = if paste { InputAction::Paste { text, bracketed: true } } else { InputAction::Compose {
-                        text,
-                        append_enter: false,
-                    } };
+                    let action = if paste {
+                        InputAction::Paste {
+                            text,
+                            bracketed: true,
+                        }
+                    } else {
+                        InputAction::Compose {
+                            text,
+                            append_enter: false,
+                        }
+                    };
                     let risk = SyncInputRisk {
                         multiline: true,
                         control_characters: true,
@@ -360,8 +391,17 @@ mod tests {
                         "close must stay at the upper-right corner: {close_rect:?}/{rect:?}"
                     );
                     for label in [
-                        if paste { "取消粘贴" } else { "返回编辑" }.to_owned(),
-                        format!("{}到 {} 台主机", if paste { "粘贴" } else { "发送" }, targets.len()),
+                        if paste {
+                            "取消粘贴"
+                        } else {
+                            "返回编辑"
+                        }
+                        .to_owned(),
+                        format!(
+                            "{}到 {} 台主机",
+                            if paste { "粘贴" } else { "发送" },
+                            targets.len()
+                        ),
                         "详细信息".into(),
                     ] {
                         let node = &tree

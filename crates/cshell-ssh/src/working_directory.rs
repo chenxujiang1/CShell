@@ -14,7 +14,8 @@ impl RusshClient {
         let mut opening =
             OpeningTerminalChannel(Some(self.session.channel_open_session().await.ok()?));
         let channel = opening.0.as_mut()?;
-        let result = tokio::time::timeout(Duration::from_secs(3), async {
+
+        tokio::time::timeout(Duration::from_secs(3), async {
             channel.exec(true, command.as_bytes()).await.ok()?;
             channel.eof().await.ok()?;
             let mut output = Vec::new();
@@ -48,8 +49,7 @@ impl RusshClient {
         })
         .await
         .ok()
-        .flatten();
-        result
+        .flatten()
     }
 }
 
@@ -68,6 +68,11 @@ fn directory_command(marker: &str) -> Option<String> {
     Some(format!("sh -c '{}'", script.replace('\'', "'\\''")))
 }
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]

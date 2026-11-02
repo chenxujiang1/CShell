@@ -240,7 +240,7 @@ async fn launch(path: &str, rows: &str, cols: &str) -> Result<(), &'static str> 
         return Err("terminal dimensions exceed the limit");
     }
     let request = cshell_ipc::TerminalContextLaunchRequest {
-        connection_diagnostics:false,
+        connection_diagnostics: false,
         report_json: serde_json::to_vec(&report).map_err(|_| "report encoding failed")?,
         rows,
         cols,

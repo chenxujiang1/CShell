@@ -200,8 +200,8 @@ impl UploadConnection {
         {
             return false;
         }
-        if let Operation::Act(kind, id, host, revision) = &operation {
-            if view.document.as_ref().is_none_or(|document| {
+        if let Operation::Act(kind, id, host, revision) = &operation
+            && (view.document.as_ref().is_none_or(|document| {
                 document.id != *id
                     || document.active
                     || host.is_some_and(|host| {
@@ -216,9 +216,9 @@ impl UploadConnection {
                     | TaskOperation::UploadResume
                     | TaskOperation::UploadCleanup
                     | TaskOperation::UploadAdopt
-            ) {
-                return false;
-            }
+            ))
+        {
+            return false;
         }
         let hashing = matches!(operation, Operation::Describe(..));
         if hashing {
@@ -313,6 +313,10 @@ impl Drop for UploadConnection {
         }
     }
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 enum Outcome {
     List(Vec<UploadRunSummary>, Option<TaskRunId>),
     Manifest(BatchUploadDefinition),

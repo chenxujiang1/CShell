@@ -129,7 +129,9 @@ fn guidance(stage: Stage) -> &'static str {
         Stage::Proxy => "检查代理地址、协议及代理到目标服务器的连通性。",
         Stage::JumpChannel => "检查该级跳板到目标的网络，以及服务器是否允许 TCP 转发。",
         Stage::Handshake => "确认该端口提供 SSH 服务，并检查服务器与当前算法策略是否兼容。",
-        Stage::HostKey => "请在主机密钥确认窗口核对指纹；服务器重装导致指纹变化时，核对新旧指纹后点击“确认更新并连接”。",
+        Stage::HostKey => {
+            "请在主机密钥确认窗口核对指纹；服务器重装导致指纹变化时，核对新旧指纹后点击“确认更新并连接”。"
+        }
         Stage::Authentication | Stage::Credentials | Stage::WaitingForInput => {
             "检查账号和认证方式、凭据库或私钥；重试时可重新输入密码和动态码。"
         }
@@ -346,11 +348,15 @@ impl crate::DesktopApp {
         }
         let view = self.active_ssh_profile().and_then(|(tab, profile)| {
             let view = self.daemon.as_ref()?.view();
-            let matching_runtime = self.workspace.sessions.get(&tab)
+            let matching_runtime = self
+                .workspace
+                .sessions
+                .get(&tab)
                 .map_or(view.session_id.is_none(), |id| view.session_id == Some(*id));
             (view.session_profile_id == Some(profile)
-                && (matching_runtime || view.session_opening && self.workspace.pending_launch == Some(tab)))
-                .then_some(view)
+                && (matching_runtime
+                    || view.session_opening && self.workspace.pending_launch == Some(tab)))
+            .then_some(view)
         });
         let mut open = true;
         let mut retry = false;
@@ -361,8 +367,12 @@ impl crate::DesktopApp {
             .max_width((ui.ctx().content_rect().width() - 24.0).max(240.0))
             .show(ui.ctx(), |ui| {
                 if let Some(view) = view {
-                    retry = draw(ui, view.connection_trace.as_ref(), view.session_opening,
-                        self.view_model.can_restart_ssh && !view.session_opening);
+                    retry = draw(
+                        ui,
+                        view.connection_trace.as_ref(),
+                        view.session_opening,
+                        self.view_model.can_restart_ssh && !view.session_opening,
+                    );
                     if view.connection_trace.is_none() && !view.session_opening {
                         ui.label("当前连接暂无诊断记录。");
                     }

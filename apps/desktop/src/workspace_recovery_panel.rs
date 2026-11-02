@@ -159,9 +159,10 @@ impl WorkspaceRecoveryPanel {
             self.confirm = false;
         }
         let mut open = self.open;
-        cshell_ui::form::dialog(&context, "工作区恢复 / 布局导入导出").open(&mut open).default_size([820.0,700.0]).show(context,|ui|{
+        cshell_ui::form::dialog(context, "工作区恢复 / 布局导入导出").open(&mut open).default_size([820.0,700.0]).show(context,|ui|{
             ui.weak("自动保存暂停期间先读取、预览再确认。只恢复布局与 Profile 引用，不运行命令。相同标签和 Profile 可保留已有会话绑定；其他视图退出，不发送进程终止。");
-            ui.label(format!("存储版本 {revision} · {}",view.status));if let Some(error)=self.error.as_ref().or(view.error.as_ref()){ui.colored_label(cshell_ui::theme::WARNING,error);}if view.busy||self.file_busy{ui.spinner();}
+            ui.label(format!("存储版本 {revision} · {}",view.status));if let Some(error)=self.error.as_ref().or(view.error.as_ref()){ui.colored_label(cshell_ui::theme::WARNING,error);}
+if view.busy||self.file_busy{ui.spinner();}
             if ui.add_enabled(connection.is_some()&&!view.busy,egui::Button::new("暂停自动保存并明确重新读取")).clicked()&&let Some(c)=connection{c.pause_reload();self.plan=None;self.confirm=false;}
             ui.add_enabled_ui(!view.busy&&!self.file_busy,|ui|{
                 ui.horizontal_wrapped(|ui|{
@@ -181,7 +182,7 @@ impl WorkspaceRecoveryPanel {
                 ui.label(format!("目标 {} 窗口 / {} 分屏组 / {} 标签 · 可保留已绑定会话 {} · 退出视图 {} · 新占位标签 {}",plan.target.windows.len(),plan.target.tab_groups.len(),plan.target.bindings.len(),plan.retain_tabs.iter().filter(|id|sessions.contains_key(id)).count(),plan.detach_tabs.len(),plan.placeholder_tabs.len()));
                 egui::ScrollArea::vertical().max_height(160.0).show(ui,|ui|{for binding in &plan.target.bindings{let profile=profiles.and_then(|p|p.catalog.as_ref()).and_then(|c|c.profiles.iter().find(|p|Some(p.id)==binding.profile_id));let state=if plan.retain_tabs.contains(&binding.tab_id)&&sessions.contains_key(&binding.tab_id){"保留当前会话绑定"}else{"占位：需显式打开"};ui.label(format!("{} · {} · {}",binding.title,state,profile.map_or("Profile 不存在 / 无 Profile",|p|p.name.as_str())));}});
                 ui.checkbox(&mut self.confirm,"确认上述布局、保留绑定与退出视图；成功后恢复自动保存");
-                if ui.add_enabled(ready&&self.confirm,egui::Button::new("提交布局恢复并恢复自动保存")).clicked()&&let Some(c)=connection{if c.restore(plan.clone(),self.epoch){self.confirm=false;}}
+                if ui.add_enabled(ready&&self.confirm,egui::Button::new("提交布局恢复并恢复自动保存")).clicked()&&let Some(c)=connection&& c.restore(plan.clone(),self.epoch){self.confirm=false;}
             }
             ui.weak("关闭面板不会恢复自动保存。需要重新读取、预览目标并确认；不明提交结果不能重放。窗口创建失败会保留已保存布局，可再次打开本面板。");
         });

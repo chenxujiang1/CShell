@@ -391,8 +391,8 @@ impl FullFrame {
                     )) as u8,
                 modify_other_keys: payload.modify_other_keys.min(3) as u8,
                 format_other_keys: payload.format_other_keys,
-            mouse_tracking: payload.mouse_tracking.min(3) as u8,
-            mouse_encoding: payload.mouse_encoding.min(2) as u8,
+                mouse_tracking: payload.mouse_tracking.min(3) as u8,
+                mouse_encoding: payload.mouse_encoding.min(2) as u8,
             },
             cells: payload
                 .cells
@@ -499,7 +499,8 @@ impl TryFrom<TerminalCell> for Cell {
                 maximum: MAX_TERMINAL_HYPERLINK_URI_BYTES,
             });
         }
-        let mut decoded = Self::with_zerowidth(character, zerowidth, width, style).with_soft_wrap(cell.soft_wrap);
+        let mut decoded =
+            Self::with_zerowidth(character, zerowidth, width, style).with_soft_wrap(cell.soft_wrap);
         if !cell.hyperlink_uri.is_empty() {
             decoded = decoded.with_hyperlink_uri(cell.hyperlink_uri);
         }
@@ -849,8 +850,8 @@ pub struct SessionSummary {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SessionCreateRequest {
-    #[prost(bool,tag="6")]
-    pub connection_diagnostics:bool,
+    #[prost(bool, tag = "6")]
+    pub connection_diagnostics: bool,
     #[prost(uint32, tag = "1")]
     pub rows: u32,
     #[prost(uint32, tag = "2")]
@@ -958,10 +959,27 @@ pub struct TerminalMouseEvent {
 impl From<cshell_domain::MouseEvent> for TerminalMouseEvent {
     fn from(event: cshell_domain::MouseEvent) -> Self {
         use cshell_domain::{MouseButton as B, MouseEventKind as K};
-        Self { row: u32::from(event.row), column: u32::from(event.column),
-            button: match event.button { B::Left=>0,B::Middle=>1,B::Right=>2,B::None=>3,B::WheelUp=>4,B::WheelDown=>5 },
-            kind: match event.kind { K::Press=>0,K::Release=>1,K::Move=>2 },
-            modifiers: u32::from(event.modifiers.shift) | (u32::from(event.modifiers.alt)<<1) | (u32::from(event.modifiers.ctrl)<<2) | (u32::from(event.modifiers.super_key)<<3) }
+        Self {
+            row: u32::from(event.row),
+            column: u32::from(event.column),
+            button: match event.button {
+                B::Left => 0,
+                B::Middle => 1,
+                B::Right => 2,
+                B::None => 3,
+                B::WheelUp => 4,
+                B::WheelDown => 5,
+            },
+            kind: match event.kind {
+                K::Press => 0,
+                K::Release => 1,
+                K::Move => 2,
+            },
+            modifiers: u32::from(event.modifiers.shift)
+                | (u32::from(event.modifiers.alt) << 1)
+                | (u32::from(event.modifiers.ctrl) << 2)
+                | (u32::from(event.modifiers.super_key) << 3),
+        }
     }
 }
 impl TryFrom<&TerminalMouseEvent> for cshell_domain::MouseEvent {
@@ -969,40 +987,95 @@ impl TryFrom<&TerminalMouseEvent> for cshell_domain::MouseEvent {
     fn try_from(event: &TerminalMouseEvent) -> Result<Self, Self::Error> {
         use cshell_domain::{MouseButton as B, MouseEventKind as K};
         let bad = || TerminalControlCodecError::InvalidKeyPayload;
-        let button = match event.button { 0=>B::Left,1=>B::Middle,2=>B::Right,3=>B::None,4=>B::WheelUp,5=>B::WheelDown,_=>return Err(bad()) };
-        let kind = match event.kind { 0=>K::Press,1=>K::Release,2=>K::Move,_=>return Err(bad()) };
-        if event.modifiers > 15 || (matches!(button,B::WheelUp|B::WheelDown) && kind != K::Press) || (button==B::None && kind!=K::Move) { return Err(bad()); }
-        Ok(Self { row:event.row.try_into().map_err(|_|bad())?,column:event.column.try_into().map_err(|_|bad())?,button,kind,
-            modifiers:cshell_domain::Modifiers { shift:event.modifiers&1!=0,alt:event.modifiers&2!=0,ctrl:event.modifiers&4!=0,super_key:event.modifiers&8!=0 } })
+        let button = match event.button {
+            0 => B::Left,
+            1 => B::Middle,
+            2 => B::Right,
+            3 => B::None,
+            4 => B::WheelUp,
+            5 => B::WheelDown,
+            _ => return Err(bad()),
+        };
+        let kind = match event.kind {
+            0 => K::Press,
+            1 => K::Release,
+            2 => K::Move,
+            _ => return Err(bad()),
+        };
+        if event.modifiers > 15
+            || (matches!(button, B::WheelUp | B::WheelDown) && kind != K::Press)
+            || (button == B::None && kind != K::Move)
+        {
+            return Err(bad());
+        }
+        Ok(Self {
+            row: event.row.try_into().map_err(|_| bad())?,
+            column: event.column.try_into().map_err(|_| bad())?,
+            button,
+            kind,
+            modifiers: cshell_domain::Modifiers {
+                shift: event.modifiers & 1 != 0,
+                alt: event.modifiers & 2 != 0,
+                ctrl: event.modifiers & 4 != 0,
+                super_key: event.modifiers & 8 != 0,
+            },
+        })
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod mouse_wire_tests {
     use super::*;
     #[test]
     fn mouse_input_roundtrips_and_rejects_ambiguous_or_invalid_events() {
-        let session=SessionId::new();
-        let action=InputAction::Mouse(cshell_domain::MouseEvent{row:400,column:800,button:cshell_domain::MouseButton::Left,
-            kind:cshell_domain::MouseEventKind::Press,modifiers:cshell_domain::Modifiers{ctrl:true,..Default::default()}});
-        let request=TerminalInputRequest::from_action(session,&action).unwrap();
-        let mut decoded=TerminalInputRequest::decode(request.encode_to_vec().as_slice()).unwrap();
-        assert_eq!(decoded.decode_action().unwrap(),action);
-        decoded.text=Some("must not coexist".into());assert_eq!(decoded.decode_action().unwrap_err(),TerminalControlCodecError::InvalidActionCount);
-        decoded.text=None;decoded.mouse.as_mut().unwrap().row=65536;assert!(decoded.decode_action().is_err());
-        decoded.mouse.as_mut().unwrap().row=1;decoded.mouse.as_mut().unwrap().modifiers=16;assert!(decoded.decode_action().is_err());
+        let session = SessionId::new();
+        let action = InputAction::Mouse(cshell_domain::MouseEvent {
+            row: 400,
+            column: 800,
+            button: cshell_domain::MouseButton::Left,
+            kind: cshell_domain::MouseEventKind::Press,
+            modifiers: cshell_domain::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        });
+        let request = TerminalInputRequest::from_action(session, &action).unwrap();
+        let mut decoded = TerminalInputRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded.decode_action().unwrap(), action);
+        decoded.text = Some("must not coexist".into());
+        assert_eq!(
+            decoded.decode_action().unwrap_err(),
+            TerminalControlCodecError::InvalidActionCount
+        );
+        decoded.text = None;
+        decoded.mouse.as_mut().unwrap().row = 65536;
+        assert!(decoded.decode_action().is_err());
+        decoded.mouse.as_mut().unwrap().row = 1;
+        decoded.mouse.as_mut().unwrap().modifiers = 16;
+        assert!(decoded.decode_action().is_err());
     }
     #[test]
     fn mouse_modes_and_screen_identity_survive_full_and_delta_frames() {
-        use cshell_terminal::{AlacrittyTerminalEngine,TerminalEngine};
-        let id=SessionId::new();let mut engine=AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(2,8));
-        let base=engine.snapshot();
+        use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
+        let id = SessionId::new();
+        let mut engine = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(2, 8));
+        let base = engine.snapshot();
         engine.feed(b"\x1b[?1002;1006hfirst\r\nsecond\r\nthird");
-        let next=engine.snapshot();
-        let full=FullFrame::from_terminal_snapshot(id,&next).decode_terminal_snapshot().unwrap();
-        assert_eq!(full,next);
-        let delta=FrameDelta::between_terminal_snapshots(id,&base,&next).unwrap().apply_terminal_delta(&base).unwrap();
-        assert_eq!(delta,next);
+        let next = engine.snapshot();
+        let full = FullFrame::from_terminal_snapshot(id, &next)
+            .decode_terminal_snapshot()
+            .unwrap();
+        assert_eq!(full, next);
+        let delta = FrameDelta::between_terminal_snapshots(id, &base, &next)
+            .unwrap()
+            .apply_terminal_delta(&base)
+            .unwrap();
+        assert_eq!(delta, next);
     }
 }
 
@@ -1251,12 +1324,15 @@ impl TerminalInputRequest {
             + usize::from(self.text.is_some())
             + usize::from(self.paste.is_some())
             + usize::from(self.control.is_some());
-        let action_count = action_count + usize::from(self.compose.is_some()) + usize::from(self.mouse.is_some());
+        let action_count =
+            action_count + usize::from(self.compose.is_some()) + usize::from(self.mouse.is_some());
         if action_count != 1 {
             return Err(TerminalControlCodecError::InvalidActionCount);
         }
         self.validate_input_size()?;
-        if let Some(mouse) = &self.mouse { return Ok(InputAction::Mouse(mouse.try_into()?)); }
+        if let Some(mouse) = &self.mouse {
+            return Ok(InputAction::Mouse(mouse.try_into()?));
+        }
         if let Some(key) = &self.key {
             return Ok(InputAction::Key(key.try_into()?));
         }
@@ -1445,8 +1521,11 @@ impl TerminalResizeRequest {
                 cols: self.cols,
             });
         };
-        if rows > cshell_terminal::MAX_TERMINAL_ROWS || cols > cshell_terminal::MAX_TERMINAL_COLUMNS
-            || usize::from(rows).saturating_mul(usize::from(cols)) > cshell_terminal::MAX_TERMINAL_CELLS {
+        if rows > cshell_terminal::MAX_TERMINAL_ROWS
+            || cols > cshell_terminal::MAX_TERMINAL_COLUMNS
+            || usize::from(rows).saturating_mul(usize::from(cols))
+                > cshell_terminal::MAX_TERMINAL_CELLS
+        {
             return Err(TerminalControlCodecError::InvalidSize {
                 rows: self.rows,
                 cols: self.cols,
@@ -1620,7 +1699,12 @@ impl LogPage {
                 self.session_id.len(),
             ));
         }
-        if self.first_line_id > 0 && self.rows.first().is_some_and(|row| row.line_id < self.first_line_id) {
+        if self.first_line_id > 0
+            && self
+                .rows
+                .first()
+                .is_some_and(|row| row.line_id < self.first_line_id)
+        {
             return Err(LogPageCodecError::UnorderedRows);
         }
         if self.rows.len() > MAX_LOG_PAGE_ROWS {
@@ -1901,7 +1985,7 @@ pub mod envelope {
 
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Payload {
-        #[prost(message,tag="67")]
+        #[prost(message, tag = "67")]
         ConnectionDiagnosticUpdate(crate::ConnectionDiagnosticUpdate),
         #[prost(message, tag = "65")]
         ZmodemRequest(crate::ZmodemRequest),
@@ -2022,6 +2106,7 @@ pub mod envelope {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::field_reassign_with_default)]
 mod tests {
     use super::{
         DeltaCodecError, Envelope, FrameDelta, FullFrame, HistorySearchCodecError,
@@ -2044,7 +2129,10 @@ mod tests {
         let wire = super::TerminalCell::decode(encoded.as_slice()).unwrap();
         assert!(cshell_terminal::Cell::try_from(wire).unwrap().soft_wrap());
         let legacy = super::TerminalCell {
-            soft_wrap: false, scalar: u32::from('a'), ..Default::default() };
+            soft_wrap: false,
+            scalar: u32::from('a'),
+            ..Default::default()
+        };
         assert!(!cshell_terminal::Cell::try_from(legacy).unwrap().soft_wrap());
     }
 
@@ -2128,7 +2216,7 @@ mod tests {
     fn host_key_preview_debug_redacts_token_and_peer_text_through_nested_envelopes() {
         let marker = "SECRET-PREVIEW-MARKER";
         let preview = crate::HostKeyPreviewData {
-                previous_fingerprints: Vec::new(),
+            previous_fingerprints: Vec::new(),
             token: marker.as_bytes().to_vec(),
             host: marker.into(),
             algorithm: marker.into(),
@@ -2218,8 +2306,8 @@ mod tests {
                 color: Some(Color::Rgb(10, 20, 30)),
             },
             terminal_modes: TerminalModes {
-            mouse_tracking: 0,
-            mouse_encoding: 0,
+                mouse_tracking: 0,
+                mouse_encoding: 0,
                 application_cursor: true,
                 bracketed_paste: true,
                 kitty_keyboard_flags: TerminalModes::KITTY_DISAMBIGUATE
@@ -2331,9 +2419,9 @@ mod tests {
             session_id: vec![0; 16],
             generation: 1,
             payload: TerminalFramePayload {
-            screen_start_line: 0,
-            mouse_tracking: 0,
-            mouse_encoding: 0,
+                screen_start_line: 0,
+                mouse_tracking: 0,
+                mouse_encoding: 0,
                 schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
                 rows: 1,
                 cols: 1,
@@ -2412,9 +2500,9 @@ mod tests {
             session_id: vec![0; 16],
             generation: 1,
             payload: TerminalFramePayload {
-            screen_start_line: 0,
-            mouse_tracking: 0,
-            mouse_encoding: 0,
+                screen_start_line: 0,
+                mouse_tracking: 0,
+                mouse_encoding: 0,
                 schema_version: TERMINAL_FRAME_SCHEMA_VERSION,
                 rows: 1,
                 cols: 1,
@@ -2431,7 +2519,7 @@ mod tests {
                 modify_other_keys: 0,
                 format_other_keys: false,
                 cells: vec![TerminalCell {
-            soft_wrap: false,
+                    soft_wrap: false,
                     scalar: u32::from('A'),
                     style: None,
                     zerowidth_scalars: Vec::new(),
@@ -2496,7 +2584,8 @@ mod tests {
     #[test]
     fn bounded_log_page_round_trip_preserves_unicode_and_styles() {
         let session_id = SessionId::new();
-        let page = LogPage { first_line_id: 1,
+        let page = LogPage {
+            first_line_id: 1,
             session_id: session_id.as_uuid().as_bytes().to_vec(),
             revision: 77,
             anchor_line_id: 9,
@@ -2598,12 +2687,13 @@ mod tests {
             Err(LogPageCodecError::TooManyRows(_))
         ));
 
-        let page = LogPage { first_line_id: 1,
+        let page = LogPage {
+            first_line_id: 1,
             session_id: vec![1; 16],
             revision: 1,
             anchor_line_id: 1,
             rows: vec![LogRow {
-            soft_wrap: false,
+                soft_wrap: false,
                 line_id: 1,
                 text: "A中e\u{301}".to_owned(),
                 style_spans: vec![LogStyleSpan {

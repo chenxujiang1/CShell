@@ -25,7 +25,7 @@ pub(super) struct Notice {
 }
 pub(super) struct TerminalToolsPanel {
     pub open: bool,
-    dock:crate::command_workspace::Dock,
+    dock: crate::command_workspace::Dock,
     shell: crate::shell_history_panel::Panel,
     page: u8,
     connection: Option<Connection>,
@@ -79,7 +79,7 @@ impl Default for TerminalToolsPanel {
     fn default() -> Self {
         Self {
             open: false,
-            dock:Default::default(),
+            dock: Default::default(),
             shell: Default::default(),
             page: 0,
             connection: None,
@@ -135,13 +135,30 @@ impl Default for TerminalToolsPanel {
     }
 }
 impl TerminalToolsPanel {
-    pub fn open_commands(&mut self){self.dock.toggle();}
-    pub fn take_command_load(&mut self)->Option<String>{self.shell.load_command.take()}
-    pub fn draw_command_dock(&mut self,ui:&mut egui::Ui,session:Option<SessionId>){
-        let view=self.connection.as_ref().map(Connection::view).unwrap_or_default();let connection=self.connection.as_ref();let shell=&mut self.shell;
-        self.dock.draw(ui,|ui|shell.draw(ui,session,&view,connection));
+    pub fn open_commands(&mut self) {
+        self.dock.toggle();
     }
-    pub fn take_command_jump(&mut self)->Option<u64>{let line=self.shell.jump.take();if line.is_some(){self.open=false;}line}
+    pub fn take_command_load(&mut self) -> Option<String> {
+        self.shell.load_command.take()
+    }
+    pub fn draw_command_dock(&mut self, ui: &mut egui::Ui, session: Option<SessionId>) {
+        let view = self
+            .connection
+            .as_ref()
+            .map(Connection::view)
+            .unwrap_or_default();
+        let connection = self.connection.as_ref();
+        let shell = &mut self.shell;
+        self.dock
+            .draw(ui, |ui| shell.draw(ui, session, &view, connection));
+    }
+    pub fn take_command_jump(&mut self) -> Option<u64> {
+        let line = self.shell.jump.take();
+        if line.is_some() {
+            self.open = false;
+        }
+        line
+    }
     pub fn record_input_omission(&mut self, session: SessionId, broadcast: bool) {
         self.scripts.input_omitted(session, broadcast);
     }
@@ -246,8 +263,7 @@ impl TerminalToolsPanel {
                     }
             })
             && let Some(c) = &self.connection
-        {
-            if c.request(
+            && c.request(
                 Request {
                     operation: Op::Poll as i32,
                     cursor: self.event_cursor,
@@ -255,9 +271,9 @@ impl TerminalToolsPanel {
                 },
                 0,
                 false,
-            ) {
-                self.last_poll = Some(Instant::now());
-            }
+            )
+        {
+            self.last_poll = Some(Instant::now());
         }
         changed || script_changed
     }
@@ -461,7 +477,7 @@ impl TerminalToolsPanel {
             .unwrap_or_default();
         let mut open = self.open;
         let mut profile_command = None;
-        cshell_ui::form::dialog(&context, "终端工具")
+        cshell_ui::form::dialog(context, "终端工具")
             .open(&mut open)
             .default_size([860.0, 760.0])
             .show(context, |ui| {
@@ -505,7 +521,8 @@ impl TerminalToolsPanel {
                 } else if self.page <= 2 {
                     self.rules(ui, &view, session, profile);
                 } else if self.page == 6 {
-                    self.shell.draw(ui,session,&view,self.connection.as_ref());
+                    self.shell
+                        .draw(ui, session, &view, self.connection.as_ref());
                 } else if self.page == 5 {
                     self.scripts.draw(ui, session);
                 } else {
@@ -517,7 +534,13 @@ impl TerminalToolsPanel {
             self.step = false;
             self.seek_target = None;
         }
-        if self.open && !open {context.memory_mut(|m|{if let Some(id)=m.focused(){m.surrender_focus(id);}});}
+        if self.open && !open {
+            context.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+        }
         self.open = open;
         profile_command
     }

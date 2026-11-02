@@ -25,59 +25,6 @@ fn resolved(
         .ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn draft_preview_resolves_global_group_and_profile_without_saving() {
-        let mut catalog = DesktopProfileCatalog {
-            revision: 1,
-            defaults: Default::default(),
-            folders: vec![],
-            profiles: vec![],
-            ssh_connections: vec![],
-            local_connections: vec![],
-            themes: vec![],
-        };
-        let folder = ProfileFolder {
-            id: FolderId::new(),
-            name: "Linux".into(),
-            parent_id: None,
-            terminal: TerminalOverrides {
-                logging: Some(true),
-                ..Default::default()
-            },
-        };
-        let mut draft = ProfileRecord {
-            id: ProfileId::new(),
-            name: "Preview".into(),
-            kind: ProfileKind::Ssh,
-            folder_id: Some(folder.id),
-            tags: Default::default(),
-            favorite: false,
-            terminal: Default::default(),
-        };
-        catalog.folders.push(folder.clone());
-        let settings = resolved(&catalog, &draft).unwrap();
-        assert_eq!(settings.theme.source, cshell_domain::SettingSource::Global);
-        assert_eq!(
-            settings.logging.source,
-            cshell_domain::SettingSource::Folder(folder.id)
-        );
-        assert!(settings.logging.value);
-        draft.terminal.logging = Some(false);
-        let settings = resolved(&catalog, &draft).unwrap();
-        assert_eq!(
-            settings.logging.source,
-            cshell_domain::SettingSource::Profile(draft.id)
-        );
-        assert!(!settings.logging.value);
-        draft.terminal = Default::default();
-        assert!(resolved(&catalog, &draft).unwrap().logging.value);
-        assert!(catalog.profiles.is_empty());
-        assert!(catalog.folders[0].terminal.logging.unwrap());
-    }
-}
 fn source(source: cshell_domain::SettingSource, catalog: &DesktopProfileCatalog) -> String {
     match source {
         cshell_domain::SettingSource::Global => "全局默认".into(),
@@ -133,4 +80,63 @@ pub(super) fn draw(ui: &mut egui::Ui, catalog: &DesktopProfileCatalog, profile: 
         crate::terminal_appearance::font(ui.ctx()),
     );
     ui.weak("当前预览反映草稿，保存后应用主题；终端类型和日志对后续连接生效。连接策略或临时设置可能进一步覆盖。");
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+mod tests {
+    use super::*;
+    #[test]
+    fn draft_preview_resolves_global_group_and_profile_without_saving() {
+        let mut catalog = DesktopProfileCatalog {
+            revision: 1,
+            defaults: Default::default(),
+            folders: vec![],
+            profiles: vec![],
+            ssh_connections: vec![],
+            local_connections: vec![],
+            themes: vec![],
+        };
+        let folder = ProfileFolder {
+            id: FolderId::new(),
+            name: "Linux".into(),
+            parent_id: None,
+            terminal: TerminalOverrides {
+                logging: Some(true),
+                ..Default::default()
+            },
+        };
+        let mut draft = ProfileRecord {
+            id: ProfileId::new(),
+            name: "Preview".into(),
+            kind: ProfileKind::Ssh,
+            folder_id: Some(folder.id),
+            tags: Default::default(),
+            favorite: false,
+            terminal: Default::default(),
+        };
+        catalog.folders.push(folder.clone());
+        let settings = resolved(&catalog, &draft).unwrap();
+        assert_eq!(settings.theme.source, cshell_domain::SettingSource::Global);
+        assert_eq!(
+            settings.logging.source,
+            cshell_domain::SettingSource::Folder(folder.id)
+        );
+        assert!(settings.logging.value);
+        draft.terminal.logging = Some(false);
+        let settings = resolved(&catalog, &draft).unwrap();
+        assert_eq!(
+            settings.logging.source,
+            cshell_domain::SettingSource::Profile(draft.id)
+        );
+        assert!(!settings.logging.value);
+        draft.terminal = Default::default();
+        assert!(resolved(&catalog, &draft).unwrap().logging.value);
+        assert!(catalog.profiles.is_empty());
+        assert!(catalog.folders[0].terminal.logging.unwrap());
+    }
 }

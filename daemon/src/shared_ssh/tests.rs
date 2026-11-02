@@ -1,6 +1,13 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
-mod product_workspace;
 mod connection_diagnostics;
+mod product_workspace;
 use crate::{LocalSessionRegistry, ProfileIpcService, SessionIpcService, SshSession};
 use cshell_application::{CatalogChange, ProfileService};
 use cshell_domain::{
@@ -232,7 +239,7 @@ impl Fixture {
                     serde_json::to_vec(&cshell_application::SftpConnectRequest {
                         profile: self.profile,
                         source_ssh_session: source,
-                        discover_directory:true,
+                        discover_directory: true,
                     })
                     .unwrap()
                 } else {
@@ -296,30 +303,99 @@ async fn ipc(service: &SessionIpcService, payload: envelope::Payload) -> envelop
 fn id(summary: &SessionSummary) -> SessionId {
     SessionId::from_bytes(summary.session_id.as_slice().try_into().unwrap())
 }
-#[tokio::test(flavor="multi_thread",worker_threads=3)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn cancelling_mfa_reports_cancelled_for_ssh_and_sftp_and_creates_no_session() {
-    let f=Fixture::new(None).await;
-    for sftp in [false,true] {
-        let service=f.service.clone();let profile=f.profile;let session=SessionId::new();
-        let payload=if sftp {envelope::Payload::SftpRequest(SftpRequest{operation:SftpOperation::ConnectProfile as i32,session_id:session.as_uuid().as_bytes().to_vec(),document_json:serde_json::to_vec(&cshell_application::SftpConnectRequest{profile,source_ssh_session:None,discover_directory:true}).unwrap(),..Default::default()})} else {envelope::Payload::SessionCreateRequest(SessionCreateRequest{profile_id:Some(profile.as_uuid().as_bytes().to_vec()),rows:24,cols:80,..Default::default()})};
-        let job=tokio::spawn(async move {ipc(&service,payload).await});
-        let challenge=tokio::time::timeout(Duration::from_secs(8),async {loop {
-            let envelope::Payload::VaultResponse(reply)=f.call(envelope::Payload::VaultRequest(VaultRequest::new(VaultOperation::KeyboardAuthPoll))).await else {panic!()};
-            if let Some(challenge)=reply.auth_challenge {break challenge;}
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }}).await.unwrap();
+    let f = Fixture::new(None).await;
+    for sftp in [false, true] {
+        let service = f.service.clone();
+        let profile = f.profile;
+        let session = SessionId::new();
+        let payload = if sftp {
+            envelope::Payload::SftpRequest(SftpRequest {
+                operation: SftpOperation::ConnectProfile as i32,
+                session_id: session.as_uuid().as_bytes().to_vec(),
+                document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    profile,
+                    source_ssh_session: None,
+                    discover_directory: true,
+                })
+                .unwrap(),
+                ..Default::default()
+            })
+        } else {
+            envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                profile_id: Some(profile.as_uuid().as_bytes().to_vec()),
+                rows: 24,
+                cols: 80,
+                ..Default::default()
+            })
+        };
+        let job = tokio::spawn(async move { ipc(&service, payload).await });
+        let challenge = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let envelope::Payload::VaultResponse(reply) = f
+                    .call(envelope::Payload::VaultRequest(VaultRequest::new(
+                        VaultOperation::KeyboardAuthPoll,
+                    )))
+                    .await
+                else {
+                    panic!()
+                };
+                if let Some(challenge) = reply.auth_challenge {
+                    break challenge;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(!challenge.login);
-        let mut reply=VaultRequest::new(VaultOperation::KeyboardAuthRespond);reply.auth_answer=Some(KeyboardAuthAnswer{id:challenge.id,answers:vec![],cancel:true,username:String::new(),save_credentials:false});
-        let envelope::Payload::VaultResponse(reply)=f.call(envelope::Payload::VaultRequest(reply)).await else {panic!()};assert_eq!(reply.status,VaultControlStatus::Ok as i32);
-        match tokio::time::timeout(Duration::from_secs(8),job).await.unwrap().unwrap() {
-            envelope::Payload::SessionCreateResponse(reply)=>{assert!(!sftp);assert!(reply.session.is_none());assert_eq!(reply.failure_code,cshell_ipc::SessionFailureCode::AuthenticationCancelled as i32);},
-            envelope::Payload::SftpResponse(reply)=>{assert!(sftp);assert_eq!(reply.status,SftpStatus::Cancelled as i32);},
-            _=>panic!("wrong response"),
+        let mut reply = VaultRequest::new(VaultOperation::KeyboardAuthRespond);
+        reply.auth_answer = Some(KeyboardAuthAnswer {
+            id: challenge.id,
+            answers: vec![],
+            cancel: true,
+            username: String::new(),
+            save_credentials: false,
+        });
+        let envelope::Payload::VaultResponse(reply) =
+            f.call(envelope::Payload::VaultRequest(reply)).await
+        else {
+            panic!()
+        };
+        assert_eq!(reply.status, VaultControlStatus::Ok as i32);
+        match tokio::time::timeout(Duration::from_secs(8), job)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            envelope::Payload::SessionCreateResponse(reply) => {
+                assert!(!sftp);
+                assert!(reply.session.is_none());
+                assert_eq!(
+                    reply.failure_code,
+                    cshell_ipc::SessionFailureCode::AuthenticationCancelled as i32
+                );
+            }
+            envelope::Payload::SftpResponse(reply) => {
+                assert!(sftp);
+                assert_eq!(reply.status, SftpStatus::Cancelled as i32);
+            }
+            _ => panic!("wrong response"),
         }
-        assert!(f.service.ssh_sessions.list().is_empty());assert!(f.service.ssh_sessions.get_sftp(session).is_err());
-        assert_eq!(f.passwords.load(Ordering::SeqCst),0,"cancelling OTP must never continue to password");
+        assert!(f.service.ssh_sessions.list().is_empty());
+        assert!(f.service.ssh_sessions.get_sftp(session).is_err());
+        assert_eq!(
+            f.passwords.load(Ordering::SeqCst),
+            0,
+            "cancelling OTP must never continue to password"
+        );
     }
-    let live=f.create().await;assert!(live.running,"explicit retry must still authenticate normally");
+    let live = f.create().await;
+    assert!(
+        live.running,
+        "explicit retry must still authenticate normally"
+    );
     f.close(id(&live)).await;
 }
 fn text(session: &SshSession) -> String {
@@ -472,7 +548,7 @@ async fn invalid_source_and_channel_denial_never_reauthenticate_or_damage_source
     let invalid = cshell_application::SftpConnectRequest {
         profile: ProfileId::new(),
         source_ssh_session: Some(source),
-        discover_directory:true,
+        discover_directory: true,
     };
     let envelope::Payload::SftpResponse(reply) = f
         .call(envelope::Payload::SftpRequest(SftpRequest {
@@ -528,9 +604,11 @@ async fn shared_transport_is_bounded_and_remote_exit_keeps_other_shell_alive() {
     wait(|| !original.running()).await;
     let other = f.service.ssh_sessions.get(copy).unwrap();
     echo(&other, "after-remote-exit").await;
-    let third_id=id(&f.duplicate(copy).await.session.unwrap());
-    let third=f.service.ssh_sessions.get(third_id).unwrap();
-    let observer=other.fork_transport().unwrap();let client=observer.client();observer.release().await;
+    let third_id = id(&f.duplicate(copy).await.session.unwrap());
+    let third = f.service.ssh_sessions.get(third_id).unwrap();
+    let observer = other.fork_transport().unwrap();
+    let client = observer.client();
+    observer.release().await;
     client.disconnect().await.unwrap();
     wait(|| !other.running() && !third.running()).await;
     f.counts(1);
@@ -539,229 +617,1085 @@ async fn shared_transport_is_bounded_and_remote_exit_keeps_other_shell_alive() {
     f.close(third_id).await;
 }
 
-#[tokio::test(flavor="multi_thread",worker_threads=3)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn sftp_initial_directory_uses_exact_source_shell_and_independent_home() {
-    let f=Fixture::new(None).await;
-    let original=f.create().await;let source=id(&original);
-    let first=f.service.ssh_sessions.get(source).unwrap();
-    echo(&first,"cd /srv/one").await;
-    let copy=id(&f.duplicate(source).await.session.unwrap());
-    let second=f.service.ssh_sessions.get(copy).unwrap();
-    echo(&second,"cd /srv/two").await;
-    assert_eq!(first.current_remote_directory().await.as_deref(),Some("/srv/one"));
-    assert_eq!(second.current_remote_directory().await.as_deref(),Some("/srv/two"));
-    for (session,directory) in [(source,"/srv/one"),(copy,"/srv/two")] {
-        let file_id=SessionId::new();
-        let reply=f.sftp(SftpOperation::ConnectProfile,file_id,Some(session)).await;
-        assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-        let info:cshell_application::SftpConnectionInfo=serde_json::from_slice(&reply.document_json).unwrap();
-        assert_eq!(info.initial_directory.as_deref(),Some(directory));
-        f.sftp(SftpOperation::Disconnect,file_id,None).await;
+    let f = Fixture::new(None).await;
+    let original = f.create().await;
+    let source = id(&original);
+    let first = f.service.ssh_sessions.get(source).unwrap();
+    echo(&first, "cd /srv/one").await;
+    let copy = id(&f.duplicate(source).await.session.unwrap());
+    let second = f.service.ssh_sessions.get(copy).unwrap();
+    echo(&second, "cd /srv/two").await;
+    assert_eq!(
+        first.current_remote_directory().await.as_deref(),
+        Some("/srv/one")
+    );
+    assert_eq!(
+        second.current_remote_directory().await.as_deref(),
+        Some("/srv/two")
+    );
+    for (session, directory) in [(source, "/srv/one"), (copy, "/srv/two")] {
+        let file_id = SessionId::new();
+        let reply = f
+            .sftp(SftpOperation::ConnectProfile, file_id, Some(session))
+            .await;
+        assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+        let info: cshell_application::SftpConnectionInfo =
+            serde_json::from_slice(&reply.document_json).unwrap();
+        assert_eq!(info.initial_directory.as_deref(), Some(directory));
+        f.sftp(SftpOperation::Disconnect, file_id, None).await;
     }
     f.counts(1);
-    let client=first.open_sftp().await.unwrap();
-    assert_eq!(client.resolve_path(".").await.unwrap(),"/home/cshell");
+    let client = first.open_sftp().await.unwrap();
+    assert_eq!(client.resolve_path(".").await.unwrap(), "/home/cshell");
     client.close().await.unwrap();
-    f.close(source).await;f.close(copy).await;
+    f.close(source).await;
+    f.close(copy).await;
 }
 
-async fn upload_call(f:&Fixture,source:SessionId,id:SessionId,operation:SftpOperation,options:Option<&cshell_application::TerminalUploadStart>)->cshell_application::TerminalUploadSnapshot {
-    let envelope::Payload::SftpResponse(reply)=f.call(envelope::Payload::SftpRequest(SftpRequest{operation:operation as i32,session_id:source.as_uuid().as_bytes().to_vec(),transfer_id:id.as_uuid().as_bytes().to_vec(),confirmed:options.is_some(),document_json:options.map(|o|serde_json::to_vec(o).unwrap()).unwrap_or_default(),..Default::default()})).await else{panic!()};
-    assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
+async fn upload_call(
+    f: &Fixture,
+    source: SessionId,
+    id: SessionId,
+    operation: SftpOperation,
+    options: Option<&cshell_application::TerminalUploadStart>,
+) -> cshell_application::TerminalUploadSnapshot {
+    let envelope::Payload::SftpResponse(reply) = f
+        .call(envelope::Payload::SftpRequest(SftpRequest {
+            operation: operation as i32,
+            session_id: source.as_uuid().as_bytes().to_vec(),
+            transfer_id: id.as_uuid().as_bytes().to_vec(),
+            confirmed: options.is_some(),
+            document_json: options
+                .map(|o| serde_json::to_vec(o).unwrap())
+                .unwrap_or_default(),
+            ..Default::default()
+        }))
+        .await
+    else {
+        panic!()
+    };
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
     serde_json::from_slice(&reply.document_json).unwrap()
 }
-async fn upload_wait(f:&Fixture,source:SessionId,id:SessionId,ready:bool)->cshell_application::TerminalUploadSnapshot {
-    tokio::time::timeout(Duration::from_secs(80),async {loop{
-        let view=upload_call(f,source,id,SftpOperation::TerminalUploadGet,None).await;
-        if view.state.finished() || ready && view.state==cshell_application::TerminalUploadState::Ready {return view;}
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }}).await.unwrap()
+async fn upload_wait(
+    f: &Fixture,
+    source: SessionId,
+    id: SessionId,
+    ready: bool,
+) -> cshell_application::TerminalUploadSnapshot {
+    tokio::time::timeout(Duration::from_secs(80), async {
+        loop {
+            let view = upload_call(f, source, id, SftpOperation::TerminalUploadGet, None).await;
+            if view.state.finished()
+                || ready && view.state == cshell_application::TerminalUploadState::Ready
+            {
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap()
 }
-async fn tree_call(f:&Fixture,source:SessionId,id:SessionId,op:SftpOperation,options:Option<&cshell_application::SftpTreeStart>)->cshell_application::SftpTreeSnapshot {
-    let envelope::Payload::SftpResponse(reply)=f.call(envelope::Payload::SftpRequest(SftpRequest{operation:op as i32,session_id:source.as_uuid().as_bytes().to_vec(),transfer_id:id.as_uuid().as_bytes().to_vec(),confirmed:op!=SftpOperation::TreeGet,document_json:options.map(|o|serde_json::to_vec(o).unwrap()).unwrap_or_default(),..Default::default()})).await else{panic!()};
-    assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);serde_json::from_slice(&reply.document_json).unwrap()
+async fn tree_call(
+    f: &Fixture,
+    source: SessionId,
+    id: SessionId,
+    op: SftpOperation,
+    options: Option<&cshell_application::SftpTreeStart>,
+) -> cshell_application::SftpTreeSnapshot {
+    let envelope::Payload::SftpResponse(reply) = f
+        .call(envelope::Payload::SftpRequest(SftpRequest {
+            operation: op as i32,
+            session_id: source.as_uuid().as_bytes().to_vec(),
+            transfer_id: id.as_uuid().as_bytes().to_vec(),
+            confirmed: op != SftpOperation::TreeGet,
+            document_json: options
+                .map(|o| serde_json::to_vec(o).unwrap())
+                .unwrap_or_default(),
+            ..Default::default()
+        }))
+        .await
+    else {
+        panic!()
+    };
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    serde_json::from_slice(&reply.document_json).unwrap()
 }
-async fn tree_wait(f:&Fixture,source:SessionId,id:SessionId)->cshell_application::SftpTreeSnapshot {
-    tokio::time::timeout(Duration::from_secs(80),async{loop{let v=tree_call(f,source,id,SftpOperation::TreeGet,None).await;if v.state.finished(){return v;}tokio::time::sleep(Duration::from_millis(30)).await;}}).await.unwrap()
+async fn tree_wait(
+    f: &Fixture,
+    source: SessionId,
+    id: SessionId,
+) -> cshell_application::SftpTreeSnapshot {
+    tokio::time::timeout(Duration::from_secs(80), async {
+        loop {
+            let v = tree_call(f, source, id, SftpOperation::TreeGet, None).await;
+            if v.state.finished() {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap()
 }
-#[tokio::test(flavor="multi_thread",worker_threads=4)]
-#[ignore="requires isolated CSHELL_RUNTIME_DIR"]
-async fn sftp_tree_pause_cancel_and_retry_known_conflicts_keep_completed_files(){
-    use cshell_application::{SftpTreeStart,SftpQueueDirection as D,TerminalUploadState as S};
-    let f=Fixture::new(None).await;let source=id(&f.create().await);let shell=f.service.ssh_sessions.get(source).unwrap();
-    let folder=f._root.path().join("tree-controls");std::fs::create_dir(&folder).unwrap();std::fs::write(folder.join("file.txt"),b"tree-controls-content").unwrap();
-    let options=SftpTreeStart{direction:D::Upload,paths:vec![folder.to_str().unwrap().into()],destination:"/srv/one".into(),verification:Default::default()};
-    let task=SessionId::new();tree_call(&f,source,task,SftpOperation::TreeStart,Some(&options)).await;tree_call(&f,source,task,SftpOperation::TreePause,None).await;
-    tokio::time::timeout(Duration::from_secs(5),async{loop{if tree_call(&f,source,task,SftpOperation::TreeGet,None).await.state==S::Paused{break;}tokio::time::sleep(Duration::from_millis(20)).await;}}).await.unwrap();
-    tree_call(&f,source,task,SftpOperation::TreeCancel,None).await;assert_eq!(tree_wait(&f,source,task).await.state,S::Cancelled);
-    let original=SessionId::new();tree_call(&f,source,original,SftpOperation::TreeStart,Some(&options)).await;assert_eq!(tree_wait(&f,source,original).await.state,S::Succeeded);
-    let conflict=SessionId::new();tree_call(&f,source,conflict,SftpOperation::TreeStart,Some(&options)).await;let failed=tree_wait(&f,source,conflict).await;assert_eq!(failed.state,S::Failed);assert!(failed.retryable,"{}",failed.detail);
-    let client=shell.open_sftp().await.unwrap();assert_eq!(client.metadata("/srv/one/tree-controls/file.txt",cshell_sftp::SymlinkPolicy::NoFollow).await.unwrap().size,Some(21));client.remove_entry("/srv/one/tree-controls/file.txt",false).await.unwrap();client.close().await.unwrap();
-    tree_call(&f,source,conflict,SftpOperation::TreeRetry,None).await;let done=tree_wait(&f,source,conflict).await;assert_eq!(done.state,S::Succeeded,"{}",done.detail);assert_eq!(done.completed,1);
-    f.counts(1);echo(&shell,"after-tree-controls").await;f.close(source).await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated CSHELL_RUNTIME_DIR"]
+async fn sftp_tree_pause_cancel_and_retry_known_conflicts_keep_completed_files() {
+    use cshell_application::{SftpQueueDirection as D, SftpTreeStart, TerminalUploadState as S};
+    let f = Fixture::new(None).await;
+    let source = id(&f.create().await);
+    let shell = f.service.ssh_sessions.get(source).unwrap();
+    let folder = f._root.path().join("tree-controls");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("file.txt"), b"tree-controls-content").unwrap();
+    let options = SftpTreeStart {
+        direction: D::Upload,
+        paths: vec![folder.to_str().unwrap().into()],
+        destination: "/srv/one".into(),
+        verification: Default::default(),
+    };
+    let task = SessionId::new();
+    tree_call(&f, source, task, SftpOperation::TreeStart, Some(&options)).await;
+    tree_call(&f, source, task, SftpOperation::TreePause, None).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if tree_call(&f, source, task, SftpOperation::TreeGet, None)
+                .await
+                .state
+                == S::Paused
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tree_call(&f, source, task, SftpOperation::TreeCancel, None).await;
+    assert_eq!(tree_wait(&f, source, task).await.state, S::Cancelled);
+    let original = SessionId::new();
+    tree_call(
+        &f,
+        source,
+        original,
+        SftpOperation::TreeStart,
+        Some(&options),
+    )
+    .await;
+    assert_eq!(tree_wait(&f, source, original).await.state, S::Succeeded);
+    let conflict = SessionId::new();
+    tree_call(
+        &f,
+        source,
+        conflict,
+        SftpOperation::TreeStart,
+        Some(&options),
+    )
+    .await;
+    let failed = tree_wait(&f, source, conflict).await;
+    assert_eq!(failed.state, S::Failed);
+    assert!(failed.retryable, "{}", failed.detail);
+    let client = shell.open_sftp().await.unwrap();
+    assert_eq!(
+        client
+            .metadata(
+                "/srv/one/tree-controls/file.txt",
+                cshell_sftp::SymlinkPolicy::NoFollow
+            )
+            .await
+            .unwrap()
+            .size,
+        Some(21)
+    );
+    client
+        .remove_entry("/srv/one/tree-controls/file.txt", false)
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+    tree_call(&f, source, conflict, SftpOperation::TreeRetry, None).await;
+    let done = tree_wait(&f, source, conflict).await;
+    assert_eq!(done.state, S::Succeeded, "{}", done.detail);
+    assert_eq!(done.completed, 1);
+    f.counts(1);
+    echo(&shell, "after-tree-controls").await;
+    f.close(source).await;
 }
-#[tokio::test(flavor="multi_thread",worker_threads=4)]
-#[ignore="requires isolated CSHELL_RUNTIME_DIR"]
-async fn sftp_tree_roundtrip_preserves_empty_directories_rolls_batches_and_never_reauthenticates(){
-    use cshell_application::{SftpTreeStart,SftpQueueDirection as D,TerminalUploadState as S};
-    let f=Fixture::new(None).await;let original=id(&f.create().await);let source=SessionId::new();
-    assert_eq!(f.sftp(SftpOperation::ConnectProfile,source,Some(original)).await.status,SftpStatus::Ok as i32);
-    let folder=f._root.path().join("tree-upload");std::fs::create_dir_all(folder.join("nested/empty")).unwrap();for n in 0..5{std::fs::write(folder.join(format!("nested/file-{n}")),format!("tree-content-{n}")).unwrap();}
-    let upload=SftpTreeStart{direction:D::Upload,paths:vec![folder.to_str().unwrap().into()],destination:"/srv/one".into(),verification:Default::default()};
-    let task=SessionId::new();tree_call(&f,source,task,SftpOperation::TreeStart,Some(&upload)).await;let result=tree_wait(&f,source,task).await;assert_eq!(result.state,S::Succeeded,"{}",result.detail);assert_eq!(result.completed,5);
-    let local=f._root.path().join("download-target");std::fs::create_dir(&local).unwrap();let download=SftpTreeStart{direction:D::Download,paths:vec!["/srv/one/tree-upload".into()],destination:local.to_str().unwrap().into(),verification:Default::default()};
-    let task=SessionId::new();tree_call(&f,source,task,SftpOperation::TreeStart,Some(&download)).await;let result=tree_wait(&f,source,task).await;assert_eq!(result.state,S::Succeeded,"{}",result.detail);assert_eq!(std::fs::read(local.join("tree-upload/nested/file-4")).unwrap(),b"tree-content-4");assert!(local.join("tree-upload/nested/empty").is_dir());
-    f.close(original).await;f.counts(1);assert!(f.service.ssh_sessions.get_sftp(source).unwrap().running());f.sftp(SftpOperation::Disconnect,source,None).await;
-}
-
-async fn sync_call(f:&Fixture,source:SessionId,id:SessionId,operation:SftpOperation,data:Vec<u8>)->SftpResponse {
-    let envelope::Payload::SftpResponse(reply)=f.call(envelope::Payload::SftpRequest(SftpRequest{operation:operation as i32,session_id:source.as_uuid().as_bytes().to_vec(),transfer_id:id.as_uuid().as_bytes().to_vec(),confirmed:operation==SftpOperation::SyncApply,document_json:data,..Default::default()})).await else{panic!()};reply
-}
-#[tokio::test(flavor="multi_thread",worker_threads=4)]
-#[ignore="requires isolated CSHELL_RUNTIME_DIR"]
-async fn sftp_sync_preview_roundtrip_rejects_changed_and_replayed_plans_without_reauth(){
-    use cshell_application::{SftpSyncOptions,SftpSyncApply,SftpSyncPreview,SftpQueueDirection as D,TerminalUploadState as S};
-    let f=Fixture::new(None).await;let original=id(&f.create().await);let source=SessionId::new();
-    assert_eq!(f.sftp(SftpOperation::ConnectProfile,source,Some(original)).await.status,SftpStatus::Ok as i32);
-    let shell=f.service.ssh_sessions.get(original).unwrap();let client=shell.open_sftp().await.unwrap();
-    client.create_directory("/srv/one/maturity-sync",0o755).await.unwrap();client.close().await.unwrap();
-    let local=f._root.path().join("sync-source");std::fs::create_dir_all(local.join("nested/empty")).unwrap();std::fs::write(local.join("nested/a.txt"),b"first-content").unwrap();
-    let options=SftpSyncOptions{local:local.to_str().unwrap().into(),remote:"/srv/one/maturity-sync".into(),direction:D::Upload,verification:Default::default(),compare_content:true,excludes:Vec::new(),preserve_modified:false};
-    let task=SessionId::new();let reply=sync_call(&f,source,task,SftpOperation::SyncScan,serde_json::to_vec(&options).unwrap()).await;
-    assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);let preview:SftpSyncPreview=serde_json::from_slice(&reply.document_json).unwrap();
-    let apply=SftpSyncApply{selected:preview.entries.iter().filter(|e|e.eligible(D::Upload,false)).map(|e|e.relative.clone()).collect(),backup_replace:false};
-    let data=serde_json::to_vec(&apply).unwrap();let reply=sync_call(&f,source,task,SftpOperation::SyncApply,data.clone()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-    let result=tree_wait(&f,source,task).await;assert_eq!(result.state,S::Succeeded,"{}",result.detail);assert_eq!(result.completed,1);assert_eq!(result.total_bytes,13);
-    assert_ne!(sync_call(&f,source,task,SftpOperation::SyncApply,data).await.status,SftpStatus::Ok as i32);
-    std::fs::File::options().write(true).open(local.join("nested/a.txt")).unwrap().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(10)).unwrap();
-    for compare_content in [false,true] {
-        let checked_options=SftpSyncOptions{compare_content,..options.clone()};let check=SessionId::new();
-        let reply=sync_call(&f,source,check,SftpOperation::SyncScan,serde_json::to_vec(&checked_options).unwrap()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-        let preview:SftpSyncPreview=serde_json::from_slice(&reply.document_json).unwrap();let file=preview.entries.iter().find(|e|e.relative=="nested/a.txt").unwrap();
-        assert_eq!(file.difference,if compare_content{cshell_application::SftpSyncDifference::ContentMatch}else{cshell_application::SftpSyncDifference::Changed});
-        if compare_content{assert!(!file.eligible(D::Upload,true));}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated CSHELL_RUNTIME_DIR"]
+async fn sftp_tree_roundtrip_preserves_empty_directories_rolls_batches_and_never_reauthenticates() {
+    use cshell_application::{SftpQueueDirection as D, SftpTreeStart, TerminalUploadState as S};
+    let f = Fixture::new(None).await;
+    let original = id(&f.create().await);
+    let source = SessionId::new();
+    assert_eq!(
+        f.sftp(SftpOperation::ConnectProfile, source, Some(original))
+            .await
+            .status,
+        SftpStatus::Ok as i32
+    );
+    let folder = f._root.path().join("tree-upload");
+    std::fs::create_dir_all(folder.join("nested/empty")).unwrap();
+    for n in 0..5 {
+        std::fs::write(
+            folder.join(format!("nested/file-{n}")),
+            format!("tree-content-{n}"),
+        )
+        .unwrap();
     }
-    std::fs::write(local.join("nested/a.txt"),b"other-content").unwrap();
-    std::fs::File::options().write(true).open(local.join("nested/a.txt")).unwrap().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(10)).unwrap();
-    let check=SessionId::new();let reply=sync_call(&f,source,check,SftpOperation::SyncScan,serde_json::to_vec(&options).unwrap()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-    let preview:SftpSyncPreview=serde_json::from_slice(&reply.document_json).unwrap();assert_eq!(preview.entries.iter().find(|e|e.relative=="nested/a.txt").unwrap().difference,cshell_application::SftpSyncDifference::ContentChanged);
-    std::fs::write(local.join("nested/a.txt"),b"first-content").unwrap();
-    std::fs::File::options().write(true).open(local.join("nested/a.txt")).unwrap().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(10)).unwrap();
-    let rejected=SftpSyncApply{selected:vec!["nested/a.txt".into()],backup_replace:true};
-    let reply=sync_call(&f,source,check,SftpOperation::SyncApply,serde_json::to_vec(&rejected).unwrap()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-    let guarded=tree_wait(&f,source,check).await;assert_eq!(guarded.state,S::Failed,"changed content must not be replayed with old digest: {}",guarded.detail);assert_eq!(guarded.completed,0);
-
-    let download=f._root.path().join("sync-download");std::fs::create_dir(&download).unwrap();let options=SftpSyncOptions{local:download.to_str().unwrap().into(),direction:D::Download,..options.clone()};
-    let task=SessionId::new();let reply=sync_call(&f,source,task,SftpOperation::SyncScan,serde_json::to_vec(&options).unwrap()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-    let preview:SftpSyncPreview=serde_json::from_slice(&reply.document_json).unwrap();let apply=SftpSyncApply{selected:preview.entries.iter().filter(|e|e.eligible(D::Download,false)).map(|e|e.relative.clone()).collect(),backup_replace:false};
-    assert_eq!(sync_call(&f,source,task,SftpOperation::SyncApply,serde_json::to_vec(&apply).unwrap()).await.status,SftpStatus::Ok as i32);
-    let result=tree_wait(&f,source,task).await;assert_eq!(result.state,S::Succeeded,"{}",result.detail);assert_eq!(std::fs::read(download.join("nested/a.txt")).unwrap(),b"first-content");assert!(download.join("nested/empty").is_dir());
-    let task=SessionId::new();let reply=sync_call(&f,source,task,SftpOperation::SyncScan,serde_json::to_vec(&options).unwrap()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-    std::fs::write(download.join("nested/a.txt"),b"external modification after preview").unwrap();
-    let apply=SftpSyncApply{selected:vec!["nested/a.txt".into()],backup_replace:true};assert_ne!(sync_call(&f,source,task,SftpOperation::SyncApply,serde_json::to_vec(&apply).unwrap()).await.status,SftpStatus::Ok as i32);assert_eq!(std::fs::read(download.join("nested/a.txt")).unwrap(),b"external modification after preview");
-    let task=SessionId::new();let reply=sync_call(&f,source,task,SftpOperation::SyncScan,serde_json::to_vec(&options).unwrap()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-    let apply=SftpSyncApply{selected:vec!["nested/a.txt".into()],backup_replace:true};
-    let reply=sync_call(&f,source,task,SftpOperation::SyncApply,serde_json::to_vec(&apply).unwrap()).await;assert_eq!(reply.status,SftpStatus::Ok as i32,"{}",reply.detail);
-    let result=tree_wait(&f,source,task).await;assert_eq!(result.state,S::Succeeded,"{}",result.detail);assert_eq!(std::fs::read(download.join("nested/a.txt")).unwrap(),b"first-content");
-    assert!(std::fs::read_dir(download.join("nested")).unwrap().flatten().any(|e|e.file_name()!="a.txt"&&std::fs::read(e.path()).is_ok_and(|v|v==b"external modification after preview")),"original destination backup must survive");
-    f.counts(1);f.sftp(SftpOperation::Disconnect,source,None).await;f.close(original).await;
+    let upload = SftpTreeStart {
+        direction: D::Upload,
+        paths: vec![folder.to_str().unwrap().into()],
+        destination: "/srv/one".into(),
+        verification: Default::default(),
+    };
+    let task = SessionId::new();
+    tree_call(&f, source, task, SftpOperation::TreeStart, Some(&upload)).await;
+    let result = tree_wait(&f, source, task).await;
+    assert_eq!(result.state, S::Succeeded, "{}", result.detail);
+    assert_eq!(result.completed, 5);
+    let local = f._root.path().join("download-target");
+    std::fs::create_dir(&local).unwrap();
+    let download = SftpTreeStart {
+        direction: D::Download,
+        paths: vec!["/srv/one/tree-upload".into()],
+        destination: local.to_str().unwrap().into(),
+        verification: Default::default(),
+    };
+    let task = SessionId::new();
+    tree_call(&f, source, task, SftpOperation::TreeStart, Some(&download)).await;
+    let result = tree_wait(&f, source, task).await;
+    assert_eq!(result.state, S::Succeeded, "{}", result.detail);
+    assert_eq!(
+        std::fs::read(local.join("tree-upload/nested/file-4")).unwrap(),
+        b"tree-content-4"
+    );
+    assert!(local.join("tree-upload/nested/empty").is_dir());
+    f.close(original).await;
+    f.counts(1);
+    assert!(f.service.ssh_sessions.get_sftp(source).unwrap().running());
+    f.sftp(SftpOperation::Disconnect, source, None).await;
 }
-#[tokio::test(flavor="multi_thread",worker_threads=4)]
-#[ignore="requires isolated CSHELL_RUNTIME_DIR"]
+
+async fn sync_call(
+    f: &Fixture,
+    source: SessionId,
+    id: SessionId,
+    operation: SftpOperation,
+    data: Vec<u8>,
+) -> SftpResponse {
+    let envelope::Payload::SftpResponse(reply) = f
+        .call(envelope::Payload::SftpRequest(SftpRequest {
+            operation: operation as i32,
+            session_id: source.as_uuid().as_bytes().to_vec(),
+            transfer_id: id.as_uuid().as_bytes().to_vec(),
+            confirmed: operation == SftpOperation::SyncApply,
+            document_json: data,
+            ..Default::default()
+        }))
+        .await
+    else {
+        panic!()
+    };
+    reply
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated CSHELL_RUNTIME_DIR"]
+async fn sftp_sync_preview_roundtrip_rejects_changed_and_replayed_plans_without_reauth() {
+    use cshell_application::{
+        SftpQueueDirection as D, SftpSyncApply, SftpSyncOptions, SftpSyncPreview,
+        TerminalUploadState as S,
+    };
+    let f = Fixture::new(None).await;
+    let original = id(&f.create().await);
+    let source = SessionId::new();
+    assert_eq!(
+        f.sftp(SftpOperation::ConnectProfile, source, Some(original))
+            .await
+            .status,
+        SftpStatus::Ok as i32
+    );
+    let shell = f.service.ssh_sessions.get(original).unwrap();
+    let client = shell.open_sftp().await.unwrap();
+    client
+        .create_directory("/srv/one/maturity-sync", 0o755)
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+    let local = f._root.path().join("sync-source");
+    std::fs::create_dir_all(local.join("nested/empty")).unwrap();
+    std::fs::write(local.join("nested/a.txt"), b"first-content").unwrap();
+    let options = SftpSyncOptions {
+        local: local.to_str().unwrap().into(),
+        remote: "/srv/one/maturity-sync".into(),
+        direction: D::Upload,
+        verification: Default::default(),
+        compare_content: true,
+        excludes: Vec::new(),
+        preserve_modified: false,
+    };
+    let task = SessionId::new();
+    let reply = sync_call(
+        &f,
+        source,
+        task,
+        SftpOperation::SyncScan,
+        serde_json::to_vec(&options).unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let preview: SftpSyncPreview = serde_json::from_slice(&reply.document_json).unwrap();
+    let apply = SftpSyncApply {
+        selected: preview
+            .entries
+            .iter()
+            .filter(|e| e.eligible(D::Upload, false))
+            .map(|e| e.relative.clone())
+            .collect(),
+        backup_replace: false,
+    };
+    let data = serde_json::to_vec(&apply).unwrap();
+    let reply = sync_call(&f, source, task, SftpOperation::SyncApply, data.clone()).await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let result = tree_wait(&f, source, task).await;
+    assert_eq!(result.state, S::Succeeded, "{}", result.detail);
+    assert_eq!(result.completed, 1);
+    assert_eq!(result.total_bytes, 13);
+    assert_ne!(
+        sync_call(&f, source, task, SftpOperation::SyncApply, data)
+            .await
+            .status,
+        SftpStatus::Ok as i32
+    );
+    std::fs::File::options()
+        .write(true)
+        .open(local.join("nested/a.txt"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(10))
+        .unwrap();
+    for compare_content in [false, true] {
+        let checked_options = SftpSyncOptions {
+            compare_content,
+            ..options.clone()
+        };
+        let check = SessionId::new();
+        let reply = sync_call(
+            &f,
+            source,
+            check,
+            SftpOperation::SyncScan,
+            serde_json::to_vec(&checked_options).unwrap(),
+        )
+        .await;
+        assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+        let preview: SftpSyncPreview = serde_json::from_slice(&reply.document_json).unwrap();
+        let file = preview
+            .entries
+            .iter()
+            .find(|e| e.relative == "nested/a.txt")
+            .unwrap();
+        assert_eq!(
+            file.difference,
+            if compare_content {
+                cshell_application::SftpSyncDifference::ContentMatch
+            } else {
+                cshell_application::SftpSyncDifference::Changed
+            }
+        );
+        if compare_content {
+            assert!(!file.eligible(D::Upload, true));
+        }
+    }
+    std::fs::write(local.join("nested/a.txt"), b"other-content").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(local.join("nested/a.txt"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(10))
+        .unwrap();
+    let check = SessionId::new();
+    let reply = sync_call(
+        &f,
+        source,
+        check,
+        SftpOperation::SyncScan,
+        serde_json::to_vec(&options).unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let preview: SftpSyncPreview = serde_json::from_slice(&reply.document_json).unwrap();
+    assert_eq!(
+        preview
+            .entries
+            .iter()
+            .find(|e| e.relative == "nested/a.txt")
+            .unwrap()
+            .difference,
+        cshell_application::SftpSyncDifference::ContentChanged
+    );
+    std::fs::write(local.join("nested/a.txt"), b"first-content").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(local.join("nested/a.txt"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(10))
+        .unwrap();
+    let rejected = SftpSyncApply {
+        selected: vec!["nested/a.txt".into()],
+        backup_replace: true,
+    };
+    let reply = sync_call(
+        &f,
+        source,
+        check,
+        SftpOperation::SyncApply,
+        serde_json::to_vec(&rejected).unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let guarded = tree_wait(&f, source, check).await;
+    assert_eq!(
+        guarded.state,
+        S::Failed,
+        "changed content must not be replayed with old digest: {}",
+        guarded.detail
+    );
+    assert_eq!(guarded.completed, 0);
+
+    let download = f._root.path().join("sync-download");
+    std::fs::create_dir(&download).unwrap();
+    let options = SftpSyncOptions {
+        local: download.to_str().unwrap().into(),
+        direction: D::Download,
+        ..options.clone()
+    };
+    let task = SessionId::new();
+    let reply = sync_call(
+        &f,
+        source,
+        task,
+        SftpOperation::SyncScan,
+        serde_json::to_vec(&options).unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let preview: SftpSyncPreview = serde_json::from_slice(&reply.document_json).unwrap();
+    let apply = SftpSyncApply {
+        selected: preview
+            .entries
+            .iter()
+            .filter(|e| e.eligible(D::Download, false))
+            .map(|e| e.relative.clone())
+            .collect(),
+        backup_replace: false,
+    };
+    assert_eq!(
+        sync_call(
+            &f,
+            source,
+            task,
+            SftpOperation::SyncApply,
+            serde_json::to_vec(&apply).unwrap()
+        )
+        .await
+        .status,
+        SftpStatus::Ok as i32
+    );
+    let result = tree_wait(&f, source, task).await;
+    assert_eq!(result.state, S::Succeeded, "{}", result.detail);
+    assert_eq!(
+        std::fs::read(download.join("nested/a.txt")).unwrap(),
+        b"first-content"
+    );
+    assert!(download.join("nested/empty").is_dir());
+    let task = SessionId::new();
+    let reply = sync_call(
+        &f,
+        source,
+        task,
+        SftpOperation::SyncScan,
+        serde_json::to_vec(&options).unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    std::fs::write(
+        download.join("nested/a.txt"),
+        b"external modification after preview",
+    )
+    .unwrap();
+    let apply = SftpSyncApply {
+        selected: vec!["nested/a.txt".into()],
+        backup_replace: true,
+    };
+    assert_ne!(
+        sync_call(
+            &f,
+            source,
+            task,
+            SftpOperation::SyncApply,
+            serde_json::to_vec(&apply).unwrap()
+        )
+        .await
+        .status,
+        SftpStatus::Ok as i32
+    );
+    assert_eq!(
+        std::fs::read(download.join("nested/a.txt")).unwrap(),
+        b"external modification after preview"
+    );
+    let task = SessionId::new();
+    let reply = sync_call(
+        &f,
+        source,
+        task,
+        SftpOperation::SyncScan,
+        serde_json::to_vec(&options).unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let apply = SftpSyncApply {
+        selected: vec!["nested/a.txt".into()],
+        backup_replace: true,
+    };
+    let reply = sync_call(
+        &f,
+        source,
+        task,
+        SftpOperation::SyncApply,
+        serde_json::to_vec(&apply).unwrap(),
+    )
+    .await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let result = tree_wait(&f, source, task).await;
+    assert_eq!(result.state, S::Succeeded, "{}", result.detail);
+    assert_eq!(
+        std::fs::read(download.join("nested/a.txt")).unwrap(),
+        b"first-content"
+    );
+    assert!(
+        std::fs::read_dir(download.join("nested"))
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name() != "a.txt"
+                && std::fs::read(e.path())
+                    .is_ok_and(|v| v == b"external modification after preview")),
+        "original destination backup must survive"
+    );
+    f.counts(1);
+    f.sftp(SftpOperation::Disconnect, source, None).await;
+    f.close(original).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated CSHELL_RUNTIME_DIR"]
 async fn terminal_drop_upload_preserves_folders_batches_and_current_directory_without_mfa() {
-    use cshell_application::{TerminalUploadProtocol as Protocol,TerminalUploadStart as Start,TerminalUploadState as State};
-    let f=Fixture::new(None).await;let source=id(&f.create().await);let shell=f.service.ssh_sessions.get(source).unwrap();
-    echo(&shell,"cd /srv/one").await;
-    let local=f._root.path().join("拖放文件夹");std::fs::create_dir_all(local.join("nested/empty")).unwrap();
-    for index in 0..5 {std::fs::write(local.join(format!("nested/file-{index:03}")),format!("data-{index}")).unwrap();}
-    let options=Start{paths:vec![local.to_str().unwrap().into()],protocol:Protocol::Zmodem,verification:Default::default(),confirm_before_start:false};
-    let task=SessionId::new();upload_call(&f,source,task,SftpOperation::TerminalUploadStart,Some(&options)).await;
-    let result=upload_wait(&f,source,task,false).await;
-    assert_eq!(result.state,State::Succeeded,"{}",result.detail);assert_eq!(result.protocol,Protocol::Sftp);assert_eq!(result.directory,"/srv/one");assert_eq!(result.completed,5);
-    let client=shell.open_sftp().await.unwrap();
-    assert!(client.directory_path("/srv/one/拖放文件夹/nested/empty",false).await.is_ok());
-    assert_eq!(client.metadata("/srv/one/拖放文件夹/nested/file-004",cshell_sftp::SymlinkPolicy::NoFollow).await.unwrap().size,Some(6));
-    assert!(client.metadata("/home/cshell/拖放文件夹/nested/file-004",cshell_sftp::SymlinkPolicy::NoFollow).await.is_err());
-    client.close().await.unwrap();echo(&shell,"after-drop-upload").await;f.counts(1);f.close(source).await;
+    use cshell_application::{
+        TerminalUploadProtocol as Protocol, TerminalUploadStart as Start,
+        TerminalUploadState as State,
+    };
+    let f = Fixture::new(None).await;
+    let source = id(&f.create().await);
+    let shell = f.service.ssh_sessions.get(source).unwrap();
+    echo(&shell, "cd /srv/one").await;
+    let local = f._root.path().join("拖放文件夹");
+    std::fs::create_dir_all(local.join("nested/empty")).unwrap();
+    for index in 0..5 {
+        std::fs::write(
+            local.join(format!("nested/file-{index:03}")),
+            format!("data-{index}"),
+        )
+        .unwrap();
+    }
+    let options = Start {
+        paths: vec![local.to_str().unwrap().into()],
+        protocol: Protocol::Zmodem,
+        verification: Default::default(),
+        confirm_before_start: false,
+    };
+    let task = SessionId::new();
+    upload_call(
+        &f,
+        source,
+        task,
+        SftpOperation::TerminalUploadStart,
+        Some(&options),
+    )
+    .await;
+    let result = upload_wait(&f, source, task, false).await;
+    assert_eq!(result.state, State::Succeeded, "{}", result.detail);
+    assert_eq!(result.protocol, Protocol::Sftp);
+    assert_eq!(result.directory, "/srv/one");
+    assert_eq!(result.completed, 5);
+    let client = shell.open_sftp().await.unwrap();
+    assert!(
+        client
+            .directory_path("/srv/one/拖放文件夹/nested/empty", false)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        client
+            .metadata(
+                "/srv/one/拖放文件夹/nested/file-004",
+                cshell_sftp::SymlinkPolicy::NoFollow
+            )
+            .await
+            .unwrap()
+            .size,
+        Some(6)
+    );
+    assert!(
+        client
+            .metadata(
+                "/home/cshell/拖放文件夹/nested/file-004",
+                cshell_sftp::SymlinkPolicy::NoFollow
+            )
+            .await
+            .is_err()
+    );
+    client.close().await.unwrap();
+    echo(&shell, "after-drop-upload").await;
+    f.counts(1);
+    f.close(source).await;
 }
-#[tokio::test(flavor="multi_thread",worker_threads=4)]
-#[ignore="requires isolated CSHELL_RUNTIME_DIR"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated CSHELL_RUNTIME_DIR"]
 async fn terminal_drop_confirmation_cancel_conflicts_and_zmodem_keep_source_terminal_usable() {
-    use cshell_application::{TerminalUploadProtocol as Protocol,TerminalUploadStart as Start,TerminalUploadState as State};
-    let f=Fixture::new(None).await;let source=id(&f.create().await);let shell=f.service.ssh_sessions.get(source).unwrap();echo(&shell,"cd /srv/two").await;
-    let file=f._root.path().join("terminal-drop.bin");std::fs::write(&file,b"original-content").unwrap();
-    let mut options=Start{paths:vec![file.to_str().unwrap().into()],protocol:Protocol::Sftp,verification:Default::default(),confirm_before_start:true};
-    let cancelled=SessionId::new();upload_call(&f,source,cancelled,SftpOperation::TerminalUploadStart,Some(&options)).await;
-    let prepared=upload_wait(&f,source,cancelled,true).await;assert_eq!(prepared.state,State::Ready);assert_eq!(prepared.directory,"/srv/two");
-    upload_call(&f,source,cancelled,SftpOperation::TerminalUploadCancel,None).await;
-    assert_eq!(upload_wait(&f,source,cancelled,false).await.state,State::Cancelled);
-    let client=shell.open_sftp().await.unwrap();assert!(client.metadata("/srv/two/terminal-drop.bin",cshell_sftp::SymlinkPolicy::NoFollow).await.is_err());client.close().await.unwrap();
-    let task=SessionId::new();upload_call(&f,source,task,SftpOperation::TerminalUploadStart,Some(&options)).await;assert_eq!(upload_wait(&f,source,task,true).await.state,State::Ready);
-    echo(&shell,"cd /srv/one").await;
-    upload_call(&f,source,task,SftpOperation::TerminalUploadContinue,None).await;
-    let result=upload_wait(&f,source,task,false).await;assert_eq!(result.state,State::Succeeded,"{}",result.detail);assert_eq!(result.directory,"/srv/two");
-    echo(&shell,"cd /srv/two").await;std::fs::write(&file,b"changed-local-content").unwrap();options.confirm_before_start=false;
-    let conflict=SessionId::new();upload_call(&f,source,conflict,SftpOperation::TerminalUploadStart,Some(&options)).await;
-    assert_eq!(upload_wait(&f,source,conflict,false).await.state,State::Failed);
-    let client=shell.open_sftp().await.unwrap();assert_eq!(client.metadata("/srv/two/terminal-drop.bin",cshell_sftp::SymlinkPolicy::NoFollow).await.unwrap().size,Some(16));client.close().await.unwrap();
-    let zfile=f._root.path().join("zmodem-drop.bin");std::fs::write(&zfile,vec![0x8a;100_000]).unwrap();options.paths=vec![zfile.to_str().unwrap().into()];options.protocol=Protocol::Zmodem;
-    let ztask=SessionId::new();upload_call(&f,source,ztask,SftpOperation::TerminalUploadStart,Some(&options)).await;
-    let result=upload_wait(&f,source,ztask,false).await;assert_eq!(result.state,State::Succeeded,"{}",result.detail);assert_eq!(result.protocol,Protocol::Zmodem);
-    let client=shell.open_sftp().await.unwrap();assert_eq!(client.metadata("/srv/two/zmodem-drop.bin",cshell_sftp::SymlinkPolicy::NoFollow).await.unwrap().size,Some(100_000));client.close().await.unwrap();
-    echo(&shell,"after-zmodem-drop").await;f.counts(1);f.close(source).await;
+    use cshell_application::{
+        TerminalUploadProtocol as Protocol, TerminalUploadStart as Start,
+        TerminalUploadState as State,
+    };
+    let f = Fixture::new(None).await;
+    let source = id(&f.create().await);
+    let shell = f.service.ssh_sessions.get(source).unwrap();
+    echo(&shell, "cd /srv/two").await;
+    let file = f._root.path().join("terminal-drop.bin");
+    std::fs::write(&file, b"original-content").unwrap();
+    let mut options = Start {
+        paths: vec![file.to_str().unwrap().into()],
+        protocol: Protocol::Sftp,
+        verification: Default::default(),
+        confirm_before_start: true,
+    };
+    let cancelled = SessionId::new();
+    upload_call(
+        &f,
+        source,
+        cancelled,
+        SftpOperation::TerminalUploadStart,
+        Some(&options),
+    )
+    .await;
+    let prepared = upload_wait(&f, source, cancelled, true).await;
+    assert_eq!(prepared.state, State::Ready);
+    assert_eq!(prepared.directory, "/srv/two");
+    upload_call(
+        &f,
+        source,
+        cancelled,
+        SftpOperation::TerminalUploadCancel,
+        None,
+    )
+    .await;
+    assert_eq!(
+        upload_wait(&f, source, cancelled, false).await.state,
+        State::Cancelled
+    );
+    let client = shell.open_sftp().await.unwrap();
+    assert!(
+        client
+            .metadata(
+                "/srv/two/terminal-drop.bin",
+                cshell_sftp::SymlinkPolicy::NoFollow
+            )
+            .await
+            .is_err()
+    );
+    client.close().await.unwrap();
+    let task = SessionId::new();
+    upload_call(
+        &f,
+        source,
+        task,
+        SftpOperation::TerminalUploadStart,
+        Some(&options),
+    )
+    .await;
+    assert_eq!(
+        upload_wait(&f, source, task, true).await.state,
+        State::Ready
+    );
+    echo(&shell, "cd /srv/one").await;
+    upload_call(
+        &f,
+        source,
+        task,
+        SftpOperation::TerminalUploadContinue,
+        None,
+    )
+    .await;
+    let result = upload_wait(&f, source, task, false).await;
+    assert_eq!(result.state, State::Succeeded, "{}", result.detail);
+    assert_eq!(result.directory, "/srv/two");
+    echo(&shell, "cd /srv/two").await;
+    std::fs::write(&file, b"changed-local-content").unwrap();
+    options.confirm_before_start = false;
+    let conflict = SessionId::new();
+    upload_call(
+        &f,
+        source,
+        conflict,
+        SftpOperation::TerminalUploadStart,
+        Some(&options),
+    )
+    .await;
+    assert_eq!(
+        upload_wait(&f, source, conflict, false).await.state,
+        State::Failed
+    );
+    let client = shell.open_sftp().await.unwrap();
+    assert_eq!(
+        client
+            .metadata(
+                "/srv/two/terminal-drop.bin",
+                cshell_sftp::SymlinkPolicy::NoFollow
+            )
+            .await
+            .unwrap()
+            .size,
+        Some(16)
+    );
+    client.close().await.unwrap();
+    let zfile = f._root.path().join("zmodem-drop.bin");
+    std::fs::write(&zfile, vec![0x8a; 100_000]).unwrap();
+    options.paths = vec![zfile.to_str().unwrap().into()];
+    options.protocol = Protocol::Zmodem;
+    let ztask = SessionId::new();
+    upload_call(
+        &f,
+        source,
+        ztask,
+        SftpOperation::TerminalUploadStart,
+        Some(&options),
+    )
+    .await;
+    let result = upload_wait(&f, source, ztask, false).await;
+    assert_eq!(result.state, State::Succeeded, "{}", result.detail);
+    assert_eq!(result.protocol, Protocol::Zmodem);
+    let client = shell.open_sftp().await.unwrap();
+    assert_eq!(
+        client
+            .metadata(
+                "/srv/two/zmodem-drop.bin",
+                cshell_sftp::SymlinkPolicy::NoFollow
+            )
+            .await
+            .unwrap()
+            .size,
+        Some(100_000)
+    );
+    client.close().await.unwrap();
+    echo(&shell, "after-zmodem-drop").await;
+    f.counts(1);
+    f.close(source).await;
 }
 
-#[tokio::test(flavor="multi_thread",worker_threads=4)]
-#[ignore="requires isolated CSHELL_RUNTIME_DIR"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated CSHELL_RUNTIME_DIR"]
 async fn terminal_drop_pause_cancel_source_close_and_request_identity_are_enforced() {
-    use cshell_application::{TerminalUploadProtocol as Protocol,TerminalUploadStart as Start,TerminalUploadState as State};
-    let f=Fixture::new(None).await;let source=id(&f.create().await);let shell=f.service.ssh_sessions.get(source).unwrap();echo(&shell,"cd /srv/one").await;
-    let folder=f._root.path().join("pause-case");std::fs::create_dir(&folder).unwrap();
-    for n in 0..4 {std::fs::write(folder.join(format!("part-{n}")),vec![0x61;1_000_000]).unwrap();}
-    let options=Start{paths:vec![folder.to_str().unwrap().into()],protocol:Protocol::Sftp,verification:Default::default(),confirm_before_start:true};
-    let task=SessionId::new();upload_call(&f,source,task,SftpOperation::TerminalUploadStart,Some(&options)).await;assert_eq!(upload_wait(&f,source,task,true).await.state,State::Ready);
-    for (request,status) in [
-        (SftpRequest{operation:SftpOperation::TerminalUploadGet as i32,session_id:SessionId::new().as_uuid().as_bytes().to_vec(),transfer_id:task.as_uuid().as_bytes().to_vec(),..Default::default()},SftpStatus::Unavailable),
-        (SftpRequest{operation:SftpOperation::TerminalUploadStart as i32,session_id:source.as_uuid().as_bytes().to_vec(),transfer_id:task.as_uuid().as_bytes().to_vec(),confirmed:true,document_json:serde_json::to_vec(&options).unwrap(),..Default::default()},SftpStatus::Conflict),
-        (SftpRequest{operation:SftpOperation::TerminalUploadGet as i32,session_id:source.as_uuid().as_bytes().to_vec(),transfer_id:task.as_uuid().as_bytes().to_vec(),remote_path:"/unexpected".into(),..Default::default()},SftpStatus::InvalidRequest)
-    ] {assert_eq!(f.service.sftp.handle(request,&f.service.ssh_sessions).await.status,status as i32);}
-    upload_call(&f,source,task,SftpOperation::TerminalUploadContinue,None).await;
-    upload_call(&f,source,task,SftpOperation::TerminalUploadPause,None).await;
-    tokio::time::timeout(Duration::from_secs(12),async {loop{let s=upload_call(&f,source,task,SftpOperation::TerminalUploadGet,None).await;assert!(!s.state.finished(),"{}",s.detail);if s.state==State::Paused{break;}tokio::time::sleep(Duration::from_millis(50)).await;}}).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;let paused=upload_call(&f,source,task,SftpOperation::TerminalUploadGet,None).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;let still=upload_call(&f,source,task,SftpOperation::TerminalUploadGet,None).await;assert_eq!(still.state,State::Paused);assert_eq!(still.bytes,paused.bytes);
-    upload_call(&f,source,task,SftpOperation::TerminalUploadContinue,None).await;
-    tokio::time::timeout(Duration::from_secs(12),async {loop{let s=upload_call(&f,source,task,SftpOperation::TerminalUploadGet,None).await;if s.state!=State::Paused {break;}tokio::time::sleep(Duration::from_millis(30)).await;}}).await.unwrap();
-    upload_call(&f,source,task,SftpOperation::TerminalUploadCancel,None).await;assert_eq!(upload_wait(&f,source,task,false).await.state,State::Cancelled);echo(&shell,"after-cancelled-upload").await;
-    let waiting=SessionId::new();upload_call(&f,source,waiting,SftpOperation::TerminalUploadStart,Some(&options)).await;assert_eq!(upload_wait(&f,source,waiting,true).await.state,State::Ready);
-    f.close(source).await;assert_eq!(upload_wait(&f,source,waiting,false).await.state,State::Cancelled);f.counts(1);
+    use cshell_application::{
+        TerminalUploadProtocol as Protocol, TerminalUploadStart as Start,
+        TerminalUploadState as State,
+    };
+    let f = Fixture::new(None).await;
+    let source = id(&f.create().await);
+    let shell = f.service.ssh_sessions.get(source).unwrap();
+    echo(&shell, "cd /srv/one").await;
+    let folder = f._root.path().join("pause-case");
+    std::fs::create_dir(&folder).unwrap();
+    for n in 0..4 {
+        std::fs::write(folder.join(format!("part-{n}")), vec![0x61; 1_000_000]).unwrap();
+    }
+    let options = Start {
+        paths: vec![folder.to_str().unwrap().into()],
+        protocol: Protocol::Sftp,
+        verification: Default::default(),
+        confirm_before_start: true,
+    };
+    let task = SessionId::new();
+    upload_call(
+        &f,
+        source,
+        task,
+        SftpOperation::TerminalUploadStart,
+        Some(&options),
+    )
+    .await;
+    assert_eq!(
+        upload_wait(&f, source, task, true).await.state,
+        State::Ready
+    );
+    for (request, status) in [
+        (
+            SftpRequest {
+                operation: SftpOperation::TerminalUploadGet as i32,
+                session_id: SessionId::new().as_uuid().as_bytes().to_vec(),
+                transfer_id: task.as_uuid().as_bytes().to_vec(),
+                ..Default::default()
+            },
+            SftpStatus::Unavailable,
+        ),
+        (
+            SftpRequest {
+                operation: SftpOperation::TerminalUploadStart as i32,
+                session_id: source.as_uuid().as_bytes().to_vec(),
+                transfer_id: task.as_uuid().as_bytes().to_vec(),
+                confirmed: true,
+                document_json: serde_json::to_vec(&options).unwrap(),
+                ..Default::default()
+            },
+            SftpStatus::Conflict,
+        ),
+        (
+            SftpRequest {
+                operation: SftpOperation::TerminalUploadGet as i32,
+                session_id: source.as_uuid().as_bytes().to_vec(),
+                transfer_id: task.as_uuid().as_bytes().to_vec(),
+                remote_path: "/unexpected".into(),
+                ..Default::default()
+            },
+            SftpStatus::InvalidRequest,
+        ),
+    ] {
+        assert_eq!(
+            f.service
+                .sftp
+                .handle(request, &f.service.ssh_sessions)
+                .await
+                .status,
+            status as i32
+        );
+    }
+    upload_call(
+        &f,
+        source,
+        task,
+        SftpOperation::TerminalUploadContinue,
+        None,
+    )
+    .await;
+    upload_call(&f, source, task, SftpOperation::TerminalUploadPause, None).await;
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let s = upload_call(&f, source, task, SftpOperation::TerminalUploadGet, None).await;
+            assert!(!s.state.finished(), "{}", s.detail);
+            if s.state == State::Paused {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let paused = upload_call(&f, source, task, SftpOperation::TerminalUploadGet, None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let still = upload_call(&f, source, task, SftpOperation::TerminalUploadGet, None).await;
+    assert_eq!(still.state, State::Paused);
+    assert_eq!(still.bytes, paused.bytes);
+    upload_call(
+        &f,
+        source,
+        task,
+        SftpOperation::TerminalUploadContinue,
+        None,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let s = upload_call(&f, source, task, SftpOperation::TerminalUploadGet, None).await;
+            if s.state != State::Paused {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    upload_call(&f, source, task, SftpOperation::TerminalUploadCancel, None).await;
+    assert_eq!(
+        upload_wait(&f, source, task, false).await.state,
+        State::Cancelled
+    );
+    echo(&shell, "after-cancelled-upload").await;
+    let waiting = SessionId::new();
+    upload_call(
+        &f,
+        source,
+        waiting,
+        SftpOperation::TerminalUploadStart,
+        Some(&options),
+    )
+    .await;
+    assert_eq!(
+        upload_wait(&f, source, waiting, true).await.state,
+        State::Ready
+    );
+    f.close(source).await;
+    assert_eq!(
+        upload_wait(&f, source, waiting, false).await.state,
+        State::Cancelled
+    );
+    f.counts(1);
 }
 
-async fn vault_connection_prompt(f:&Fixture)->cshell_ipc::KeyboardAuthChallenge {
-    tokio::time::timeout(Duration::from_secs(20),async {loop {let envelope::Payload::VaultResponse(r)=f.call(envelope::Payload::VaultRequest(VaultRequest::new(VaultOperation::KeyboardAuthPoll))).await else{panic!()};if let Some(p)=r.auth_challenge{return p;}tokio::time::sleep(Duration::from_millis(20)).await;}}).await.unwrap()
+async fn vault_connection_prompt(f: &Fixture) -> cshell_ipc::KeyboardAuthChallenge {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let envelope::Payload::VaultResponse(r) = f
+                .call(envelope::Payload::VaultRequest(VaultRequest::new(
+                    VaultOperation::KeyboardAuthPoll,
+                )))
+                .await
+            else {
+                panic!()
+            };
+            if let Some(p) = r.auth_challenge {
+                return p;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap()
 }
-async fn vault_connection_answer(f:&Fixture,p:cshell_ipc::KeyboardAuthChallenge,password:&str,cancel:bool){let mut r=VaultRequest::new(VaultOperation::KeyboardAuthRespond);r.auth_answer=Some(KeyboardAuthAnswer{id:p.id,answers:if cancel{vec![]}else{vec![password.into()]},cancel,username:String::new(),save_credentials:false});let envelope::Payload::VaultResponse(r)=f.call(envelope::Payload::VaultRequest(r)).await else{panic!()};assert_eq!(r.status,VaultControlStatus::Ok as i32);}
-#[tokio::test(flavor="multi_thread",worker_threads=4)]
+async fn vault_connection_answer(
+    f: &Fixture,
+    p: cshell_ipc::KeyboardAuthChallenge,
+    password: &str,
+    cancel: bool,
+) {
+    let mut r = VaultRequest::new(VaultOperation::KeyboardAuthRespond);
+    r.auth_answer = Some(KeyboardAuthAnswer {
+        id: p.id,
+        answers: if cancel {
+            vec![]
+        } else {
+            vec![password.into()]
+        },
+        cancel,
+        username: String::new(),
+        save_credentials: false,
+    });
+    let envelope::Payload::VaultResponse(r) = f.call(envelope::Payload::VaultRequest(r)).await
+    else {
+        panic!()
+    };
+    assert_eq!(r.status, VaultControlStatus::Ok as i32);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn vault_protection_unlock_precedes_ssh_and_sftp_mfa_and_never_reaches_the_server() {
-    for sftp in [false,true] {
-        let f=Fixture::new(None).await;let vault=&f.service.profiles.as_ref().unwrap().vault;vault.lock();let file_id=SessionId::new();
-        let payload=if sftp {envelope::Payload::SftpRequest(SftpRequest{operation:SftpOperation::ConnectProfile as i32,session_id:file_id.as_uuid().as_bytes().to_vec(),document_json:serde_json::to_vec(&cshell_application::SftpConnectRequest{profile:f.profile,source_ssh_session:None,discover_directory:true}).unwrap(),..Default::default()})}else{envelope::Payload::SessionCreateRequest(SessionCreateRequest{profile_id:Some(f.profile.as_uuid().as_bytes().to_vec()),rows:24,cols:80,..Default::default()})};
-        let service=f.service.clone();let work=tokio::spawn(async move{ipc(&service,payload).await});
-        let p=vault_connection_prompt(&f).await;assert!(p.vault_unlock);assert_eq!(f.tcp.load(Ordering::SeqCst),0);vault_connection_answer(&f,p,"shared-ssh-test-master",false).await;
-        let otp=vault_connection_prompt(&f).await;assert!(!otp.vault_unlock);assert!(otp.prompts[0].text.contains("Verification"));
-        #[cfg(any(windows, target_os="linux", target_os="macos"))]
+    for sftp in [false, true] {
+        let f = Fixture::new(None).await;
+        let vault = &f.service.profiles.as_ref().unwrap().vault;
+        vault.lock();
+        let file_id = SessionId::new();
+        let payload = if sftp {
+            envelope::Payload::SftpRequest(SftpRequest {
+                operation: SftpOperation::ConnectProfile as i32,
+                session_id: file_id.as_uuid().as_bytes().to_vec(),
+                document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    profile: f.profile,
+                    source_ssh_session: None,
+                    discover_directory: true,
+                })
+                .unwrap(),
+                ..Default::default()
+            })
+        } else {
+            envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                profile_id: Some(f.profile.as_uuid().as_bytes().to_vec()),
+                rows: 24,
+                cols: 80,
+                ..Default::default()
+            })
+        };
+        let service = f.service.clone();
+        let work = tokio::spawn(async move { ipc(&service, payload).await });
+        let p = vault_connection_prompt(&f).await;
+        assert!(p.vault_unlock);
+        assert_eq!(f.tcp.load(Ordering::SeqCst), 0);
+        vault_connection_answer(&f, p, "shared-ssh-test-master", false).await;
+        let otp = vault_connection_prompt(&f).await;
+        assert!(!otp.vault_unlock);
+        assert!(otp.prompts[0].text.contains("Verification"));
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         vault.observe_desktop_session(cshell_ipc::VaultSessionState::Locked);
-        assert!(vault.response(None).unlocked, "locking the desktop must not interrupt pending SSH/SFTP MFA");
-        vault_connection_answer(&f,otp,"654321",false).await;
-        let result=tokio::time::timeout(Duration::from_secs(20),work).await.unwrap().unwrap();
-        if sftp {let envelope::Payload::SftpResponse(r)=result else{panic!()};assert_eq!(r.status,SftpStatus::Ok as i32,"{}",r.detail);f.sftp(SftpOperation::Disconnect,file_id,None).await;}
-        else {let envelope::Payload::SessionCreateResponse(r)=result else{panic!()};let source=id(&r.session.unwrap_or_else(||panic!("{}",r.detail)));vault.lock();assert_eq!(f.sftp(SftpOperation::ConnectProfile,file_id,Some(source)).await.status,SftpStatus::Ok as i32);assert!(!vault.response(None).unlocked);f.sftp(SftpOperation::Disconnect,file_id,None).await;f.close(source).await;}
+        assert!(
+            vault.response(None).unlocked,
+            "locking the desktop must not interrupt pending SSH/SFTP MFA"
+        );
+        vault_connection_answer(&f, otp, "654321", false).await;
+        let result = tokio::time::timeout(Duration::from_secs(20), work)
+            .await
+            .unwrap()
+            .unwrap();
+        if sftp {
+            let envelope::Payload::SftpResponse(r) = result else {
+                panic!()
+            };
+            assert_eq!(r.status, SftpStatus::Ok as i32, "{}", r.detail);
+            f.sftp(SftpOperation::Disconnect, file_id, None).await;
+        } else {
+            let envelope::Payload::SessionCreateResponse(r) = result else {
+                panic!()
+            };
+            let source = id(&r.session.unwrap_or_else(|| panic!("{}", r.detail)));
+            vault.lock();
+            assert_eq!(
+                f.sftp(SftpOperation::ConnectProfile, file_id, Some(source))
+                    .await
+                    .status,
+                SftpStatus::Ok as i32
+            );
+            assert!(!vault.response(None).unlocked);
+            f.sftp(SftpOperation::Disconnect, file_id, None).await;
+            f.close(source).await;
+        }
         f.counts(1);
     }
 }
-#[tokio::test(flavor="multi_thread",worker_threads=3)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn vault_protection_cancelled_sftp_unlock_closes_attempt_without_contacting_server() {
-    let f=Fixture::new(None).await;f.service.profiles.as_ref().unwrap().vault.lock();let file_id=SessionId::new();let service=f.service.clone();let profile=f.profile;
-    let work=tokio::spawn(async move{ipc(&service,envelope::Payload::SftpRequest(SftpRequest{operation:SftpOperation::ConnectProfile as i32,session_id:file_id.as_uuid().as_bytes().to_vec(),document_json:serde_json::to_vec(&cshell_application::SftpConnectRequest{profile,source_ssh_session:None,discover_directory:true}).unwrap(),..Default::default()})).await});
-    let p=vault_connection_prompt(&f).await;assert!(p.vault_unlock);vault_connection_answer(&f,p,"",true).await;let envelope::Payload::SftpResponse(r)=work.await.unwrap() else{panic!()};assert_eq!(r.status,SftpStatus::Cancelled as i32);f.counts(0);
+    let f = Fixture::new(None).await;
+    f.service.profiles.as_ref().unwrap().vault.lock();
+    let file_id = SessionId::new();
+    let service = f.service.clone();
+    let profile = f.profile;
+    let work = tokio::spawn(async move {
+        ipc(
+            &service,
+            envelope::Payload::SftpRequest(SftpRequest {
+                operation: SftpOperation::ConnectProfile as i32,
+                session_id: file_id.as_uuid().as_bytes().to_vec(),
+                document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    profile,
+                    source_ssh_session: None,
+                    discover_directory: true,
+                })
+                .unwrap(),
+                ..Default::default()
+            }),
+        )
+        .await
+    });
+    let p = vault_connection_prompt(&f).await;
+    assert!(p.vault_unlock);
+    vault_connection_answer(&f, p, "", true).await;
+    let envelope::Payload::SftpResponse(r) = work.await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(r.status, SftpStatus::Cancelled as i32);
+    f.counts(0);
 }

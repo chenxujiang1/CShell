@@ -124,7 +124,7 @@ impl DesktopApp {
             .map_or(text.len(), |i| offset + i);
         Some((text[start..end].to_owned(), link))
     }
-    pub(crate) fn capture_terminal_context(&self) -> Context {
+    pub(super) fn capture_terminal_context(&self) -> Context {
         let selected = self
             .terminal_selection_text()
             .and_then(Result::ok)

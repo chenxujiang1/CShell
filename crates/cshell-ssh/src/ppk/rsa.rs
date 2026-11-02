@@ -15,7 +15,9 @@ use zeroize::Zeroizing;
 pub(super) fn error(error: RsaKeyError) -> PpkError {
     match error {
         RsaKeyError::Busy => PpkError::Busy,
-        RsaKeyError::Parameters | RsaKeyError::ModulusBits | RsaKeyError::PublicExponent => PpkError::RsaParameters,
+        RsaKeyError::Parameters | RsaKeyError::ModulusBits | RsaKeyError::PublicExponent => {
+            PpkError::RsaParameters
+        }
         _ => PpkError::KeyConsistency,
     }
 }
@@ -29,7 +31,7 @@ fn binary(lines: &[&str]) -> Result<Zeroizing<Vec<u8>>, PpkError> {
         .map_err(|_| PpkError::Format)
 }
 fn hex(text: &str) -> Result<Zeroizing<Vec<u8>>, PpkError> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err(PpkError::Format);
     }
     let mut result = Zeroizing::new(Vec::with_capacity(text.len() / 2));

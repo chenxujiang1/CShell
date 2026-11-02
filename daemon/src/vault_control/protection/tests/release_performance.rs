@@ -68,6 +68,10 @@ fn p95(samples: &mut [f64]) -> f64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit optimized release authentication performance gate"]
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "This explicit performance gate must refuse debug builds"
+)]
 async fn release_unlock_concurrency_and_cancellation() {
     assert!(!cfg!(debug_assertions), "run this gate with --release");
     for concurrency in [1, 4, 16] {

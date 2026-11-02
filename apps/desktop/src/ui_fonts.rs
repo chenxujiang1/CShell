@@ -14,8 +14,8 @@ pub fn install(context: &Context) {
     );
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         // Keep the primary Latin font, but prefer text symbols over emoji faces.
-        let chain=fonts.families.entry(family).or_default();
-        chain.insert(1.min(chain.len()),CJK_FONT_NAME.to_owned());
+        let chain = fonts.families.entry(family).or_default();
+        chain.insert(1.min(chain.len()), CJK_FONT_NAME.to_owned());
     }
     context.set_fonts(fonts);
 }
@@ -37,7 +37,13 @@ mod tests {
                 "菜单 SSH连接 新建配置 主机密钥 中文用户名"
             ));
             assert!(fonts.has_glyphs(&FontId::monospace(14.0), "中文路径"));
-            for ch in "生产预发布测试开发…←→↑↓↔".chars(){assert!(fonts.has_glyphs(&FontId::proportional(13.0),&ch.to_string()),"missing glyph {ch} U+{:04X}",ch as u32);}
+            for ch in "生产预发布测试开发…←→↑↓↔".chars() {
+                assert!(
+                    fonts.has_glyphs(&FontId::proportional(13.0), &ch.to_string()),
+                    "missing glyph {ch} U+{:04X}",
+                    ch as u32
+                );
+            }
         });
     }
 }

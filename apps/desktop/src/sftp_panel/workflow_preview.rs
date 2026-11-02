@@ -1,4 +1,9 @@
 //! Fixed, offline production-control previews. No connections or credential access.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 use super::*;
 use cshell_application::*;
 use std::{collections::HashMap, sync::Arc};
@@ -13,9 +18,15 @@ mod raster {
 #[ignore = "explicit fixed offline workflow preview"]
 fn render_workflow_polish_preview() {
     for (name, size) in [
-        ("workflow-connection-diagnostics",egui::vec2(1000.0,700.0)),
-        ("workflow-connection-diagnostics-small",egui::vec2(720.0,480.0)),
-        ("workflow-connection-waiting-small",egui::vec2(720.0,480.0)),
+        ("workflow-connection-diagnostics", egui::vec2(1000.0, 700.0)),
+        (
+            "workflow-connection-diagnostics-small",
+            egui::vec2(720.0, 480.0),
+        ),
+        (
+            "workflow-connection-waiting-small",
+            egui::vec2(720.0, 480.0),
+        ),
         ("workflow-command-dock", egui::vec2(1000.0, 700.0)),
         ("workflow-command-dock-small", egui::vec2(720.0, 480.0)),
         ("workflow-sftp-review", egui::vec2(1000.0, 700.0)),
@@ -176,7 +187,11 @@ fn render_workflow_polish_preview() {
             }));
             panel.advanced.preview_editor_review(doc.id);
         }
-        let diagnostic=crate::connection_diagnostics::preview(if name.contains("waiting"){cshell_domain::ConnectionOutcome::Running}else{cshell_domain::ConnectionOutcome::Failed});
+        let diagnostic = crate::connection_diagnostics::preview(if name.contains("waiting") {
+            cshell_domain::ConnectionOutcome::Running
+        } else {
+            cshell_domain::ConnectionOutcome::Failed
+        });
         let (mut shell, shell_view) = crate::shell_history_panel::preview(session);
         let mut dock = crate::command_workspace::Dock::default();
         dock.toggle();
@@ -208,10 +223,21 @@ fn render_workflow_polish_preview() {
                     ui.painter()
                         .rect_filled(ui.max_rect(), 0.0, cshell_ui::theme::BACKGROUND);
                     if name.starts_with("workflow-connection") {
-                        cshell_ui::draw_workbench_chrome(ui,&mut model);
-                        let _=crate::connection_diagnostics::draw(ui,Some(&diagnostic),name.contains("waiting"),true);
-                        let rect=cshell_ui::draw_workbench_content(ui,&mut model);
-                        ui.painter().text(rect.min+egui::vec2(16.0,16.0),egui::Align2::LEFT_TOP,"离线连接诊断示例 · 未连接用户服务器",egui::FontId::proportional(14.0),cshell_ui::theme::MUTED);
+                        cshell_ui::draw_workbench_chrome(ui, &mut model);
+                        let _ = crate::connection_diagnostics::draw(
+                            ui,
+                            Some(&diagnostic),
+                            name.contains("waiting"),
+                            true,
+                        );
+                        let rect = cshell_ui::draw_workbench_content(ui, &mut model);
+                        ui.painter().text(
+                            rect.min + egui::vec2(16.0, 16.0),
+                            egui::Align2::LEFT_TOP,
+                            "离线连接诊断示例 · 未连接用户服务器",
+                            egui::FontId::proportional(14.0),
+                            cshell_ui::theme::MUTED,
+                        );
                     } else if name.starts_with("workflow-command-dock") {
                         dock.draw(ui, |ui| shell.draw(ui, Some(session), &shell_view, None));
                         let rect = cshell_ui::draw_workbench(ui, &mut model);
@@ -245,30 +271,30 @@ fn render_workflow_polish_preview() {
                     }
                 },
             );
-            if frame == 2 && name.starts_with("workflow-sftp-presets") {
-                if let Some(tree) = &out.platform_output.accesskit_update
-                    && let Some((_, node)) = tree
-                        .nodes
-                        .iter()
-                        .find(|(_, n)| n.label() == Some("方案与规则"))
-                {
-                    let pos = crate::ui_layout_gate::bounds(node).center();
-                    events = vec![
-                        egui::Event::PointerMoved(pos),
-                        egui::Event::PointerButton {
-                            pos,
-                            button: egui::PointerButton::Primary,
-                            pressed: true,
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                        egui::Event::PointerButton {
-                            pos,
-                            button: egui::PointerButton::Primary,
-                            pressed: false,
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                    ];
-                }
+            if frame == 2
+                && name.starts_with("workflow-sftp-presets")
+                && let Some(tree) = &out.platform_output.accesskit_update
+                && let Some((_, node)) = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some("方案与规则"))
+            {
+                let pos = crate::ui_layout_gate::bounds(node).center();
+                events = vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ];
             }
             if name.starts_with("workflow-sftp-review") {
                 std::thread::sleep(std::time::Duration::from_millis(10));

@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use cshell_ipc::{
     Envelope, HandshakePolicy, SessionCreateResponse, SessionListResponse, SessionSummary,
@@ -58,7 +65,7 @@ async fn ssh_controls_close_confirm_reconnect_once_and_keep_the_same_tab() {
             let mut clients = tokio::task::JoinSet::new();
             // Match the real server: a completed client must not cancel and
             // drop a named-pipe accept that another client has already opened.
-            let pending_accept=listener.accept();
+            let pending_accept = listener.accept();
             tokio::pin!(pending_accept);
             loop {
                 tokio::select! {
@@ -292,15 +299,24 @@ fn local_or_empty_tabs_never_offer_ssh_controls() {
     assert!(app.ssh_control.is_none());
 }
 
-
 #[test]
 fn configured_target_omits_missing_username_and_brackets_ipv6() {
-    let mut target=cshell_domain::SshConnectionRecord{
-        profile_id:ProfileId::new(),host:"2001:db8::1".into(),port:2222,username:String::new(),
-        auth_method:cshell_domain::SshAuthMethod::Password,private_key_path:None,certificate_path:None,
-        agent_backend:Default::default(),agent_identity:None,route:Default::default(),options:Default::default(),
+    let mut target = cshell_domain::SshConnectionRecord {
+        profile_id: ProfileId::new(),
+        host: "2001:db8::1".into(),
+        port: 2222,
+        username: String::new(),
+        auth_method: cshell_domain::SshAuthMethod::Password,
+        private_key_path: None,
+        certificate_path: None,
+        agent_backend: Default::default(),
+        agent_identity: None,
+        route: Default::default(),
+        options: Default::default(),
     };
-    assert_eq!(configured_target(&target),"[2001:db8::1]:2222");
-    target.username="operator".into();assert_eq!(configured_target(&target),"operator@[2001:db8::1]:2222");
-    target.host="server.example".into();assert_eq!(configured_target(&target),"operator@server.example:2222");
+    assert_eq!(configured_target(&target), "[2001:db8::1]:2222");
+    target.username = "operator".into();
+    assert_eq!(configured_target(&target), "operator@[2001:db8::1]:2222");
+    target.host = "server.example".into();
+    assert_eq!(configured_target(&target), "operator@server.example:2222");
 }

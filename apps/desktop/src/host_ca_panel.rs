@@ -44,15 +44,14 @@ impl HostCaPanel {
             && self
                 .last_poll
                 .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2))
+            && c.request(CaRequest::default(), false)
         {
-            if c.request(CaRequest::default(), false) {
-                self.last_poll = Some(std::time::Instant::now());
-            }
+            self.last_poll = Some(std::time::Instant::now());
         }
         let view = self.connection.as_ref().map(Connection::view);
         let mut open = self.open;
         let mut command = None;
-        cshell_ui::form::dialog(&context, "OpenSSH CA 与证书").open(&mut open).default_size([820.0,700.0]).show(context,|ui|{
+        cshell_ui::form::dialog(context, "OpenSSH CA 与证书").open(&mut open).default_size([820.0,700.0]).show(context,|ui|{
             ui.weak("托管 CA 公钥与现有 known_hosts 合并校验。停用作用于本目录；吊销全局拒绝该公钥及其签发的主机证书。公钥轮换创建新记录。");
             if ui.button("明确重新载入信任目录").clicked(){self.error=None;command=Some((CaRequest::default(),true));}
             if let Some(error)=&self.error{ui.colored_label(cshell_ui::theme::DANGER,error);}

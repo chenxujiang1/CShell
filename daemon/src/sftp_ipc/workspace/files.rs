@@ -100,10 +100,9 @@ impl SftpIpcService {
                 .lock()
                 .map_err(|_| "native status unavailable")?
                 .get(&job.native_transfer.as_uuid().as_bytes().to_vec())
+                && native.session_id == session
             {
-                if native.session_id == session {
-                    native.control.cancel();
-                }
+                native.control.cancel();
             }
             return Ok(SftpWorkspaceReply::File(job));
         }
@@ -400,12 +399,12 @@ async fn local_inspect(path: PathBuf) -> Result<Option<SftpEntryStamp>, &'static
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err("local metadata unavailable"),
         };
-        let mut link = m.file_type().is_symlink();
+        let link = m.file_type().is_symlink();
         #[cfg(windows)]
-        {
+        let link = {
             use std::os::windows::fs::MetadataExt;
-            link |= m.file_attributes() & 0x400 != 0;
-        }
+            link || m.file_attributes() & 0x400 != 0
+        };
         let permissions = {
             #[cfg(unix)]
             {
@@ -468,12 +467,14 @@ fn local_apply(draft: &SftpFileDraft) -> Result<(), &'static str> {
     local_parent(path)?;
     match draft.action {
         SftpFileAction::Mkdir => {
-            let mut builder = std::fs::DirBuilder::new();
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(draft.permissions.ok_or("missing permissions")?);
-            }
+                builder
+            };
             builder
                 .create(path)
                 .map_err(|_| "local mkdir unconfirmed")?;

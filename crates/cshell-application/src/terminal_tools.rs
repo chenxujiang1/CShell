@@ -257,8 +257,12 @@ pub enum TerminalToolsReply {
     Raw(RawJournalSlice),
     Shell(ShellHistory),
 }
+#[derive(Debug)]
 pub enum TerminalToolsExpectation<'a> {
-    Shell {session: SessionId, id:u64},
+    Shell {
+        session: SessionId,
+        id: u64,
+    },
     View {
         after: u64,
     },
@@ -336,8 +340,10 @@ pub fn decode_terminal_tools_reply(
         }
     }
     match (&reply, expect) {
-        (TerminalToolsReply::Shell(value), TerminalToolsExpectation::Shell {session,id}) => {
-            if !value.validate(session,id) {return Err("shell history scope or limit mismatch");}
+        (TerminalToolsReply::Shell(value), TerminalToolsExpectation::Shell { session, id }) => {
+            if !value.validate(session, id) {
+                return Err("shell history scope or limit mismatch");
+            }
         }
         (
             TerminalToolsReply::Raw(raw),

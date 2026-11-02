@@ -115,7 +115,7 @@ impl SortState {
             column.label().into()
         }
     }
-    pub fn sorted<'a>(self, entries: &'a [SftpDirectoryEntry]) -> Vec<&'a SftpDirectoryEntry> {
+    pub fn sorted(self, entries: &[SftpDirectoryEntry]) -> Vec<&SftpDirectoryEntry> {
         let mut entries: Vec<_> = entries.iter().collect();
         entries.sort_by(|a, b| self.compare(a, b));
         entries

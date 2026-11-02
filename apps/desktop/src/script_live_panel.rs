@@ -1,4 +1,11 @@
 //! Explicit daemon-owned live script review/run/revoke UI.
+type ReviewStamp = (
+    [u8; 32],
+    BTreeSet<ScriptCapability>,
+    Option<SessionId>,
+    String,
+);
+
 use crate::daemon_connection::DesktopConnectionConfig;
 use cshell_application::*;
 use cshell_domain::*;
@@ -24,12 +31,7 @@ pub(super) struct Panel {
     config: Option<DesktopConnectionConfig>,
     scope: String,
     epoch: u64,
-    stamp: Option<(
-        [u8; 32],
-        BTreeSet<ScriptCapability>,
-        Option<SessionId>,
-        String,
-    )>,
+    stamp: Option<ReviewStamp>,
     pending: Option<(u64, mpsc::Receiver<Reply>)>,
     revoking: Option<mpsc::Receiver<Reply>>,
     review: Option<ScriptLiveReview>,
@@ -227,7 +229,7 @@ impl Panel {
     pub fn indicator(&mut self, context: &egui::Context) -> bool {
         let mut show = false;
         if self.active() || self.unknown {
-            cshell_ui::form::dialog(&context, "实时脚本授权与运行")
+            cshell_ui::form::dialog(context, "实时脚本授权与运行")
                 .id(egui::Id::new("live-script-status"))
                 .collapsible(false)
                 .resizable(false)

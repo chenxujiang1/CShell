@@ -37,7 +37,10 @@ struct LocalDraft {
 impl LocalDraft {
     fn from_connection(connection: Option<&LocalConnectionRecord>) -> Self {
         let Some(connection) = connection else {
-            return Self { cwd_kind: 1, ..Self::default() };
+            return Self {
+                cwd_kind: 1,
+                ..Self::default()
+            };
         };
         Self {
             program: connection.program.clone(),
@@ -259,12 +262,21 @@ impl Default for ProfilePanel {
 }
 
 impl ProfilePanel {
-    pub fn is_dialog_open(&self) -> bool { self.open || self.host_key_prompt.is_some() || self.vault_panel.open || self.package_panel.open }
+    pub fn is_dialog_open(&self) -> bool {
+        self.open
+            || self.host_key_prompt.is_some()
+            || self.vault_panel.open
+            || self.package_panel.open
+    }
     pub fn open_credentials(&mut self) -> ProfileClientCommand {
         self.vault_panel.open = true;
-        ProfileClientCommand::Vault(cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::Status))
+        ProfileClientCommand::Vault(cshell_ipc::VaultRequest::new(
+            cshell_ipc::VaultOperation::Status,
+        ))
     }
-    pub fn owns_native_key_picker(&self) -> bool { self.vault_panel.owns_native_key_picker() }
+    pub fn owns_native_key_picker(&self) -> bool {
+        self.vault_panel.owns_native_key_picker()
+    }
 
     pub fn clear_secrets(&mut self) {
         if let Some(draft) = &mut self.profile_draft {
@@ -338,15 +350,25 @@ impl ProfilePanel {
         });
     }
 
-    pub fn set_launch_error(&mut self, error: Option<String>, profile_id: Option<ProfileId>) -> bool {
+    pub fn set_launch_error(
+        &mut self,
+        error: Option<String>,
+        profile_id: Option<ProfileId>,
+    ) -> bool {
         if self.launch_error == error && self.launch_error_profile == profile_id {
             return self.try_host_key_prompt();
         }
-        self.pending_host_key_prompt = profile_id.and_then(|id| error.as_deref().and_then(|message| {
-            if message.starts_with("HostKeyUnknown:") { Some((id, false)) }
-            else if message.starts_with("HostKeyChanged:") { Some((id, true)) }
-            else { None }
-        }));
+        self.pending_host_key_prompt = profile_id.and_then(|id| {
+            error.as_deref().and_then(|message| {
+                if message.starts_with("HostKeyUnknown:") {
+                    Some((id, false))
+                } else if message.starts_with("HostKeyChanged:") {
+                    Some((id, true))
+                } else {
+                    None
+                }
+            })
+        });
         self.launch_error = error;
         self.launch_error_profile = profile_id;
         self.try_host_key_prompt();
@@ -354,18 +376,29 @@ impl ProfilePanel {
     }
 
     fn try_host_key_prompt(&mut self) -> bool {
-        let Some((id, updating)) = self.pending_host_key_prompt else { return false; };
+        let Some((id, updating)) = self.pending_host_key_prompt else {
+            return false;
+        };
         let Some((target, revision)) = self.catalog.as_ref().and_then(|catalog| {
-            catalog.ssh_connections.iter().find(|target| target.profile_id == id)
+            catalog
+                .ssh_connections
+                .iter()
+                .find(|target| target.profile_id == id)
                 .map(|target| (target.clone(), catalog.revision))
-        }) else { return false; };
+        }) else {
+            return false;
+        };
         self.pending_host_key_prompt = None;
-        if self.selected != Some(Selected::Profile(id)) { self.open_profile_editor(id); }
+        if self.selected != Some(Selected::Profile(id)) {
+            self.open_profile_editor(id);
+        }
         self.page = 0;
         self.editor_tab = 3;
         self.host_key_prompt = Some(if updating {
             crate::host_key_prompt::HostKeyPrompt::new_update(target, revision, true)
-        } else { crate::host_key_prompt::HostKeyPrompt::new(target, revision, true) });
+        } else {
+            crate::host_key_prompt::HostKeyPrompt::new(target, revision, true)
+        });
         self.open = false;
         true
     }
@@ -377,7 +410,9 @@ impl ProfilePanel {
         self.pending_host_key_prompt = None;
         self.clear_secrets();
     }
-    pub(crate) fn take_cancelled_connection(&mut self)->Option<ProfileId> {self.cancelled_connection.take()}
+    pub(crate) fn take_cancelled_connection(&mut self) -> Option<ProfileId> {
+        self.cancelled_connection.take()
+    }
 
     pub fn sync(&mut self, view: &DesktopProfileView) -> bool {
         if self.seen_generation == view.generation {
@@ -400,7 +435,8 @@ impl ProfilePanel {
             && !view.vault.as_ref().is_some_and(|r| r.unlocked);
         self.vault_panel.response = view.vault.clone();
         self.vault_panel.error = view.vault_error.clone();
-        self.vault_panel.set_operation_state(view.vault_mutations_pending > 0, view.vault_notice.clone());
+        self.vault_panel
+            .set_operation_state(view.vault_mutations_pending > 0, view.vault_notice.clone());
         if became_locked || generation_changed {
             self.clear_secrets();
         }
@@ -459,13 +495,17 @@ impl ProfilePanel {
             }
         }
         self.try_host_key_prompt();
-        if let Some(prompt) = &mut self.host_key_prompt { prompt.sync(view); }
+        if let Some(prompt) = &mut self.host_key_prompt {
+            prompt.sync(view);
+        }
         true
     }
 
     pub fn request_failed(&mut self) {
         let message = "请求尚未提交，后台可能仍在处理上一项操作。请稍后重试。";
-        if let Some(prompt) = &mut self.host_key_prompt { prompt.fail(message); }
+        if let Some(prompt) = &mut self.host_key_prompt {
+            prompt.fail(message);
+        }
         self.credential_pending = false;
         self.vault_panel.request_failed();
         self.error = Some(message.into());
@@ -479,7 +519,11 @@ impl ProfilePanel {
                     self.host_key_prompt = None;
                     Some(ProfileClientCommand::OpenProfile(id))
                 }
-                Some(crate::host_key_prompt::Action::Dismiss) => { self.cancelled_connection=prompt.cancelled_connection_profile();self.host_key_prompt = None; None }
+                Some(crate::host_key_prompt::Action::Dismiss) => {
+                    self.cancelled_connection = prompt.cancelled_connection_profile();
+                    self.host_key_prompt = None;
+                    None
+                }
                 None => None,
             };
         }
@@ -553,9 +597,14 @@ impl ProfilePanel {
                         "尚未信任服务器主机密钥。请预览指纹并在弹框中确认。"
                     } else if error.starts_with("HostKeyChanged:") {
                         "服务器主机密钥已变化，请核对新旧指纹并确认更新。"
-                    } else { error.as_str() };
+                    } else {
+                        error.as_str()
+                    };
                     ui.colored_label(cshell_ui::theme::DANGER, message);
-                } else if self.status == "配置和密码已保存" || self.status.starts_with("密码已") || self.status == "服务器主机密钥已保存" {
+                } else if self.status == "配置和密码已保存"
+                    || self.status.starts_with("密码已")
+                    || self.status == "服务器主机密钥已保存"
+                {
                     ui.colored_label(cshell_ui::theme::SUCCESS, &self.status);
                 }
                 if self.credential_pending {
@@ -563,7 +612,8 @@ impl ProfilePanel {
                         ui.spinner();
                         ui.label("正在保存或移除凭据，请稍候…");
                     });
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
                     ui.disable();
                 }
                 ui.separator();
@@ -638,7 +688,12 @@ impl ProfilePanel {
                                 .max_height((body_height - 36.0).max(80.0))
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
-                                    ui.label(egui::RichText::new("文件夹").small().strong().color(cshell_ui::theme::MUTED));
+                                    ui.label(
+                                        egui::RichText::new("文件夹")
+                                            .small()
+                                            .strong()
+                                            .color(cshell_ui::theme::MUTED),
+                                    );
                                     for folder in &catalog.folders {
                                         if !matches_search(&folder.name, &self.search) {
                                             continue;
@@ -654,7 +709,12 @@ impl ProfilePanel {
                                         }
                                     }
                                     ui.add_space(10.0);
-                                    ui.label(egui::RichText::new("连接配置").small().strong().color(cshell_ui::theme::MUTED));
+                                    ui.label(
+                                        egui::RichText::new("连接配置")
+                                            .small()
+                                            .strong()
+                                            .color(cshell_ui::theme::MUTED),
+                                    );
                                     for profile in &catalog.profiles {
                                         if !matches_search(&profile.name, &self.search)
                                             && !profile
@@ -805,13 +865,28 @@ impl ProfilePanel {
             self.profile_draft = None;
             self.folder_draft = None;
         }
-        if command.as_ref().is_some_and(ProfileClientCommand::is_credential_mutation) {
+        if command
+            .as_ref()
+            .is_some_and(ProfileClientCommand::is_credential_mutation)
+        {
             self.credential_pending = true;
         }
-        if let Some(ProfileClientCommand::PreviewHostKey { profile_id, expected_revision }) = &command
-            && let Some(target) = self.catalog.as_ref().and_then(|catalog| catalog.ssh_connections.iter().find(|target| target.profile_id == *profile_id))
+        if let Some(ProfileClientCommand::PreviewHostKey {
+            profile_id,
+            expected_revision,
+        }) = &command
+            && let Some(target) = self.catalog.as_ref().and_then(|catalog| {
+                catalog
+                    .ssh_connections
+                    .iter()
+                    .find(|target| target.profile_id == *profile_id)
+            })
         {
-            let mut prompt = crate::host_key_prompt::HostKeyPrompt::new(target.clone(), *expected_revision, false);
+            let mut prompt = crate::host_key_prompt::HostKeyPrompt::new(
+                target.clone(),
+                *expected_revision,
+                false,
+            );
             prompt.preview_started();
             self.host_key_prompt = Some(prompt);
         }
@@ -1110,7 +1185,10 @@ impl ProfilePanel {
             tags: record.tags.iter().cloned().collect::<Vec<_>>().join(", "),
             ssh_host: connection.map_or_else(String::new, |value| value.host.clone()),
             ssh_port: connection.map_or(22, |value| value.port),
-            ssh_options: connection.map_or_else(cshell_domain::SshConnectionOptions::new_profile, |value| value.options.clone()),
+            ssh_options: connection
+                .map_or_else(cshell_domain::SshConnectionOptions::new_profile, |value| {
+                    value.options.clone()
+                }),
             ssh_username: connection.map_or_else(String::new, |value| value.username.clone()),
             auth_method: connection.map_or(SshAuthMethod::Password, |value| value.auth_method),
             private_key_path: connection
@@ -1193,7 +1271,7 @@ fn draw_profile_page(
                     ui.add(egui::DragValue::new(&mut draft.ssh_port).range(1..=65535));
                 });
                 ui.separator();
-                command=authentication::draw(ui,draft,catalog);
+                command = authentication::draw(ui, draft, catalog);
             } else {
                 if draw_local_fields(ui, &mut draft.local, local_shells) {
                     command = Some(ProfileClientCommand::DiscoverLocalShells);
@@ -1218,7 +1296,9 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
 });
             }
         }
-        1 => {command=authentication::draw(ui,draft,catalog);}
+        1 => {
+            command = authentication::draw(ui, draft, catalog);
+        }
         2 => {
             ui.heading("代理与跳板");
             cshell_ui::form::combo(ui, "连接方式")
@@ -1302,13 +1382,21 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
         }
         5 => {
             ui.heading("连接选项");
-            ui.checkbox(&mut draft.ssh_options.keepalive_enabled, "保持连接活跃（SSH 保活）");
+            ui.checkbox(
+                &mut draft.ssh_options.keepalive_enabled,
+                "保持连接活跃（SSH 保活）",
+            );
             ui.add_enabled_ui(draft.ssh_options.keepalive_enabled, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("保活间隔（秒）");
-                    ui.add(egui::DragValue::new(&mut draft.ssh_options.keepalive_interval_secs).range(1..=3600));
+                    ui.add(
+                        egui::DragValue::new(&mut draft.ssh_options.keepalive_interval_secs)
+                            .range(1..=3600),
+                    );
                     ui.label("允许连续无响应次数");
-                    ui.add(egui::DragValue::new(&mut draft.ssh_options.keepalive_max).range(1..=10));
+                    ui.add(
+                        egui::DragValue::new(&mut draft.ssh_options.keepalive_max).range(1..=10),
+                    );
                 });
             });
             ui.weak("空闲时发送 SSH 协议保活请求，不向终端输入字符。");
@@ -1317,24 +1405,60 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
             ui.add_enabled_ui(draft.ssh_options.auto_reconnect, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("重试间隔（秒）");
-                    ui.add(egui::DragValue::new(&mut draft.ssh_options.reconnect_delay_secs).range(1..=300));
+                    ui.add(
+                        egui::DragValue::new(&mut draft.ssh_options.reconnect_delay_secs)
+                            .range(1..=300),
+                    );
                     ui.label("最大重试次数");
-                    ui.add(egui::DragValue::new(&mut draft.ssh_options.reconnect_attempts).range(1..=20));
+                    ui.add(
+                        egui::DragValue::new(&mut draft.ssh_options.reconnect_attempts)
+                            .range(1..=20),
+                    );
                 });
             });
             ui.weak("仅意外断线时重连。手动断开、关闭标签或退出远端 shell 不会重连。重连会打开新的远端 shell，不重放之前的输入。");
             ui.weak("保存后对新连接生效。");
             ui.separator();
             ui.label("SFTP 校验策略");
-            crate::zmodem_settings::verification_override_selector(ui,&mut draft.ssh_options.sftp_verification);
-            ui.weak(format!("当前生效：{}",crate::zmodem_settings::verification_label(draft.ssh_options.sftp_verification.unwrap_or_else(||crate::zmodem_settings::load().sftp_verification))));
+            crate::zmodem_settings::verification_override_selector(
+                ui,
+                &mut draft.ssh_options.sftp_verification,
+            );
+            ui.weak(format!(
+                "当前生效：{}",
+                crate::zmodem_settings::verification_label(
+                    draft
+                        .ssh_options
+                        .sftp_verification
+                        .unwrap_or_else(|| crate::zmodem_settings::load().sftp_verification)
+                )
+            ));
             ui.separator();
             ui.label("ZMODEM / sz 下载目录");
-            let mut directory=draft.ssh_options.zmodem_download_directory.clone().unwrap_or_default();
-            if ui.add(egui::TextEdit::singleline(&mut directory).desired_width(ui.available_width()).hint_text("继承全局默认（留空）")).changed() {
-                draft.ssh_options.zmodem_download_directory=(!directory.trim().is_empty()).then_some(directory);
+            let mut directory = draft
+                .ssh_options
+                .zmodem_download_directory
+                .clone()
+                .unwrap_or_default();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut directory)
+                        .desired_width(ui.available_width())
+                        .hint_text("继承全局默认（留空）"),
+                )
+                .changed()
+            {
+                draft.ssh_options.zmodem_download_directory =
+                    (!directory.trim().is_empty()).then_some(directory);
             }
-            ui.weak(format!("生效目录：{}",crate::zmodem_settings::resolve(&crate::zmodem_settings::load(),draft.ssh_options.zmodem_download_directory.as_deref()).display()));
+            ui.weak(format!(
+                "生效目录：{}",
+                crate::zmodem_settings::resolve(
+                    &crate::zmodem_settings::load(),
+                    draft.ssh_options.zmodem_download_directory.as_deref()
+                )
+                .display()
+            ));
             ui.weak("留空时实时继承 工具 → 全局默认设置；填写绝对路径则仅用于此会话。");
         }
         3 => {
@@ -1378,9 +1502,9 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
             );
             ui.checkbox(&mut draft.record.favorite, "收藏");
             cshell_ui::form::text(ui, "标签", &mut draft.tags);
-            cshell_ui::environment::selector(ui,&mut draft.tags);
+            cshell_ui::environment::selector(ui, &mut draft.tags);
             terminal_fields(ui, &mut draft.record.terminal, &catalog.themes);
-            terminal_settings::draw(ui,catalog,&draft.record);
+            terminal_settings::draw(ui, catalog, &draft.record);
         }
     }
     command
@@ -1401,9 +1525,13 @@ fn draw_profile_actions(
     }
     let target_incomplete = draft.record.kind == ProfileKind::Ssh
         && ((draft.ssh_host.trim().is_empty() && !draft.ssh_username.trim().is_empty())
-            || (!draft.password.is_empty() && (draft.ssh_host.trim().is_empty() || draft.ssh_username.trim().is_empty())));
+            || (!draft.password.is_empty()
+                && (draft.ssh_host.trim().is_empty() || draft.ssh_username.trim().is_empty())));
     if target_incomplete {
-        ui.colored_label(cshell_ui::theme::WARNING, "请填写主机。若要在配置中保存密码，请同时填写用户名；也可留空账号密码，在连接时填写。");
+        ui.colored_label(
+            cshell_ui::theme::WARNING,
+            "请填写主机。若要在配置中保存密码，请同时填写用户名；也可留空账号密码，在连接时填写。",
+        );
     }
     ui.horizontal_wrapped(|ui| {
         if ui
@@ -1468,21 +1596,21 @@ fn draw_profile_actions(
                     )),
                 });
             }
-            command = Some(if draft.record.kind == ProfileKind::Ssh
-                && !draft.password.is_empty()
-            {
-                ProfileClientCommand::ApplyWithPassword {
-                    expected_revision: catalog.revision,
-                    changes,
-                    profile_id: draft.record.id,
-                    password: Zeroizing::new(std::mem::take(&mut draft.password).into_bytes()),
-                }
-            } else {
-                ProfileClientCommand::Apply {
-                    expected_revision: catalog.revision,
-                    changes,
-                }
-            });
+            command = Some(
+                if draft.record.kind == ProfileKind::Ssh && !draft.password.is_empty() {
+                    ProfileClientCommand::ApplyWithPassword {
+                        expected_revision: catalog.revision,
+                        changes,
+                        profile_id: draft.record.id,
+                        password: Zeroizing::new(std::mem::take(&mut draft.password).into_bytes()),
+                    }
+                } else {
+                    ProfileClientCommand::Apply {
+                        expected_revision: catalog.revision,
+                        changes,
+                    }
+                },
+            );
         }
         let saved_target = catalog
             .ssh_connections
@@ -1558,7 +1686,15 @@ fn terminal_fields(
     themes: &[cshell_domain::ThemeRecord],
 ) {
     ui.weak("留空或选择继承时，使用上级分组设置；分组未设置则使用全局默认。");
-    if ui.add_enabled(*terminal!=TerminalOverrides::default(),egui::Button::new("全部恢复继承")).clicked(){*terminal=TerminalOverrides::default();}
+    if ui
+        .add_enabled(
+            *terminal != TerminalOverrides::default(),
+            egui::Button::new("全部恢复继承"),
+        )
+        .clicked()
+    {
+        *terminal = TerminalOverrides::default();
+    }
     let mut terminal_type = terminal.terminal_type.clone().unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
         ui.label("终端类型");
@@ -1756,7 +1892,9 @@ mod tests {
         let command = panel.open_credentials();
         assert!(!panel.open);
         assert!(panel.is_dialog_open());
-        assert!(matches!(command, ProfileClientCommand::Vault(ref request) if request.operation == cshell_ipc::VaultOperation::Status as i32 && request.profile_id.is_empty()));
+        assert!(
+            matches!(command, ProfileClientCommand::Vault(ref request) if request.operation == cshell_ipc::VaultOperation::Status as i32 && request.profile_id.is_empty())
+        );
     }
     #[test]
     fn openssh_import_buttons_capture_source_and_reject_changed_settings() {

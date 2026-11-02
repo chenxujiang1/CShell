@@ -8,9 +8,17 @@ pub(super) async fn run(
     id: SessionId,
     options: Option<SftpTreeStart>,
 ) {
-    run_inner(config,shared,session,op,id,options,true).await;
+    run_inner(config, shared, session, op, id, options, true).await;
 }
-async fn run_inner(config:&DesktopConnectionConfig,shared:&Arc<Mutex<SftpView>>,session:SessionId,op:SftpOperation,id:SessionId,options:Option<SftpTreeStart>,explicit:bool){
+async fn run_inner(
+    config: &DesktopConnectionConfig,
+    shared: &Arc<Mutex<SftpView>>,
+    session: SessionId,
+    op: SftpOperation,
+    id: SessionId,
+    options: Option<SftpTreeStart>,
+    explicit: bool,
+) {
     let result = send(
         config,
         SftpRequest {
@@ -42,7 +50,9 @@ async fn run_inner(config:&DesktopConnectionConfig,shared:&Arc<Mutex<SftpView>>,
     if view.session_id != Some(session) {
         return;
     }
-    if explicit {view.tree_pending.remove(&id);}
+    if explicit {
+        view.tree_pending.remove(&id);
+    }
     view.generation = view.generation.wrapping_add(1);
     match result {
         Ok(snapshot) => {
@@ -66,12 +76,25 @@ pub(super) async fn poll(config: &DesktopConnectionConfig, shared: &Arc<Mutex<Sf
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         view.trees
             .values()
-            .filter(|v| !v.state.finished() && !view.tree_pending.contains(&v.id) && !view.sync_pending.is_some_and(|(id,_)|id==v.id))
+            .filter(|v| {
+                !v.state.finished()
+                    && !view.tree_pending.contains(&v.id)
+                    && !view.sync_pending.is_some_and(|(id, _)| id == v.id)
+            })
             .map(|v| (v.session, v.id))
             .collect::<Vec<_>>()
     };
     for (session, id) in tasks {
-        run_inner(config, shared, session, SftpOperation::TreeGet, id, None,false).await;
+        run_inner(
+            config,
+            shared,
+            session,
+            SftpOperation::TreeGet,
+            id,
+            None,
+            false,
+        )
+        .await;
     }
 }
 pub(super) async fn pause_all(

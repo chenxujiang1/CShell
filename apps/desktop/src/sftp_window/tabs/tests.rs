@@ -1,31 +1,96 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
-fn cancelled_content(cancelled:bool)->Content {
-    let session=SessionId::new();
-    Content{connection:Some(DesktopSftpConnection::for_view_test(SftpView{session_id:Some(session),connection_profile:Some(ProfileId::new()),connection_cancelled:cancelled,..Default::default()})),panel:SftpPanel::default(),session:Some(session)}
+fn cancelled_content(cancelled: bool) -> Content {
+    let session = SessionId::new();
+    Content {
+        connection: Some(DesktopSftpConnection::for_view_test(SftpView {
+            session_id: Some(session),
+            connection_profile: Some(ProfileId::new()),
+            connection_cancelled: cancelled,
+            ..Default::default()
+        })),
+        panel: SftpPanel::default(),
+        session: Some(session),
+    }
 }
 #[test]
 fn cancellation_removes_active_and_background_hosts_without_reopening_last_window() {
-    for active_cancelled in [false,true] {
-        let mut app=DesktopApp::default();
-        let mut active=cancelled_content(active_cancelled);
-        app.sftp=active.connection.take();app.sftp_session=active.session;app.sftp_panel=active.panel;app.sftp_panel.open=true;
-        app.sftp_tabs.active=Some(1);
-        app.sftp_tabs.entries=vec![HostTab{id:1,profile:ProfileId::new(),title:"A".into(),host:"A".into(),parked:None},HostTab{id:2,profile:ProfileId::new(),title:"B".into(),host:"B".into(),parked:Some(cancelled_content(true))}];
+    for active_cancelled in [false, true] {
+        let mut app = DesktopApp::default();
+        let mut active = cancelled_content(active_cancelled);
+        app.sftp = active.connection.take();
+        app.sftp_session = active.session;
+        app.sftp_panel = active.panel;
+        app.sftp_panel.open = true;
+        app.sftp_tabs.active = Some(1);
+        app.sftp_tabs.entries = vec![
+            HostTab {
+                id: 1,
+                profile: ProfileId::new(),
+                title: "A".into(),
+                host: "A".into(),
+                parked: None,
+            },
+            HostTab {
+                id: 2,
+                profile: ProfileId::new(),
+                title: "B".into(),
+                host: "B".into(),
+                parked: Some(cancelled_content(true)),
+            },
+        ];
         app.sync_sftp_tabs();
         if active_cancelled {
-            assert!(app.sftp_tabs.entries.is_empty());assert!(app.sftp_tabs.active.is_none());assert!(app.sftp.is_none());assert!(!app.sftp_panel.open);
+            assert!(app.sftp_tabs.entries.is_empty());
+            assert!(app.sftp_tabs.active.is_none());
+            assert!(app.sftp.is_none());
+            assert!(!app.sftp_panel.open);
         } else {
-            assert_eq!(app.sftp_tabs.entries.len(),1);assert_eq!(app.sftp_tabs.active,Some(1));assert!(app.sftp.is_some());assert!(app.sftp_panel.open);
+            assert_eq!(app.sftp_tabs.entries.len(), 1);
+            assert_eq!(app.sftp_tabs.active, Some(1));
+            assert!(app.sftp.is_some());
+            assert!(app.sftp_panel.open);
         }
         app.sync_sftp_tabs();
     }
 }
 #[test]
 fn cancelling_active_host_returns_to_other_host_and_preserves_its_connection() {
-    let mut app=DesktopApp::default();let mut content=cancelled_content(true);app.sftp=content.connection.take();app.sftp_session=content.session;app.sftp_panel=content.panel;
-    app.sftp_tabs.active=Some(1);let survivor=cancelled_content(false);let survivor_session=survivor.session;
-    app.sftp_tabs.entries=vec![HostTab{id:1,profile:ProfileId::new(),title:"cancel".into(),host:"A".into(),parked:None},HostTab{id:2,profile:ProfileId::new(),title:"keep".into(),host:"B".into(),parked:Some(survivor)}];
-    app.sync_sftp_tabs();assert_eq!(app.sftp_tabs.active,Some(2));assert_eq!(app.sftp_session,survivor_session);assert_eq!(app.sftp_tabs.entries.len(),1);assert!(app.sftp_panel.open);
+    let mut app = DesktopApp::default();
+    let mut content = cancelled_content(true);
+    app.sftp = content.connection.take();
+    app.sftp_session = content.session;
+    app.sftp_panel = content.panel;
+    app.sftp_tabs.active = Some(1);
+    let survivor = cancelled_content(false);
+    let survivor_session = survivor.session;
+    app.sftp_tabs.entries = vec![
+        HostTab {
+            id: 1,
+            profile: ProfileId::new(),
+            title: "cancel".into(),
+            host: "A".into(),
+            parked: None,
+        },
+        HostTab {
+            id: 2,
+            profile: ProfileId::new(),
+            title: "keep".into(),
+            host: "B".into(),
+            parked: Some(survivor),
+        },
+    ];
+    app.sync_sftp_tabs();
+    assert_eq!(app.sftp_tabs.active, Some(2));
+    assert_eq!(app.sftp_session, survivor_session);
+    assert_eq!(app.sftp_tabs.entries.len(), 1);
+    assert!(app.sftp_panel.open);
 }
 #[test]
 fn common_local_routes_only_local_commands_and_never_remote_operations() {
@@ -143,14 +208,16 @@ async fn two_host_tabs_keep_connections_remote_directories_and_one_local_cursor_
                 let mut state = server_state.lock().unwrap();
                 match operation {
                     SftpOperation::ConnectProfile => {
-                        let options:cshell_application::SftpConnectRequest=serde_json::from_slice(&query.document_json).unwrap();
+                        let options: cshell_application::SftpConnectRequest =
+                            serde_json::from_slice(&query.document_json).unwrap();
                         assert!(options.discover_directory);
-                        let profile=options.profile;
+                        let profile = options.profile;
                         assert!(state.hosts.insert(id, profile).is_none());
                         state.connects += 1;
                         reply.document_json =
                             serde_json::to_vec(&cshell_application::SftpConnectionInfo {
-                                shared_from: None, initial_directory:Some("/".into()),
+                                shared_from: None,
+                                initial_directory: Some("/".into()),
                                 session: id,
                                 profile,
                                 title: format!("Host {profile}"),
@@ -168,7 +235,8 @@ async fn two_host_tabs_keep_connections_remote_directories_and_one_local_cursor_
                             *state.status_polls.entry(id).or_default() += 1;
                             reply.document_json =
                                 serde_json::to_vec(&cshell_application::SftpConnectionInfo {
-                                    shared_from: None, initial_directory:Some("/".into()),
+                                    shared_from: None,
+                                    initial_directory: Some("/".into()),
                                     session: id,
                                     profile,
                                     title: "Host".into(),
@@ -485,7 +553,11 @@ async fn common_local_browser_reads_and_pages_real_files_without_any_ssh_session
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
             let view = connection.view();
-            assert!(view.error.is_none(), "local browse failed: {:?}", view.error);
+            assert!(
+                view.error.is_none(),
+                "local browse failed: {:?}",
+                view.error
+            );
             if view.local_cursor.is_some() {
                 break;
             }
@@ -531,10 +603,17 @@ async fn common_local_browser_reads_and_pages_real_files_without_any_ssh_session
 
 #[test]
 fn shared_ssh_sftp_source_is_only_the_current_matching_live_terminal() {
-    let mut app=DesktopApp::default();let profile=ProfileId::new();let source=SessionId::new();
-    let tab=app.workspace.add(Some(profile),"SSH host".into()).unwrap();
-    app.current_workspace_tab=Some(tab);app.workspace.sessions.insert(tab,source);app.view_model.reusable_ssh_sessions.push(source);
-    assert_eq!(app.sftp_ssh_source(profile),Some(source));assert_eq!(app.sftp_ssh_source(ProfileId::new()),None);
-    app.view_model.reusable_ssh_sessions.clear();assert_eq!(app.sftp_ssh_source(profile),None);
-    app.current_workspace_tab=None;assert_eq!(app.sftp_ssh_source(profile),None);
+    let mut app = DesktopApp::default();
+    let profile = ProfileId::new();
+    let source = SessionId::new();
+    let tab = app.workspace.add(Some(profile), "SSH host".into()).unwrap();
+    app.current_workspace_tab = Some(tab);
+    app.workspace.sessions.insert(tab, source);
+    app.view_model.reusable_ssh_sessions.push(source);
+    assert_eq!(app.sftp_ssh_source(profile), Some(source));
+    assert_eq!(app.sftp_ssh_source(ProfileId::new()), None);
+    app.view_model.reusable_ssh_sessions.clear();
+    assert_eq!(app.sftp_ssh_source(profile), None);
+    app.current_workspace_tab = None;
+    assert_eq!(app.sftp_ssh_source(profile), None);
 }

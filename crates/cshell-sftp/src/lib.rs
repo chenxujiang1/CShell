@@ -7,10 +7,10 @@ mod pipeline;
 #[cfg(test)]
 mod pipeline_tests;
 pub use directory::DirectoryCursor;
+mod checksum;
 #[cfg(test)]
 mod live_control_tests;
 mod staged;
-mod checksum;
 pub use pinned_read::{PinnedRead, PinnedReadContent, PinnedReadError};
 pub use staged::{StagedUpload, StagedUploadContent, StagedUploadError};
 
@@ -32,7 +32,7 @@ const SFTP_PIPELINE_REQUESTS: usize = 16;
 pub const MAX_DIRECTORY_PAGE_ENTRIES: usize = 4_096;
 const SFTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Runtime progress for bounded remote SHA-256 reads; no file contents are exposed.
-pub type ReadProgress = Arc<dyn Fn(u64,u64)+Send+Sync>;
+pub type ReadProgress = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 #[derive(Clone, Debug, Default)]
 pub struct TransferControl {
@@ -950,9 +950,16 @@ mod tests {
         async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
             self.stat(id, path).await
         }
-        async fn fstat(&mut self,id:u32,handle:String)->Result<Attrs,Self::Error> {
-            let path=self.state.lock().unwrap().handles.get(&handle).cloned().ok_or(StatusCode::Failure)?;
-            self.stat(id,path).await
+        async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+            let path = self
+                .state
+                .lock()
+                .unwrap()
+                .handles
+                .get(&handle)
+                .cloned()
+                .ok_or(StatusCode::Failure)?;
+            self.stat(id, path).await
         }
 
         async fn opendir(&mut self, id: u32, _path: String) -> Result<Handle, Self::Error> {
@@ -1035,26 +1042,39 @@ mod tests {
 
     #[tokio::test]
     async fn remote_checksum_reports_progress_and_closes_handles_for_both_probes() {
-        use sha2::{Digest,Sha256};
-        let (client,state)=client().await;
-        let payload=vec![42;2*super::SFTP_TRANSFER_BATCH_BYTES+17];
+        use sha2::{Digest, Sha256};
+        let (client, state) = client().await;
+        let payload = vec![42; 2 * super::SFTP_TRANSFER_BATCH_BYTES + 17];
         {
-            let mut state=state.lock().unwrap();
-            state.files.insert("/temporary".into(),payload.clone());
-            state.files.insert("/destination".into(),payload.clone());
+            let mut state = state.lock().unwrap();
+            state.files.insert("/temporary".into(), payload.clone());
+            state.files.insert("/destination".into(), payload.clone());
         }
-        let staged=client.staged_upload();
-        let captured=Arc::new(Mutex::new(Vec::new()));
-        let output=captured.clone();
-        let report:super::ReadProgress=Arc::new(move|done,total|output.lock().unwrap().push((done,total)));
-        let (a,b)=tokio::join!(staged.probe_with_progress("/temporary",payload.len() as u64,&report),staged.probe("/destination",payload.len() as u64));
-        let a=a.unwrap().unwrap();let b=b.unwrap().unwrap();
-        assert_eq!(a,b);assert_eq!(a.sha256,<[u8;32]>::from(Sha256::digest(&payload)));
-        let events=captured.lock().unwrap();
-        assert_eq!(events.first(),Some(&(0,payload.len() as u64)));
-        assert_eq!(events.last(),Some(&(payload.len() as u64,payload.len() as u64)));
-        assert!(events.len()>=4);assert!(events.windows(2).all(|pair|pair[0].0<=pair[1].0));
-        assert!(state.lock().unwrap().handles.is_empty(),"both reads must drain and close their handles");
+        let staged = client.staged_upload();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let output = captured.clone();
+        let report: super::ReadProgress =
+            Arc::new(move |done, total| output.lock().unwrap().push((done, total)));
+        let (a, b) = tokio::join!(
+            staged.probe_with_progress("/temporary", payload.len() as u64, &report),
+            staged.probe("/destination", payload.len() as u64)
+        );
+        let a = a.unwrap().unwrap();
+        let b = b.unwrap().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.sha256, <[u8; 32]>::from(Sha256::digest(&payload)));
+        let events = captured.lock().unwrap();
+        assert_eq!(events.first(), Some(&(0, payload.len() as u64)));
+        assert_eq!(
+            events.last(),
+            Some(&(payload.len() as u64, payload.len() as u64))
+        );
+        assert!(events.len() >= 4);
+        assert!(events.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert!(
+            state.lock().unwrap().handles.is_empty(),
+            "both reads must drain and close their handles"
+        );
     }
 
     #[test]

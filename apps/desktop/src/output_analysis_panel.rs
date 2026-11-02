@@ -65,10 +65,9 @@ impl OutputAnalysisPanel {
                     egui::Button::new("计算此目标完整摘要"),
                 )
                 .clicked()
+                && let Some(left) = left
             {
-                if let Some(left) = left {
-                    let _queued = connection.launch(request.clone(), hash, left.child, None);
-                }
+                let _queued = connection.launch(request.clone(), hash, left.child, None);
             }
             egui::ComboBox::from_id_salt("full-output-right-host")
                 .truncate()
@@ -106,13 +105,12 @@ impl OutputAnalysisPanel {
                     egui::Button::new("比较两个目标完整字节流"),
                 )
                 .clicked()
+                && let (Some(left), Some(right)) = (left, right)
             {
-                if let (Some(left), Some(right)) = (left, right) {
-                    let mut query = request.clone();
-                    query.right = Some(right.host);
-                    query.right_revision = Some(right.revision);
-                    let _queued = connection.launch(query, hash, left.child, Some(right.child));
-                }
+                let mut query = request.clone();
+                query.right = Some(right.host);
+                query.right_revision = Some(right.revision);
+                let _queued = connection.launch(query, hash, left.child, Some(right.child));
             }
             if let Some(document) = &view.document {
                 ui.separator();

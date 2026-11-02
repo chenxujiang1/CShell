@@ -715,7 +715,7 @@ impl SftpIpcService {
                 let (wire,status,did_select)=tokio::task::spawn_blocking(move||{
                     let mut t=t.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let mut did=false;
-                    if !selected && let Some(s)=t.status.clone() { if s.state==1 && s.direction==1 {t.control(&cshell_ipc::ZmodemRequest {operation:1,transfer_id:s.transfer_id,paths,..Default::default()})?;did=true;} }
+                    if !selected && let Some(s)=t.status.clone() && s.state==1 && s.direction==1 {t.control(&cshell_ipc::ZmodemRequest {operation:1,transfer_id:s.transfer_id,paths,..Default::default()})?;did=true;}
                     Ok::<_,String>((t.pump(),t.status.clone(),did))
                 }).await.map_err(|_|"ZMODEM 发送任务失败")??;
                 selected|=did_select;

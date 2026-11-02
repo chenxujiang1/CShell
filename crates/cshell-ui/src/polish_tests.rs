@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::*;
 use crate::tests::classic_context;
 
@@ -71,8 +72,12 @@ fn environment_identity_and_twenty_tabs_fit_split_panes_at_high_dpi() {
                 model
                     .ssh_tab_states
                     .insert(tab, SshConnectionState::Connected);
-                if index == 0 || index == 10 { model.input_target_tabs.insert(tab, index == 10); }
-                if index == 10 { model.unread_output_tabs.insert(tab); }
+                if index == 0 || index == 10 {
+                    model.input_target_tabs.insert(tab, index == 10);
+                }
+                if index == 10 {
+                    model.unread_output_tabs.insert(tab);
+                }
                 if index == 0 {
                     model.selected_tab = Some(tab);
                 }
@@ -90,7 +95,7 @@ fn environment_identity_and_twenty_tabs_fit_split_panes_at_high_dpi() {
                         ..Default::default()
                     },
                     |ui| {
-                        draw_workbench(ui, &mut model);
+                        let _ = draw_workbench(ui, &mut model);
                     },
                 );
                 out.textures_delta.clear();
@@ -99,9 +104,18 @@ fn environment_identity_and_twenty_tabs_fit_split_panes_at_high_dpi() {
             assert_eq!(model.pane_views.len(), 2);
             let tree = tree.unwrap();
             for label in ["命令", "同步"] {
-                assert!(tree.nodes.iter().any(|(_, n)| n.label() == Some(label) || n.value() == Some(label)), "missing recipient badge {label} at {scale}/{width}");
+                assert!(
+                    tree.nodes
+                        .iter()
+                        .any(|(_, n)| n.label() == Some(label) || n.value() == Some(label)),
+                    "missing recipient badge {label} at {scale}/{width}"
+                );
             }
-            assert!(tree.nodes.iter().any(|(_, n)| n.label() == Some("有新输出") || n.value() == Some("有新输出")));
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, n)| n.label() == Some("有新输出") || n.value() == Some("有新输出"))
+            );
             for (index, label) in ["生产", "开发"].into_iter().enumerate() {
                 let node = &tree
                     .nodes
@@ -135,7 +149,7 @@ fn focus_layout_preserves_menu_access_and_restores_sidebar_and_toolbar() {
     };
     focus.apply(&mut model);
     let mut out = ctx.run_ui(Default::default(), |ui| {
-        draw_workbench(ui, &mut model);
+        let _ = draw_workbench(ui, &mut model);
     });
     out.textures_delta.clear();
     let tree = out.platform_output.accesskit_update.unwrap();
@@ -146,21 +160,63 @@ fn focus_layout_preserves_menu_access_and_restores_sidebar_and_toolbar() {
             .iter()
             .any(|(_, n)| n.label() == Some("重新连接"))
     );
-    fn render(ctx:&egui::Context,model:&mut WorkbenchViewModel,events:Vec<egui::Event>)->egui::accesskit::TreeUpdate {
-        let mut out=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(900.0,600.0))),events,..Default::default()},|ui|{draw_workbench(ui,model);});
-        out.textures_delta.clear();out.platform_output.accesskit_update.unwrap()
+    fn render(
+        ctx: &egui::Context,
+        model: &mut WorkbenchViewModel,
+        events: Vec<egui::Event>,
+    ) -> egui::accesskit::TreeUpdate {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let _ = draw_workbench(ui, model);
+            },
+        );
+        out.textures_delta.clear();
+        out.platform_output.accesskit_update.unwrap()
     }
-    fn click_label(ctx:&egui::Context,model:&mut WorkbenchViewModel,label:&str){
-        for _ in 0..3 {render(ctx,model,vec![]);}
-        let tree=render(ctx,model,vec![]);
-        let b=tree.nodes.iter().find(|(_,n)|n.label()==Some(label)).unwrap_or_else(||panic!("missing {label}")).1.bounds().unwrap();
-        let pos=egui::pos2(((b.x0+b.x1)/2.0)as f32,((b.y0+b.y1)/2.0)as f32);
-        for pressed in [true,false]{render(ctx,model,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::NONE}]);}
+    fn click_label(ctx: &egui::Context, model: &mut WorkbenchViewModel, label: &str) {
+        for _ in 0..3 {
+            render(ctx, model, vec![]);
+        }
+        let tree = render(ctx, model, vec![]);
+        let b = tree
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some(label))
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .1
+            .bounds()
+            .unwrap();
+        let pos = egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+        for pressed in [true, false] {
+            render(
+                ctx,
+                model,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
     }
-    click_label(&ctx,&mut model,"查看");
-    click_label(&ctx,&mut model,"连接工具栏");
-    if !egui::Popup::is_any_open(&ctx){click_label(&ctx,&mut model,"查看");}
-    click_label(&ctx,&mut model,"会话管理器");
+    click_label(&ctx, &mut model, "查看");
+    click_label(&ctx, &mut model, "连接工具栏");
+    if !egui::Popup::is_any_open(&ctx) {
+        click_label(&ctx, &mut model, "查看");
+    }
+    click_label(&ctx, &mut model, "会话管理器");
     assert!(!model.sidebar_hidden && !model.toolbar_hidden);
     workbench_layout::Layout::default().apply(&mut model);
     assert!(!model.sidebar_hidden && !model.toolbar_hidden && model.sidebar_width.is_none());

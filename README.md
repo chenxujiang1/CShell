@@ -26,7 +26,7 @@ Mac 双架构试用包由 [macOS personal trial 构建](https://github.com/chenx
 2. 确认 `CShell.exe`、`cshelld.exe` 和 `cshell-script-worker.exe` 位于同一目录。
 3. 双击 `CShell.exe`。程序会按需启动后台服务，用户无需安装 Rust。
 
-如果沿用此前带 `Start-Trial.cmd` 的本地试用目录，请继续通过该启动器打开，以使用原有 `data` 目录。直接运行 EXE 可能改用系统默认数据目录而显示空列表；此时先返回原启动器，无需重新创建或覆盖配置。
+如果沿用此前带 `Start-Trial.cmd` 的本地试用目录，请保留启动器与原有 `data` 目录。新版也会在直接运行该目录的 EXE 时识别这个旧布局，沿用原配置与后台目录，不移动或合并数据库。旧布局的数据目录缺失或不可读时会报告错误，避免悄悄创建另一份空配置。
 
 ### macOS
 

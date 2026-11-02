@@ -85,7 +85,7 @@ impl CredentialPackagePanel {
         }
         let mut open = self.open;
         let mut command = None;
-        cshell_ui::form::dialog(&context, "Encrypted credential package").open(&mut open).default_width(620.0).show(context, |ui| {
+        cshell_ui::form::dialog(context, "Encrypted credential package").open(&mut open).default_width(620.0).show(context, |ui| {
             ui.label("Use an independent package password. Keep the public Profile JSON separately.");
             ui.label("Format v1: Argon2id + AES-256-GCM. Losing the package password prevents recovery.");
             ui.label(&self.status);

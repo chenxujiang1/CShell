@@ -52,8 +52,8 @@ impl MixedRepairDocument {
         {
             return Err(TaskError::Invalid);
         }
-        if let Some(job) = &self.job {
-            if job.host_id.as_uuid().is_nil()
+        if let Some(job) = &self.job
+            && (job.host_id.as_uuid().is_nil()
                 || job.child_id.as_uuid().is_nil()
                 || job.child_id == self.run_id
                 || job.step >= MAX_TASK_STEPS
@@ -74,10 +74,9 @@ impl MixedRepairDocument {
                         || job.result_revision.is_none()
                         || (job.operation == MixedFileOperation::Probe) != job.probe.is_some())
                 || job.status == FileRecoveryStatus::Failed
-                    && (job.error.is_none() || job.probe.is_some())
-            {
-                return Err(TaskError::Invalid);
-            }
+                    && (job.error.is_none() || job.probe.is_some()))
+        {
+            return Err(TaskError::Invalid);
         }
         Ok(())
     }

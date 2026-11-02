@@ -22,6 +22,12 @@ impl RuntimePaths {
         if let Some(root) = std::env::var_os("CSHELL_RUNTIME_DIR") {
             return Self::prepare(PathBuf::from(root));
         }
+        if let Some(root) = crate::StoragePaths::for_current_user()
+            .map_err(DiscoveryError::StorageSelection)?
+            .runtime_root
+        {
+            return Self::prepare(root);
+        }
 
         #[cfg(windows)]
         let root = required_environment_path("LOCALAPPDATA")?
@@ -273,6 +279,8 @@ pub enum DiscoveryError {
     InvalidRuntimeDirectory,
     #[error("cannot prepare runtime directory: {0}")]
     RuntimeDirectory(std::io::Error),
+    #[error("cannot select configuration storage; existing data was not replaced: {0}")]
+    StorageSelection(std::io::Error),
     #[error("runtime or discovery path must not be a symbolic link")]
     SymbolicLink,
     #[error("another cshelld instance already owns this user runtime")]

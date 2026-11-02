@@ -2,9 +2,11 @@
 
 use std::cmp::{max, min};
 use std::ops::{Index, IndexMut, Range, RangeFrom, RangeFull, RangeTo, RangeToInclusive};
-use std::{ptr, slice};
 use std::sync::atomic::{AtomicUsize, Ordering};
-fn unknown_extra_cost() -> AtomicUsize { AtomicUsize::new(usize::MAX) }
+use std::{ptr, slice};
+fn unknown_extra_cost() -> AtomicUsize {
+    AtomicUsize::new(usize::MAX)
+}
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -29,7 +31,11 @@ pub struct Row<T> {
 }
 impl<T: Clone> Clone for Row<T> {
     fn clone(&self) -> Self {
-        Self {inner: self.inner.clone(), occ: self.occ, extra_cost: AtomicUsize::new(self.extra_cost.load(Ordering::Relaxed))}
+        Self {
+            inner: self.inner.clone(),
+            occ: self.occ,
+            extra_cost: AtomicUsize::new(self.extra_cost.load(Ordering::Relaxed)),
+        }
     }
 }
 
@@ -61,7 +67,11 @@ impl<T: Default> Row<T> {
             inner.set_len(columns);
         }
 
-        Row { inner, occ: 0, extra_cost: unknown_extra_cost() }
+        Row {
+            inner,
+            occ: 0,
+            extra_cost: unknown_extra_cost(),
+        }
     }
 
     /// Increase the number of columns in the row.
@@ -89,12 +99,19 @@ impl<T: Default> Row<T> {
 
         // Split off cells for a new row.
         let mut new_row = self.inner.split_off(columns);
-        let index = new_row.iter().rposition(|c| !c.is_empty()).map_or(0, |i| i + 1);
+        let index = new_row
+            .iter()
+            .rposition(|c| !c.is_empty())
+            .map_or(0, |i| i + 1);
         new_row.truncate(index);
 
         self.occ = min(self.occ, columns);
 
-        if new_row.is_empty() { None } else { Some(new_row) }
+        if new_row.is_empty() {
+            None
+        } else {
+            Some(new_row)
+        }
     }
 
     /// Reset all cells in the row to the `template` cell.
@@ -126,7 +143,11 @@ impl<T: Default> Row<T> {
 impl<T> Row<T> {
     #[inline]
     pub fn from_vec(vec: Vec<T>, occ: usize) -> Row<T> {
-        Row { inner: vec, occ, extra_cost: unknown_extra_cost() }
+        Row {
+            inner: vec,
+            occ,
+            extra_cost: unknown_extra_cost(),
+        }
     }
 
     #[inline]
@@ -323,7 +344,11 @@ impl Row<crate::term::cell::Cell> {
     pub fn retained_memory_bytes(&self) -> usize {
         let mut extra = self.extra_cost.load(Ordering::Relaxed);
         if extra == usize::MAX {
-            extra = self.inner.iter().map(crate::term::cell::Cell::extra_memory_bytes).sum();
+            extra = self
+                .inner
+                .iter()
+                .map(crate::term::cell::Cell::extra_memory_bytes)
+                .sum();
             self.extra_cost.store(extra, Ordering::Relaxed);
         }
         self.inner.capacity() * std::mem::size_of::<crate::term::cell::Cell>() + extra

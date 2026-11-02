@@ -1,16 +1,16 @@
 //! Daemon-owned ordered terminal pipeline used by the Phase 0 vertical slice.
 
 mod clipboard;
-mod zmodem;
-mod terminal_history;
-mod terminal_resources;
 mod clipboard_policy;
 mod credential_package;
-mod download_executor;
 mod desktop_lifetime;
+mod download_executor;
 mod download_local;
 mod download_service;
 mod mixed_service;
+mod terminal_history;
+mod terminal_resources;
+mod zmodem;
 pub use download_service::BatchDownloadService;
 pub use mixed_service::{MixedRetryError, MixedTaskService};
 mod host_group_ipc;
@@ -27,11 +27,13 @@ pub use task_ssh::SshTaskExecutor;
 pub use upload_service::BatchUploadService;
 mod host_ca_ipc;
 mod host_ca_store;
+mod keyboard_auth;
 mod profile_batch_ipc;
 mod profile_ipc;
 mod quick_command_ipc;
 mod script_control;
 mod session_lock;
+mod shared_ssh;
 mod ssh_provider_ipc;
 mod terminal_policy_ipc;
 mod terminal_policy_store;
@@ -39,8 +41,6 @@ mod terminal_tools_ipc;
 mod terminal_tools_store;
 mod tunnel_ipc;
 mod tunnel_store;
-mod keyboard_auth;
-mod shared_ssh;
 mod vault_control;
 mod vault_ipc;
 pub use session_lock::SessionLockMonitor;
@@ -301,14 +301,24 @@ impl PipelineIngress {
         let Some(sender) = self.sender.upgrade() else {
             return Err(SubmitError::Closed(bytes));
         };
-        for (index, chunk) in bytes.chunks(terminal_resources::OUTPUT_CHUNK_BYTES).enumerate() {
+        for (index, chunk) in bytes
+            .chunks(terminal_resources::OUTPUT_CHUNK_BYTES)
+            .enumerate()
+        {
             let Some(permit) = self.bytes.reserve(chunk.len(), true) else {
-                return Err(SubmitError::Closed(bytes[index * terminal_resources::OUTPUT_CHUNK_BYTES..].to_vec()));
+                return Err(SubmitError::Closed(
+                    bytes[index * terminal_resources::OUTPUT_CHUNK_BYTES..].to_vec(),
+                ));
             };
             self.telemetry.begin_output(chunk.len());
-            if sender.send(PipelineMessage::Output(chunk.to_vec(), permit)).is_err() {
+            if sender
+                .send(PipelineMessage::Output(chunk.to_vec(), permit))
+                .is_err()
+            {
                 self.telemetry.cancel_output(chunk.len());
-                return Err(SubmitError::Closed(bytes[index * terminal_resources::OUTPUT_CHUNK_BYTES..].to_vec()));
+                return Err(SubmitError::Closed(
+                    bytes[index * terminal_resources::OUTPUT_CHUNK_BYTES..].to_vec(),
+                ));
             }
         }
         Ok(())
@@ -325,15 +335,22 @@ impl PipelineIngress {
     }
 
     /// Fence the previous transport's parser work before exposing a new shell.
-    pub(crate) fn reset_connection_blocking(&self, size: TerminalSize) -> Result<u64, PipelineClosed> {
+    pub(crate) fn reset_connection_blocking(
+        &self,
+        size: TerminalSize,
+    ) -> Result<u64, PipelineClosed> {
         let sender = self.sender.upgrade().ok_or(PipelineClosed)?;
         let (done, receipt) = mpsc::sync_channel(1);
         self.telemetry.begin_resize();
-        sender.send(PipelineMessage::ResetConnection(size, done)).map_err(|_| {
-            self.telemetry.cancel_resize();
-            PipelineClosed
-        })?;
-        receipt.recv_timeout(Duration::from_secs(5)).map_err(|_| PipelineClosed)
+        sender
+            .send(PipelineMessage::ResetConnection(size, done))
+            .map_err(|_| {
+                self.telemetry.cancel_resize();
+                PipelineClosed
+            })?;
+        receipt
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| PipelineClosed)
     }
 }
 
@@ -438,23 +455,47 @@ pub struct LatestSnapshot {
 #[derive(Debug)]
 pub(crate) struct SnapshotActivity(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for SnapshotActivity {
-    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::Relaxed); }
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 impl LatestSnapshot {
-    pub(crate) fn shell_history(&self, session:cshell_domain::SessionId, id:u64)->Option<cshell_domain::ShellHistory> {
-        self.terminal.as_ref().map(|engine|engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner).shell_history(session,id))
+    pub(crate) fn shell_history(
+        &self,
+        session: cshell_domain::SessionId,
+        id: u64,
+    ) -> Option<cshell_domain::ShellHistory> {
+        self.terminal.as_ref().map(|engine| {
+            engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shell_history(session, id)
+        })
     }
     pub(crate) fn activity(&self) -> Arc<SnapshotActivity> {
         self.subscribers.fetch_add(1, Ordering::Relaxed);
         Arc::new(SnapshotActivity(Arc::clone(&self.subscribers)))
     }
     fn publication_interval(&self) -> Duration {
-        Duration::from_millis(if self.subscribers.load(Ordering::Relaxed)>0 {16} else {100})
+        Duration::from_millis(if self.subscribers.load(Ordering::Relaxed) > 0 {
+            16
+        } else {
+            100
+        })
     }
-    pub(crate) fn history_page(&self,request:&cshell_ipc::LogPageRequest)->Option<cshell_ipc::LogPage> {
+    pub(crate) fn history_page(
+        &self,
+        request: &cshell_ipc::LogPageRequest,
+    ) -> Option<cshell_ipc::LogPage> {
         self.terminal.as_ref().map(|engine| {
-            let slice = engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner).history_slice(
-                request.anchor_line_id, request.rows_before as usize, request.rows_after as usize);
+            let slice = engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .history_slice(
+                    request.anchor_line_id,
+                    request.rows_before as usize,
+                    request.rows_after as usize,
+                );
             crate::terminal_history::page(slice, request)
         })
     }
@@ -542,6 +583,7 @@ impl TerminalPipeline {
         Self::spawn_inner(journal_path, terminal_size, ingress_capacity, None, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_with_clipboard(
         journal_path: impl AsRef<Path>,
         terminal_size: TerminalSize,
@@ -604,9 +646,17 @@ impl TerminalPipeline {
             .transpose()?;
         let mut capture_size = terminal_size;
         let terminal = Arc::new(Mutex::new(AlacrittyTerminalEngine::new(terminal_size)));
-        let latest = LatestSnapshot {terminal:Some(Arc::clone(&terminal)),..Default::default()};
+        let latest = LatestSnapshot {
+            terminal: Some(Arc::clone(&terminal)),
+            ..Default::default()
+        };
         terminal_resources::register_history(&terminal, &latest.subscribers);
-        latest.publish(terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).snapshot());
+        latest.publish(
+            terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot(),
+        );
         let worker_latest = latest.clone();
         let responses = TerminalResponses::new(DEFAULT_RESPONSE_CAPACITY);
         let worker_responses = responses.clone();
@@ -628,22 +678,41 @@ impl TerminalPipeline {
                 loop {
                     let interval = worker_latest.publication_interval();
                     publish_at = publish_at.min(Instant::now() + interval);
-                    let message = match receiver.recv_timeout(if dirty {publish_at.saturating_duration_since(Instant::now())} else {Duration::from_millis(100)}) {
+                    let message = match receiver.recv_timeout(if dirty {
+                        publish_at.saturating_duration_since(Instant::now())
+                    } else {
+                        Duration::from_millis(100)
+                    }) {
                         Ok(message) => message,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
                             if dirty {
-                                worker_latest.publish(terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).snapshot());
-                                dirty = false; publish_at = Instant::now() + interval;
+                                worker_latest.publish(
+                                    terminal
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .snapshot(),
+                                );
+                                dirty = false;
+                                publish_at = Instant::now() + interval;
                             }
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            if dirty {worker_latest.publish(terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).snapshot());}
+                            if dirty {
+                                worker_latest.publish(
+                                    terminal
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .snapshot(),
+                                );
+                            }
                             break;
                         }
                     };
                     terminal_resources::refresh_history();
-                    let mut terminal=terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut terminal = terminal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match message {
                         PipelineMessage::Output(bytes, _permit) => {
                             let byte_count = bytes.len();
@@ -660,7 +729,8 @@ impl TerminalPipeline {
                             dirty = true;
                             if Instant::now() >= publish_at {
                                 worker_latest.publish(terminal.snapshot());
-                                dirty = false; publish_at = Instant::now() + interval;
+                                dirty = false;
+                                publish_at = Instant::now() + interval;
                             }
                             worker_telemetry.finish_output(byte_count);
                         }
@@ -668,22 +738,30 @@ impl TerminalPipeline {
                             capture_size = size;
                             terminal.resize(size);
                             worker_latest.publish(terminal.snapshot());
-                            dirty = false; publish_at = Instant::now() + interval;
+                            dirty = false;
+                            publish_at = Instant::now() + interval;
                             worker_telemetry.finish_resize();
                         }
                         PipelineMessage::ResetConnection(size, done) => {
                             capture_size = size;
                             if let (Some(journal), Some(timing)) = (&mut journal, &mut timing) {
-                                timing.append(journal.line_index().record_count(), size.rows, size.cols)?;
+                                timing.append(
+                                    journal.line_index().record_count(),
+                                    size.rows,
+                                    size.cols,
+                                )?;
                                 journal.append(b"\x1bc")?;
                             }
                             terminal.reset_connection(size);
-                            if observer.is_some() { observer = Some(clipboard::ClipboardObserver::default()); }
+                            if observer.is_some() {
+                                observer = Some(clipboard::ClipboardObserver::default());
+                            }
                             let _ = worker_responses.drain();
                             let snapshot = terminal.snapshot();
                             let generation = snapshot.generation;
                             worker_latest.publish(snapshot);
-                            dirty = false; publish_at = Instant::now() + interval;
+                            dirty = false;
+                            publish_at = Instant::now() + interval;
                             worker_telemetry.finish_resize();
                             let _ = done.send(generation);
                         }
@@ -713,9 +791,15 @@ impl TerminalPipeline {
         let Some(ingress) = self.ingress.as_ref() else {
             return Err(SubmitError::Closed(bytes));
         };
-        if bytes.len() > terminal_resources::OUTPUT_QUEUE_BYTES { return Err(SubmitError::TooLarge(bytes)); }
+        if bytes.len() > terminal_resources::OUTPUT_QUEUE_BYTES {
+            return Err(SubmitError::TooLarge(bytes));
+        }
         let Some(permit) = self.bytes.reserve(bytes.len(), false) else {
-            return Err(if self.bytes.is_closed() {SubmitError::Closed(bytes)} else {SubmitError::Backpressure(bytes)});
+            return Err(if self.bytes.is_closed() {
+                SubmitError::Closed(bytes)
+            } else {
+                SubmitError::Backpressure(bytes)
+            });
         };
         let byte_count = bytes.len();
         self.telemetry.begin_output(byte_count);
@@ -840,19 +924,35 @@ mod tests {
     #[test]
     fn connection_reset_fences_old_responses_modes_and_partial_escape_sequences() {
         let directory = tempfile::tempdir().unwrap();
-        let pipeline = TerminalPipeline::spawn(directory.path().join("reset.csjr"), TerminalSize::cells(24, 80), 8).unwrap();
+        let pipeline = TerminalPipeline::spawn(
+            directory.path().join("reset.csjr"),
+            TerminalSize::cells(24, 80),
+            8,
+        )
+        .unwrap();
         let ingress = pipeline.ingress().unwrap();
-        ingress.submit_blocking(b"\x1b[?2004h\x1b[>4;2m\x1b[6n\x1b]0;unfinished".to_vec()).unwrap();
-        let before = pipeline.snapshots().wait_for_generation(1, Duration::from_secs(2)).unwrap();
+        ingress
+            .submit_blocking(b"\x1b[?2004h\x1b[>4;2m\x1b[6n\x1b]0;unfinished".to_vec())
+            .unwrap();
+        let before = pipeline
+            .snapshots()
+            .wait_for_generation(1, Duration::from_secs(2))
+            .unwrap();
         assert!(!pipeline.responses().is_empty());
         let size = TerminalSize::cells(30, 100);
         ingress.reset_connection_blocking(size).unwrap();
         let reset = pipeline.snapshots().latest().unwrap();
         assert!(reset.generation > before.generation);
-        assert_eq!(reset.terminal_modes, cshell_terminal::TerminalModes::default());
+        assert_eq!(
+            reset.terminal_modes,
+            cshell_terminal::TerminalModes::default()
+        );
         assert!(pipeline.responses().is_empty());
         ingress.submit_blocking(b"fresh shell".to_vec()).unwrap();
-        let fresh = pipeline.snapshots().wait_for_generation(reset.generation + 1, Duration::from_secs(2)).unwrap();
+        let fresh = pipeline
+            .snapshots()
+            .wait_for_generation(reset.generation + 1, Duration::from_secs(2))
+            .unwrap();
         assert_eq!(fresh.row(0).unwrap()[0].character, 'f');
         pipeline.shutdown().unwrap();
     }

@@ -107,6 +107,11 @@ pub(crate) fn page(slice: HistorySlice, request: &LogPageRequest) -> LogPage {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use crate::TerminalPipeline;
@@ -158,6 +163,11 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod dense_page_tests {
     use super::*;
     use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};

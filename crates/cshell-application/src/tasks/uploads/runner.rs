@@ -139,7 +139,9 @@ impl BatchUploadRunner {
                 let snapshot = snapshot.clone();
                 let cancel = cancel.clone();
                 jobs.spawn(async move {
-                    runner.target(&snapshot, row, false, cancel, queued_at).await
+                    runner
+                        .target(&snapshot, row, false, cancel, queued_at)
+                        .await
                 });
             }
             if jobs.is_empty() {

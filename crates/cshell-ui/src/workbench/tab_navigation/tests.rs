@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use cshell_domain::*;
 
@@ -232,13 +239,39 @@ fn selected_tab_is_revealed_after_switch_and_resize_without_forcing_manual_scrol
             .bounds()
             .unwrap();
         assert!(plus.x0 >= 0.0 && plus.x1 <= f64::from(width));
-        frame(&context,&mut model,width,vec![egui::Event::PointerMoved(egui::pos2(120.0,82.0)),egui::Event::MouseWheel{phase:egui::TouchPhase::Move,unit:egui::MouseWheelUnit::Point,delta:egui::vec2(240.0,0.0),modifiers:egui::Modifiers::NONE}]);
-        let mut manual=None;
-        for _ in 0..12 {manual=Some(frame(&context,&mut model,width,vec![]));}
-        let tree=manual.unwrap().platform_output.accesskit_update.unwrap();
-        let moved=tree.nodes.iter().find(|(_,n)|n.role()==egui::accesskit::Role::Button && n.label()==Some("server-19")).unwrap().1.bounds().unwrap();
-        assert!(moved.x0>label.x0+50.0,"manual tab scrolling must not snap back to the selected tab: {moved:?} vs {label:?}");
-
+        frame(
+            &context,
+            &mut model,
+            width,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(120.0, 82.0)),
+                egui::Event::MouseWheel {
+                    phase: egui::TouchPhase::Move,
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(240.0, 0.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let mut manual = None;
+        for _ in 0..12 {
+            manual = Some(frame(&context, &mut model, width, vec![]));
+        }
+        let tree = manual.unwrap().platform_output.accesskit_update.unwrap();
+        let moved = tree
+            .nodes
+            .iter()
+            .find(|(_, n)| {
+                n.role() == egui::accesskit::Role::Button && n.label() == Some("server-19")
+            })
+            .unwrap()
+            .1
+            .bounds()
+            .unwrap();
+        assert!(
+            moved.x0 > label.x0 + 50.0,
+            "manual tab scrolling must not snap back to the selected tab: {moved:?} vs {label:?}"
+        );
     }
 }
 #[test]
@@ -268,33 +301,78 @@ fn sidebar_tokens_match_name_host_and_username_and_enter_opens_one_profile() {
             model.saved_ssh_profiles[19].id
         ))
     );
-    let parent=FolderId::new();let child=FolderId::new();
-    model.profile_folders.extend([ProfileFolder{id:parent,name:"维护分组".into(),parent_id:None,terminal:Default::default()},ProfileFolder{id:child,name:"子目录".into(),parent_id:Some(parent),terminal:Default::default()}]);
-    model.saved_ssh_profiles[19].folder_id=Some(child);
-    model.profile_search="维护分组".into();model.selected_profile=None;model.menu_command=None;
-    frame(&context,&mut model,900.0,vec![]);
-    context.memory_mut(|m|m.request_focus(search_id));
-    frame(&context,&mut model,900.0,key(egui::Key::Enter));
-    assert_eq!(model.menu_command,Some(WorkbenchMenuCommand::OpenSavedProfile(model.saved_ssh_profiles[19].id)));
-
+    let parent = FolderId::new();
+    let child = FolderId::new();
+    model.profile_folders.extend([
+        ProfileFolder {
+            id: parent,
+            name: "维护分组".into(),
+            parent_id: None,
+            terminal: Default::default(),
+        },
+        ProfileFolder {
+            id: child,
+            name: "子目录".into(),
+            parent_id: Some(parent),
+            terminal: Default::default(),
+        },
+    ]);
+    model.saved_ssh_profiles[19].folder_id = Some(child);
+    model.profile_search = "维护分组".into();
+    model.selected_profile = None;
+    model.menu_command = None;
+    frame(&context, &mut model, 900.0, vec![]);
+    context.memory_mut(|m| m.request_focus(search_id));
+    frame(&context, &mut model, 900.0, key(egui::Key::Enter));
+    assert_eq!(
+        model.menu_command,
+        Some(WorkbenchMenuCommand::OpenSavedProfile(
+            model.saved_ssh_profiles[19].id
+        ))
+    );
 }
 
 #[test]
 fn navigator_fits_the_smallest_workbench_window() {
-    for size in [egui::vec2(720.0,480.0),egui::vec2(900.0,600.0)] {
-        let context=crate::tests::classic_context();context.enable_accesskit();let mut model=fixture(20);
+    for size in [egui::vec2(720.0, 480.0), egui::vec2(900.0, 600.0)] {
+        let context = crate::tests::classic_context();
+        context.enable_accesskit();
+        let mut model = fixture(20);
         model.tab_navigator.show(model.selected_tab);
-        let mut last=None;
+        let mut last = None;
         for _ in 0..3 {
-            let mut out=context.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,size)),..Default::default()},|ui|{let _=draw_workbench(ui,&mut model);});
-            out.textures_delta.clear();last=Some(out);
+            let mut out = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = draw_workbench(ui, &mut model);
+                },
+            );
+            out.textures_delta.clear();
+            last = Some(out);
         }
-        let rect=context.memory(|m|m.area_rect(egui::Id::new("ssh-tab-navigator"))).unwrap();
-        assert!(egui::Rect::from_min_size(egui::Pos2::ZERO,size).expand(1.0).contains_rect(rect),"navigator outside {size:?}: {rect:?}");
-        let tree=last.unwrap().platform_output.accesskit_update.unwrap();
-        for (_,node) in &tree.nodes {
-            if node.role()==egui::accesskit::Role::TextInput || node.label()==Some("关闭列表") {
-                let b=node.bounds().unwrap();assert!(b.x0>=0.0 && b.y0>=0.0 && b.x1<=f64::from(size.x) && b.y1<=f64::from(size.y));
+        let rect = context
+            .memory(|m| m.area_rect(egui::Id::new("ssh-tab-navigator")))
+            .unwrap();
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, size)
+                .expand(1.0)
+                .contains_rect(rect),
+            "navigator outside {size:?}: {rect:?}"
+        );
+        let tree = last.unwrap().platform_output.accesskit_update.unwrap();
+        for (_, node) in &tree.nodes {
+            if node.role() == egui::accesskit::Role::TextInput || node.label() == Some("关闭列表")
+            {
+                let b = node.bounds().unwrap();
+                assert!(
+                    b.x0 >= 0.0
+                        && b.y0 >= 0.0
+                        && b.x1 <= f64::from(size.x)
+                        && b.y1 <= f64::from(size.y)
+                );
             }
         }
     }

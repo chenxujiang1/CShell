@@ -163,10 +163,18 @@ impl WindowE2e {
     }
 
     pub fn requested_font_size(&self) -> Option<u16> {
-        match self.presents { 24 => Some(32), 48 => Some(14), 72 => Some(40), 96 => Some(24), _ => None }
+        match self.presents {
+            24 => Some(32),
+            48 => Some(14),
+            72 => Some(40),
+            96 => Some(24),
+            _ => None,
+        }
     }
 
-    pub fn note_font_size_change(&mut self) { self.font_size_changes += 1; }
+    pub fn note_font_size_change(&mut self) {
+        self.font_size_changes += 1;
+    }
 
     fn complete(&self) -> bool {
         self.presents >= 120
@@ -254,7 +262,8 @@ fn page_around(anchor: u64, revision: u64) -> Arc<LogPage> {
         })
         .collect::<Vec<_>>()
         .into();
-    Arc::new(LogPage { first_line_id: 1,
+    Arc::new(LogPage {
+        first_line_id: 1,
         source_id: SOURCE,
         revision,
         anchor_line_id: anchor,

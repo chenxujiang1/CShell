@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 fn challenge() -> KeyboardAuthChallenge {
     KeyboardAuthChallenge {
@@ -133,18 +140,74 @@ fn escape_cancels_without_submitting_typed_secrets() {
 }
 #[test]
 fn cancel_button_works_with_empty_login_or_otp_and_never_submits_save_or_credentials_twice() {
-    for login in [false,true] {
-        let context=egui::Context::default();context.enable_accesskit();crate::ui_fonts::install(&context);
-        let view=View{challenge:Some(KeyboardAuthChallenge{login,username_editable:login,..challenge()}),generation:1,..Default::default()};
-        let shared=Arc::new(Mutex::new(view.clone()));let (sender,mut receiver)=tokio::sync::mpsc::channel(1);
-        let mut dialog=Dialog{connection:Some(Connection{shared,sender,stop:tokio::sync::watch::channel(false).0,worker:None}),view,answers:vec![String::new()],username:String::new(),save_credentials:true,last_catalog_refresh:0,focus:true};
-        let mut tree=None;
-        for _ in 0..3 {let mut output=frame(&context,&mut dialog,vec![]);tree=output.platform_output.accesskit_update.take();output.textures_delta.clear();}
-        let tree=tree.unwrap();let node=&tree.nodes.iter().find(|(_,node)|node.label()==Some("取消连接")).unwrap().1;
-        let position=crate::ui_layout_gate::bounds(node).center();
-        for pressed in [true,false] {let mut output=frame(&context,&mut dialog,vec![egui::Event::PointerMoved(position),egui::Event::PointerButton{pos:position,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::NONE}]);output.textures_delta.clear();}
-        let request=receiver.try_recv().unwrap();let answer=request.auth_answer.as_ref().unwrap();assert!(answer.cancel);assert!(answer.answers.is_empty());assert!(answer.username.is_empty());assert!(!answer.save_credentials);
-        let mut output=frame(&context,&mut dialog,vec![key(egui::Key::Escape)]);output.textures_delta.clear();assert!(receiver.try_recv().is_err());
+    for login in [false, true] {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        crate::ui_fonts::install(&context);
+        let view = View {
+            challenge: Some(KeyboardAuthChallenge {
+                login,
+                username_editable: login,
+                ..challenge()
+            }),
+            generation: 1,
+            ..Default::default()
+        };
+        let shared = Arc::new(Mutex::new(view.clone()));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let mut dialog = Dialog {
+            connection: Some(Connection {
+                shared,
+                sender,
+                stop: tokio::sync::watch::channel(false).0,
+                worker: None,
+            }),
+            view,
+            answers: vec![String::new()],
+            username: String::new(),
+            save_credentials: true,
+            last_catalog_refresh: 0,
+            focus: true,
+        };
+        let mut tree = None;
+        for _ in 0..3 {
+            let mut output = frame(&context, &mut dialog, vec![]);
+            tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+        }
+        let tree = tree.unwrap();
+        let node = &tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some("取消连接"))
+            .unwrap()
+            .1;
+        let position = crate::ui_layout_gate::bounds(node).center();
+        for pressed in [true, false] {
+            let mut output = frame(
+                &context,
+                &mut dialog,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            output.textures_delta.clear();
+        }
+        let request = receiver.try_recv().unwrap();
+        let answer = request.auth_answer.as_ref().unwrap();
+        assert!(answer.cancel);
+        assert!(answer.answers.is_empty());
+        assert!(answer.username.is_empty());
+        assert!(!answer.save_credentials);
+        let mut output = frame(&context, &mut dialog, vec![key(egui::Key::Escape)]);
+        output.textures_delta.clear();
+        assert!(receiver.try_recv().is_err());
     }
 }
 
@@ -250,8 +313,73 @@ fn login_dialog_submits_username_password_and_explicit_save_choice() {
 
 #[test]
 fn vault_unlock_is_a_local_prompt_without_server_password_saving_and_clears_after_submit() {
-    let context=egui::Context::default();crate::ui_fonts::install(&context);context.enable_accesskit();let mut challenge=challenge();challenge.vault_unlock=true;challenge.name="解锁凭据库".into();challenge.prompts[0].text="凭据库主密码".into();let view=View{challenge:Some(challenge),generation:1,..Default::default()};let shared=Arc::new(Mutex::new(view.clone()));let(sender,mut receiver)=tokio::sync::mpsc::channel(1);let(stop,_)=tokio::sync::watch::channel(false);let mut dialog=Dialog{connection:Some(Connection{shared,sender,stop,worker:None}),view,answers:vec![String::new()],focus:true,username:String::new(),save_credentials:false,last_catalog_refresh:0};
-    let mut rendered_labels=String::new();
-    for _ in 0..3{let mut output=frame(&context,&mut dialog,vec![]);output.textures_delta.clear();if let Some(tree)=output.platform_output.accesskit_update {for (_,node) in tree.nodes {if let Some(text)=node.label().or(node.value()){rendered_labels.push_str(text);rendered_labels.push(' ');}}}}let mut output=frame(&context,&mut dialog,vec![egui::Event::Text("local-master-secret".into())]);output.textures_delta.clear();let tree=output.platform_output.accesskit_update.unwrap();let labels=rendered_labels+&tree.nodes.iter().filter_map(|(_,n)|n.label().or(n.value())).collect::<Vec<_>>().join(" ");assert!(labels.contains("解锁并连接"));assert!(labels.contains("本地凭据库"));assert!(!labels.contains("保存账号与密码"));assert!(!format!("{tree:?}").contains("local-master-secret"));
-    let mut output=frame(&context,&mut dialog,vec![key(egui::Key::Enter)]);output.textures_delta.clear();let request=receiver.try_recv().unwrap();assert_eq!(request.auth_answer.as_ref().unwrap().answers,vec!["local-master-secret"]);assert!(dialog.answers.iter().all(String::is_empty));assert!(!request.auth_answer.as_ref().unwrap().save_credentials);
+    let context = egui::Context::default();
+    crate::ui_fonts::install(&context);
+    context.enable_accesskit();
+    let mut challenge = challenge();
+    challenge.vault_unlock = true;
+    challenge.name = "解锁凭据库".into();
+    challenge.prompts[0].text = "凭据库主密码".into();
+    let view = View {
+        challenge: Some(challenge),
+        generation: 1,
+        ..Default::default()
+    };
+    let shared = Arc::new(Mutex::new(view.clone()));
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let (stop, _) = tokio::sync::watch::channel(false);
+    let mut dialog = Dialog {
+        connection: Some(Connection {
+            shared,
+            sender,
+            stop,
+            worker: None,
+        }),
+        view,
+        answers: vec![String::new()],
+        focus: true,
+        username: String::new(),
+        save_credentials: false,
+        last_catalog_refresh: 0,
+    };
+    let mut rendered_labels = String::new();
+    for _ in 0..3 {
+        let mut output = frame(&context, &mut dialog, vec![]);
+        output.textures_delta.clear();
+        if let Some(tree) = output.platform_output.accesskit_update {
+            for (_, node) in tree.nodes {
+                if let Some(text) = node.label().or(node.value()) {
+                    rendered_labels.push_str(text);
+                    rendered_labels.push(' ');
+                }
+            }
+        }
+    }
+    let mut output = frame(
+        &context,
+        &mut dialog,
+        vec![egui::Event::Text("local-master-secret".into())],
+    );
+    output.textures_delta.clear();
+    let tree = output.platform_output.accesskit_update.unwrap();
+    let labels = rendered_labels
+        + &tree
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| n.label().or(n.value()))
+            .collect::<Vec<_>>()
+            .join(" ");
+    assert!(labels.contains("解锁并连接"));
+    assert!(labels.contains("本地凭据库"));
+    assert!(!labels.contains("保存账号与密码"));
+    assert!(!format!("{tree:?}").contains("local-master-secret"));
+    let mut output = frame(&context, &mut dialog, vec![key(egui::Key::Enter)]);
+    output.textures_delta.clear();
+    let request = receiver.try_recv().unwrap();
+    assert_eq!(
+        request.auth_answer.as_ref().unwrap().answers,
+        vec!["local-master-secret"]
+    );
+    assert!(dialog.answers.iter().all(String::is_empty));
+    assert!(!request.auth_answer.as_ref().unwrap().save_credentials);
 }

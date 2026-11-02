@@ -88,20 +88,19 @@ impl Panel {
             ui.weak("* 匹配名称，** 匹配多层目录；最多 16 项。加载方案只切换目录，传输仍需比较后提交。");
             let can_save=view.peer.is_some()&&view.sync_pending.is_none()&&self.preset_navigation.is_none();
             ui.horizontal(|ui|{
-                if ui.add_enabled(can_save,egui::Button::new("保存方案")).clicked(){
-                    if let (Some(peer),Some(local),Some(remote))=(&view.peer,&view.local_directory,&view.remote_loaded_directory){
-                        let preset=SyncPreset{id:self.preset_id.unwrap_or_else(SessionId::new),name:self.preset_name.trim().into(),peer:peer.clone(),local:local.clone(),remote:remote.clone(),direction:self.direction.unwrap_or(SftpQueueDirection::Upload),excludes:self.rules(),compare_content:self.compare_content.unwrap_or(true),preserve_modified:self.preserve_modified};
+                if ui.add_enabled(can_save,egui::Button::new("保存方案")).clicked()
+                    && let (Some(peer),Some(local),Some(remote))=(&view.peer,&view.local_directory,&view.remote_loaded_directory){
+                        let preset=SyncPreset{id:self.preset_id.unwrap_or_default(),name:self.preset_name.trim().into(),peer:peer.clone(),local:local.clone(),remote:remote.clone(),direction:self.direction.unwrap_or(SftpQueueDirection::Upload),excludes:self.rules(),compare_content:self.compare_content.unwrap_or(true),preserve_modified:self.preserve_modified};
                         let id=preset.id;
                         #[cfg(not(test))] let saved=crate::sftp_settings::save_sync_preset(preset);
                         #[cfg(test)] let saved=Ok::<_,String>(vec![preset]);
                         match saved{Ok(values)=>{self.presets=values;self.preset_id=Some(id);self.local_error=None;},Err(error)=>self.local_error=Some(error)}
                     }
-                }
-                if ui.add_enabled(self.preset_id.is_some()&&view.sync_pending.is_none(),egui::Button::new("删除方案")).clicked(){if let Some(id)=self.preset_id {
+                if ui.add_enabled(self.preset_id.is_some()&&view.sync_pending.is_none(),egui::Button::new("删除方案")).clicked()&& let Some(id)=self.preset_id {
                     #[cfg(not(test))] let saved=crate::sftp_settings::delete_sync_preset(id);
                     #[cfg(test)] let saved=Ok::<_,String>(self.presets.iter().filter(|p|p.id!=id).cloned().collect::<Vec<_>>());
                     match saved{Ok(values)=>{self.presets=values;self.preset_id=None;},Err(error)=>self.local_error=Some(error)}
-                }}
+                }
             });
         });
         if let Some(preset) = selected {

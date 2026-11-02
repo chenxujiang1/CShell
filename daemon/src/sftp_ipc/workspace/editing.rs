@@ -350,15 +350,30 @@ impl SftpIpcService {
                     );
                 }
                 if document.queued_item.is_none() {
-                    let epoch=target.generation();
-                    let client=target.open_sftp().await.map_err(|_|"保存前无法读取服务器版本；本地草稿保留")?;
-                    let checked=client.inspect_entry(&document.remote_path,MAX_SFTP_EDIT_BYTES as u64).await;
-                    let _=client.close().await;
-                    let checked=checked.map_err(|_|"保存前无法核对服务器版本；本地草稿保留")?;
-                    if !target.running()||target.generation()!=epoch || checked.as_ref().is_none_or(|entry|
-                        entry.content.map(|c|SftpVerifiedContent{size:c.size,sha256:c.sha256})!=Some(document.base)
-                        || entry.metadata.permissions.map(|p|p&0o7777)!=document.base_permissions) {
-                        return Err("服务器文件已变化，尚未上传。请点击“查看差异 / 冲突 / 备份”，核对后接受保存基线；本地草稿保留");
+                    let epoch = target.generation();
+                    let client = target
+                        .open_sftp()
+                        .await
+                        .map_err(|_| "保存前无法读取服务器版本；本地草稿保留")?;
+                    let checked = client
+                        .inspect_entry(&document.remote_path, MAX_SFTP_EDIT_BYTES as u64)
+                        .await;
+                    let _ = client.close().await;
+                    let checked = checked.map_err(|_| "保存前无法核对服务器版本；本地草稿保留")?;
+                    if !target.running()
+                        || target.generation() != epoch
+                        || checked.as_ref().is_none_or(|entry| {
+                            entry.content.map(|c| SftpVerifiedContent {
+                                size: c.size,
+                                sha256: c.sha256,
+                            }) != Some(document.base)
+                                || entry.metadata.permissions.map(|p| p & 0o7777)
+                                    != document.base_permissions
+                        })
+                    {
+                        return Err(
+                            "服务器文件已变化，尚未上传。请点击“查看差异 / 冲突 / 备份”，核对后接受保存基线；本地草稿保留",
+                        );
                     }
                     let actual = open_edit_source(std::path::Path::new(&document.local_path))
                         .await?
@@ -535,7 +550,7 @@ impl SftpIpcService {
                 {
                     return Err("remote edit digest mismatch");
                 }
-                super::review::save_base(document.id,&bytes).await?;
+                super::review::save_base(document.id, &bytes).await?;
                 persist_new(PathBuf::from(&document.local_path), bytes).await?;
                 Ok((remote_path, content, permissions))
             }

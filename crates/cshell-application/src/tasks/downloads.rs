@@ -656,8 +656,8 @@ impl DownloadStatusDocument {
                 return Err(TaskError::Invalid);
             }
         }
-        if let Some(job) = &self.recovery {
-            if job.row_revision == 0
+        if let Some(job) = &self.recovery
+            && (job.row_revision == 0
                 || job.row_revision > i64::MAX as u64
                 || !self
                     .targets
@@ -670,10 +670,9 @@ impl DownloadStatusDocument {
                         || (job.operation == DownloadRecoveryOperation::Probe)
                             != job.probe.is_some())
                 || job.status == FileRecoveryStatus::Failed
-                    && (job.error.is_none() || job.probe.is_some())
-            {
-                return Err(TaskError::Invalid);
-            }
+                    && (job.error.is_none() || job.probe.is_some()))
+        {
+            return Err(TaskError::Invalid);
         }
         Ok(())
     }

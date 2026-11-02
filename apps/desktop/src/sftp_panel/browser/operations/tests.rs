@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::super::tests::{click, draw, fixture};
 use super::*;
 use crate::ui_layout_gate::{bounds, context};
@@ -98,16 +105,52 @@ fn populated() -> (SftpPanel, SftpView, SessionId) {
 }
 
 #[test]
-fn keyboard_selection_follows_sort_and_tab_switches_panes_without_stealing_text(){
-    let ctx=context();let(mut panel,view,_)=populated();panel.browser.navigation.active=1;
-    for _ in 0..3{frame(&ctx,&mut panel,&view,vec![],Modifiers::NONE);}
-    frame(&ctx,&mut panel,&view,key(Key::ArrowDown,Modifiers::NONE),Modifiers::NONE);
-    assert_eq!(panel.browser.selection[1].cursor.as_deref(),Some("/home/operator/file-0.txt"));
-    frame(&ctx,&mut panel,&view,key(Key::ArrowDown,Modifiers::SHIFT),Modifiers::SHIFT);
-    assert_eq!(panel.browser.selection[1].paths.len(),2);
-    frame(&ctx,&mut panel,&view,key(Key::End,Modifiers::NONE),Modifiers::NONE);
-    assert_eq!(panel.browser.selection[1].cursor.as_deref(),Some("/home/operator/file-3.txt"));assert_eq!(panel.browser.selection[1].paths.len(),1);
-    frame(&ctx,&mut panel,&view,key(Key::Tab,Modifiers::NONE),Modifiers::NONE);assert_eq!(panel.browser.navigation.active,0);
+fn keyboard_selection_follows_sort_and_tab_switches_panes_without_stealing_text() {
+    let ctx = context();
+    let (mut panel, view, _) = populated();
+    panel.browser.navigation.active = 1;
+    for _ in 0..3 {
+        frame(&ctx, &mut panel, &view, vec![], Modifiers::NONE);
+    }
+    frame(
+        &ctx,
+        &mut panel,
+        &view,
+        key(Key::ArrowDown, Modifiers::NONE),
+        Modifiers::NONE,
+    );
+    assert_eq!(
+        panel.browser.selection[1].cursor.as_deref(),
+        Some("/home/operator/file-0.txt")
+    );
+    frame(
+        &ctx,
+        &mut panel,
+        &view,
+        key(Key::ArrowDown, Modifiers::SHIFT),
+        Modifiers::SHIFT,
+    );
+    assert_eq!(panel.browser.selection[1].paths.len(), 2);
+    frame(
+        &ctx,
+        &mut panel,
+        &view,
+        key(Key::End, Modifiers::NONE),
+        Modifiers::NONE,
+    );
+    assert_eq!(
+        panel.browser.selection[1].cursor.as_deref(),
+        Some("/home/operator/file-3.txt")
+    );
+    assert_eq!(panel.browser.selection[1].paths.len(), 1);
+    frame(
+        &ctx,
+        &mut panel,
+        &view,
+        key(Key::Tab, Modifiers::NONE),
+        Modifiers::NONE,
+    );
+    assert_eq!(panel.browser.navigation.active, 0);
 }
 #[test]
 fn ctrl_shift_and_right_click_preserve_sorted_ranges_and_scope() {
@@ -253,27 +296,78 @@ fn f2_opens_inline_rename_and_does_not_steal_text_edit_shortcuts() {
 }
 
 #[test]
-fn f4_opens_selected_remote_file_directly_and_never_edits_a_directory(){
-    let ctx=context();let (mut panel,view,session)=populated();
-    for _ in 0..3 {frame(&ctx,&mut panel,&view,vec![],Modifiers::NONE);}
-    pointer_click(&ctx,&mut panel,&view,"file-1.txt",PointerButton::Primary,Modifiers::NONE);
-    let (_,command)=frame(&ctx,&mut panel,&view,key(Key::F4,Modifiers::NONE),Modifiers::NONE);
-    assert_eq!(panel.page,2);
-    let Some(SftpClientCommand::Workspace(id,request))=command else{panic!("editor request missing");};assert_eq!(id,session);assert_eq!(request.operation,SftpOperation::EditOpen);
-    let options:cshell_application::SftpBrowseOptions=serde_json::from_slice(&request.data).unwrap();assert_eq!(options.path,"/home/operator/file-1.txt");assert!(!options.local);
-    assert!(panel.open_remote_editor(session,&view,"/missing").is_none());
+fn f4_opens_selected_remote_file_directly_and_never_edits_a_directory() {
+    let ctx = context();
+    let (mut panel, view, session) = populated();
+    for _ in 0..3 {
+        frame(&ctx, &mut panel, &view, vec![], Modifiers::NONE);
+    }
+    pointer_click(
+        &ctx,
+        &mut panel,
+        &view,
+        "file-1.txt",
+        PointerButton::Primary,
+        Modifiers::NONE,
+    );
+    let (_, command) = frame(
+        &ctx,
+        &mut panel,
+        &view,
+        key(Key::F4, Modifiers::NONE),
+        Modifiers::NONE,
+    );
+    assert_eq!(panel.page, 2);
+    let Some(SftpClientCommand::Workspace(id, request)) = command else {
+        panic!("editor request missing");
+    };
+    assert_eq!(id, session);
+    assert_eq!(request.operation, SftpOperation::EditOpen);
+    let options: cshell_application::SftpBrowseOptions =
+        serde_json::from_slice(&request.data).unwrap();
+    assert_eq!(options.path, "/home/operator/file-1.txt");
+    assert!(!options.local);
+    assert!(
+        panel
+            .open_remote_editor(session, &view, "/missing")
+            .is_none()
+    );
 }
 #[test]
-fn folder_and_file_selection_starts_one_bound_tree_and_keeps_regular_files_on_existing_queue(){
-    let (mut panel,mut view,session)=populated();
-    let folder=cshell_ipc::SftpDirectoryEntry{name:"folder".into(),path:"/home/operator/folder".into(),kind:2,..Default::default()};view.entries.push(folder.clone());
-    panel.browser.selection[1].paths.insert(folder.path.clone());panel.browser.selection[1].paths.insert(view.entries[0].path.clone());
-    assert_eq!(panel.drag_selection(session,&view,false,&folder).len(),2);
-    panel.transfer_selection(session,&view,false);assert!(panel.browser.staged.is_empty());
-    let tree=panel.browser.tree.as_ref().unwrap();assert_eq!(tree.direction,SftpQueueDirection::Download);assert_eq!(tree.paths.len(),2);assert_eq!(Some(tree.destination.as_str()),view.local_directory.as_deref());
-    let mut command=None;panel.submit_dropped(session,&view,&mut command);
-    assert!(matches!(command,Some(SftpClientCommand::Tree(id,SftpOperation::TreeStart,_,Some(_))) if id==session));
-    panel.request_rejected();assert!(panel.browser.tree.is_some());assert!(!panel.browser.tree_auto);
+fn folder_and_file_selection_starts_one_bound_tree_and_keeps_regular_files_on_existing_queue() {
+    let (mut panel, mut view, session) = populated();
+    let folder = cshell_ipc::SftpDirectoryEntry {
+        name: "folder".into(),
+        path: "/home/operator/folder".into(),
+        kind: 2,
+        ..Default::default()
+    };
+    view.entries.push(folder.clone());
+    panel.browser.selection[1].paths.insert(folder.path.clone());
+    panel.browser.selection[1]
+        .paths
+        .insert(view.entries[0].path.clone());
+    assert_eq!(
+        panel.drag_selection(session, &view, false, &folder).len(),
+        2
+    );
+    panel.transfer_selection(session, &view, false);
+    assert!(panel.browser.staged.is_empty());
+    let tree = panel.browser.tree.as_ref().unwrap();
+    assert_eq!(tree.direction, SftpQueueDirection::Download);
+    assert_eq!(tree.paths.len(), 2);
+    assert_eq!(
+        Some(tree.destination.as_str()),
+        view.local_directory.as_deref()
+    );
+    let mut command = None;
+    panel.submit_dropped(session, &view, &mut command);
+    assert!(
+        matches!(command,Some(SftpClientCommand::Tree(id,SftpOperation::TreeStart,_,Some(_))) if id==session)
+    );
+    panel.request_rejected();
+    assert!(panel.browser.tree.is_some());
+    assert!(!panel.browser.tree_auto);
 }
 #[test]
 fn selected_files_transfer_and_drag_as_a_group() {

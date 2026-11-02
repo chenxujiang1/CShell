@@ -68,10 +68,9 @@ impl OutputSearchPanel {
                     egui::Button::new("从头检索此目标输出"),
                 )
                 .clicked()
+                && let Some(request) = &request
             {
-                if let Some(request) = &request {
-                    let _queued = connection.launch(request.clone(), hash, child);
-                }
+                let _queued = connection.launch(request.clone(), hash, child);
             }
             if !view.status.is_empty() {
                 ui.label(&view.status);
@@ -168,12 +167,10 @@ impl OutputSearchPanel {
                             egui::Button::new("续查下一批匹配"),
                         )
                         .clicked()
+                        && let Some(request) = &request
+                        && let Ok(Some(next)) = request.next(document)
                     {
-                        if let Some(request) = &request
-                            && let Ok(Some(next)) = request.next(document)
-                        {
-                            let _queued = connection.launch(next, hash, child);
-                        }
+                        let _queued = connection.launch(next, hash, child);
                     }
                     if result.next.is_none() {
                         ui.label("该起始位置之后的匹配已返回完毕。");

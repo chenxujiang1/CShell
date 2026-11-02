@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::*;
 use cshell_domain::TerminalSize;
 use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};

@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use crate::{OpenSshImportOptions, import_openssh_config};
 use cshell_domain::{ProfileKind, ProfileRecord, SshConnectionRecord};
@@ -321,24 +328,51 @@ fn importer_only_accepts_representable_auth_and_trust_settings() {
 }
 
 #[test]
-fn keyboard_interactive_export_preserves_password_second_factor_and_round_trips(){
-    let mut connection=target(ProfileId::new());connection.options.keyboard_interactive=true;
-    let snapshot=catalog(vec![connection]);let bytes=export_openssh_config(&snapshot,&[]).unwrap();
-    assert!(std::str::from_utf8(&bytes).unwrap().contains("PreferredAuthentications keyboard-interactive,password"));
-    let imported=import_openssh_config(&bytes,OpenSshImportOptions::default()).unwrap();assert_eq!(imported.ssh_connections[0].auth_method,SshAuthMethod::Password);assert!(imported.ssh_connections[0].options.keyboard_interactive);
+fn keyboard_interactive_export_preserves_password_second_factor_and_round_trips() {
+    let mut connection = target(ProfileId::new());
+    connection.options.keyboard_interactive = true;
+    let snapshot = catalog(vec![connection]);
+    let bytes = export_openssh_config(&snapshot, &[]).unwrap();
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("PreferredAuthentications keyboard-interactive,password")
+    );
+    let imported = import_openssh_config(&bytes, OpenSshImportOptions::default()).unwrap();
+    assert_eq!(
+        imported.ssh_connections[0].auth_method,
+        SshAuthMethod::Password
+    );
+    assert!(imported.ssh_connections[0].options.keyboard_interactive);
 }
 
 #[test]
 fn ordered_password_export_preserves_sequence_and_refuses_unrepresentable_combinations() {
     let mut connection = target(ProfileId::new());
-    connection.options.authentication_order = vec![SshAuthStep::Password, SshAuthStep::KeyboardInteractive];
+    connection.options.authentication_order =
+        vec![SshAuthStep::Password, SshAuthStep::KeyboardInteractive];
     let bytes = export_openssh_config(&catalog(vec![connection.clone()]), &[]).unwrap();
-    assert!(String::from_utf8_lossy(&bytes).contains("PreferredAuthentications password,keyboard-interactive"));
+    assert!(
+        String::from_utf8_lossy(&bytes)
+            .contains("PreferredAuthentications password,keyboard-interactive")
+    );
     let imported = import_openssh_config(&bytes, OpenSshImportOptions::default()).unwrap();
-    assert_eq!(imported.ssh_connections[0].authentication_steps(), connection.authentication_steps());
-    connection.options.authentication_order.push(SshAuthStep::Agent);
-    assert_eq!(export_openssh_config(&catalog(vec![connection.clone()]), &[]), Err(OpenSshExportError::AuthenticationOrder));
+    assert_eq!(
+        imported.ssh_connections[0].authentication_steps(),
+        connection.authentication_steps()
+    );
+    connection
+        .options
+        .authentication_order
+        .push(SshAuthStep::Agent);
+    assert_eq!(
+        export_openssh_config(&catalog(vec![connection.clone()]), &[]),
+        Err(OpenSshExportError::AuthenticationOrder)
+    );
     connection.options.authentication_order = vec![SshAuthStep::Password];
     connection.username.clear();
-    assert_eq!(export_openssh_config(&catalog(vec![connection]), &[]), Err(OpenSshExportError::Value));
+    assert_eq!(
+        export_openssh_config(&catalog(vec![connection]), &[]),
+        Err(OpenSshExportError::Value)
+    );
 }

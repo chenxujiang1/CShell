@@ -23,7 +23,9 @@ pub enum OpenSshExportError {
     Agent,
     #[error("OpenSSH export requires absolute key references without environment expansion")]
     KeyPath,
-    #[error("this authentication combination cannot be represented exactly in OpenSSH; use CShell profile export")]
+    #[error(
+        "this authentication combination cannot be represented exactly in OpenSSH; use CShell profile export"
+    )]
     AuthenticationOrder,
     #[error("a target contains characters that cannot be safely represented in OpenSSH config")]
     Value,
@@ -89,10 +91,11 @@ pub fn export_openssh_config(
             .iter()
             .find(|profile| profile.id == id)
             .ok_or(OpenSshExportError::Catalog)?;
-        if target.username.is_empty() || !target
-            .host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-_:%".contains(c))
+        if target.username.is_empty()
+            || !target
+                .host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".-_:%".contains(c))
             || !target
                 .username
                 .chars()
@@ -123,27 +126,58 @@ pub fn export_openssh_config(
             SshAuthMethod::Certificate => SshAuthStep::Certificate,
             SshAuthMethod::Agent => SshAuthStep::Agent,
         };
-        if (target.auth_method == SshAuthMethod::Password && steps.iter().any(|s| !matches!(s, SshAuthStep::Password | SshAuthStep::KeyboardInteractive)))
+        if (target.auth_method == SshAuthMethod::Password
+            && steps
+                .iter()
+                .any(|s| !matches!(s, SshAuthStep::Password | SshAuthStep::KeyboardInteractive)))
             || (target.auth_method != SshAuthMethod::Password && steps != [primary])
-        { return Err(OpenSshExportError::AuthenticationOrder); }
+        {
+            return Err(OpenSshExportError::AuthenticationOrder);
+        }
         match target.auth_method {
             SshAuthMethod::Password => {
-                let order = steps.iter().map(|step| if *step == SshAuthStep::KeyboardInteractive { "keyboard-interactive" } else { "password" }).collect::<Vec<_>>().join(",");
-                writeln!(output, "    PreferredAuthentications {order}").map_err(|_| OpenSshExportError::Limit)?;
-                output.push_str("    IdentityAgent none\n    IdentityFile none\n    CertificateFile none\n");
-            },
+                let order = steps
+                    .iter()
+                    .map(|step| {
+                        if *step == SshAuthStep::KeyboardInteractive {
+                            "keyboard-interactive"
+                        } else {
+                            "password"
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(output, "    PreferredAuthentications {order}")
+                    .map_err(|_| OpenSshExportError::Limit)?;
+                output.push_str(
+                    "    IdentityAgent none\n    IdentityFile none\n    CertificateFile none\n",
+                );
+            }
             SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
                 output.push_str("    PreferredAuthentications publickey\n    IdentitiesOnly yes\n    IdentityAgent none\n");
-                let key = target.private_key_path.as_deref().ok_or(OpenSshExportError::KeyPath)?;
-                writeln!(output, "    IdentityFile {}", key_reference(key)?).map_err(|_| OpenSshExportError::Limit)?;
+                let key = target
+                    .private_key_path
+                    .as_deref()
+                    .ok_or(OpenSshExportError::KeyPath)?;
+                writeln!(output, "    IdentityFile {}", key_reference(key)?)
+                    .map_err(|_| OpenSshExportError::Limit)?;
                 if target.auth_method == SshAuthMethod::Certificate {
-                    let certificate = target.certificate_path.as_deref().ok_or(OpenSshExportError::KeyPath)?;
-                    writeln!(output, "    CertificateFile {}\n    PubkeyAcceptedKeyTypes *-cert-v01@openssh.com", key_reference(certificate)?).map_err(|_| OpenSshExportError::Limit)?;
+                    let certificate = target
+                        .certificate_path
+                        .as_deref()
+                        .ok_or(OpenSshExportError::KeyPath)?;
+                    writeln!(
+                        output,
+                        "    CertificateFile {}\n    PubkeyAcceptedKeyTypes *-cert-v01@openssh.com",
+                        key_reference(certificate)?
+                    )
+                    .map_err(|_| OpenSshExportError::Limit)?;
                 } else {
                     // Exclude certificate algorithms, including implicit <key>-cert.pub discovery.
-                    output.push_str("    CertificateFile none\n    PubkeyAcceptedKeyTypes -*cert*\n");
+                    output
+                        .push_str("    CertificateFile none\n    PubkeyAcceptedKeyTypes -*cert*\n");
                 }
-            },
+            }
             SshAuthMethod::Agent => {
                 if target.agent_backend == SshAgentBackend::Pageant
                     || (cfg!(windows) && target.agent_backend == SshAgentBackend::Auto)
@@ -152,7 +186,7 @@ pub fn export_openssh_config(
                     return Err(OpenSshExportError::Agent);
                 }
                 output.push_str("    PreferredAuthentications publickey\n    IdentitiesOnly no\n    IdentityFile none\n    CertificateFile none\n");
-            },
+            }
         }
         match target.route {
             SshRoute::Jump { profile_id } => {

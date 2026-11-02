@@ -19,6 +19,7 @@ pub enum ExportFileError {
     Published,
 }
 /// Staged streaming publication. The destination remains absent until publish.
+#[derive(Debug)]
 pub struct ExportStaging {
     destination: PathBuf,
     file: Option<tempfile::NamedTempFile>,
@@ -145,6 +146,7 @@ pub fn publish_export_file(
 }
 /// A private flat directory export. Reservation is exclusive; publication can be
 /// partially visible on failure, reported as Published, and is never auto-replayed.
+#[derive(Debug)]
 pub struct ExportDirectoryStaging {
     destination: PathBuf,
     directory: tempfile::TempDir,

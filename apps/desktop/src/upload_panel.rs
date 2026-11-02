@@ -216,16 +216,15 @@ impl UploadPanel {
             })
             .response
             .rect;
-        if let Some(document) = &view.document {
-            if document.active
-                && !view.busy
-                && self
-                    .refresh_at
-                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
-                && connection.get(document.id, false)
-            {
-                self.refresh_at = Some(Instant::now());
-            }
+        if let Some(document) = &view.document
+            && document.active
+            && !view.busy
+            && self
+                .refresh_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+            && connection.get(document.id, false)
+        {
+            self.refresh_at = Some(Instant::now());
         }
         rect
     }
@@ -396,8 +395,7 @@ impl UploadPanel {
             .clicked()
             && let (Some(manifest), Some(selection), Some(expected), Some(snapshot)) =
                 (manifest, selection, expected, snapshot)
-        {
-            if connection.create(
+            && connection.create(
                 manifest.clone(),
                 selection,
                 expected
@@ -406,10 +404,10 @@ impl UploadPanel {
                     .collect::<BTreeSet<_>>(),
                 snapshot.revision,
                 snapshot.profile_revision,
-            ) {
-                self.create_confirm = false;
-                self.status.clear();
-            }
+            )
+        {
+            self.create_confirm = false;
+            self.status.clear();
         }
     }
     fn review(

@@ -138,12 +138,25 @@ impl SshConnectionOptions {
     }
 
     pub fn new_profile() -> Self {
-        Self { authentication_order: vec![SshAuthStep::KeyboardInteractive,SshAuthStep::Password], auto_reconnect: true, ..Self::default() }
+        Self {
+            authentication_order: vec![SshAuthStep::KeyboardInteractive, SshAuthStep::Password],
+            auto_reconnect: true,
+            ..Self::default()
+        }
     }
 
     pub fn is_valid(&self) -> bool {
-        self.authentication_order.len()<=5 && self.authentication_order.iter().collect::<std::collections::BTreeSet<_>>().len()==self.authentication_order.len()
-            && self.zmodem_download_directory.as_ref().is_none_or(|p| !p.trim().is_empty() && p.len() <= 4096 && !p.contains('\0'))
+        self.authentication_order.len() <= 5
+            && self
+                .authentication_order
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == self.authentication_order.len()
+            && self
+                .zmodem_download_directory
+                .as_ref()
+                .is_none_or(|p| !p.trim().is_empty() && p.len() <= 4096 && !p.contains('\0'))
             && (1..=3600).contains(&self.keepalive_interval_secs)
             && (1..=10).contains(&self.keepalive_max)
             && (1..=300).contains(&self.reconnect_delay_secs)
@@ -253,20 +266,38 @@ pub fn reserved_local_environment_name(key: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("CSHELL_"))
 }
 
-#[derive(Clone,Copy,Debug,Eq,PartialEq,Ord,PartialOrd,Serialize,Deserialize)]
-#[serde(rename_all="snake_case")]
-pub enum SshAuthStep {KeyboardInteractive,Password,PrivateKey,Certificate,Agent}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthStep {
+    KeyboardInteractive,
+    Password,
+    PrivateKey,
+    Certificate,
+    Agent,
+}
 impl SshConnectionRecord {
-    pub fn authentication_steps(&self)->Vec<SshAuthStep> {
-        if !self.options.authentication_order.is_empty(){return self.options.authentication_order.clone();}
+    pub fn authentication_steps(&self) -> Vec<SshAuthStep> {
+        if !self.options.authentication_order.is_empty() {
+            return self.options.authentication_order.clone();
+        }
         match self.auth_method {
-            SshAuthMethod::Password if self.options.keyboard_interactive => vec![SshAuthStep::KeyboardInteractive, SshAuthStep::Password],
+            SshAuthMethod::Password if self.options.keyboard_interactive => {
+                vec![SshAuthStep::KeyboardInteractive, SshAuthStep::Password]
+            }
             SshAuthMethod::Password => vec![SshAuthStep::Password],
             SshAuthMethod::PrivateKey => vec![SshAuthStep::PrivateKey],
             SshAuthMethod::Certificate => vec![SshAuthStep::Certificate],
             SshAuthMethod::Agent => vec![SshAuthStep::Agent],
         }
     }
-    pub fn uses_password(&self)->bool {self.authentication_steps().iter().any(|m|matches!(m,SshAuthStep::Password|SshAuthStep::KeyboardInteractive))}
-    pub fn uses_private_key(&self)->bool {self.authentication_steps().iter().any(|m|matches!(m,SshAuthStep::PrivateKey|SshAuthStep::Certificate))}
+    pub fn uses_password(&self) -> bool {
+        self.authentication_steps()
+            .iter()
+            .any(|m| matches!(m, SshAuthStep::Password | SshAuthStep::KeyboardInteractive))
+    }
+    pub fn uses_private_key(&self) -> bool {
+        self.authentication_steps()
+            .iter()
+            .any(|m| matches!(m, SshAuthStep::PrivateKey | SshAuthStep::Certificate))
+    }
 }

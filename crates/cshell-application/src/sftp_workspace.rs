@@ -317,7 +317,7 @@ pub fn decode_sftp_workspace(bytes: &[u8]) -> Result<SftpWorkspaceReply, &'stati
     let value: SftpWorkspaceReply =
         serde_json::from_slice(bytes).map_err(|_| "invalid workspace reply")?;
     match &value {
-        SftpWorkspaceReply::Review(review)=>review.validate()?,
+        SftpWorkspaceReply::Review(review) => review.validate()?,
         SftpWorkspaceReply::Peer { session, peer } => {
             if session.as_uuid().is_nil()
                 || peer.host_key_sha256.is_empty()
@@ -376,9 +376,9 @@ pub struct SftpConnectionInfo {
     pub title: String,
     pub peer: cshell_domain::ClipboardTrust,
     pub running: bool,
-    #[serde(default, skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_from: Option<cshell_domain::SessionId>,
-    #[serde(default, skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_directory: Option<String>,
 }
 

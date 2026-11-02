@@ -220,7 +220,7 @@ impl DesktopClipboardPolicy {
         let mut replacement: Option<ClipboardPolicyDocument> = None;
         let mut refresh = false;
         let mut input_error = None;
-        cshell_ui::form::dialog(&context, "剪贴板安全策略")
+        cshell_ui::form::dialog(context, "剪贴板安全策略")
             .open(&mut open)
             .default_width(560.0)
             .show(context, |ui| {

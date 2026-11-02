@@ -115,8 +115,10 @@ impl TerminalSelection {
         let first_row = start.row.min(snapshot.rows - 1);
         let last_row = end.row.min(snapshot.rows - 1);
         for row in first_row..=last_row {
-            let continued = row > first_row && snapshot.row(row - 1)
-                .is_some_and(|cells| cells.iter().any(Cell::soft_wrap));
+            let continued = row > first_row
+                && snapshot
+                    .row(row - 1)
+                    .is_some_and(|cells| cells.iter().any(Cell::soft_wrap));
             if row > first_row && (self.mode == TerminalSelectionMode::Block || !continued) {
                 push_bounded(&mut output, "\n")?;
             }
@@ -140,9 +142,13 @@ impl TerminalSelection {
                     push_bounded(&mut output, character.encode_utf8(&mut encoded))?;
                 }
             }
-            if self.mode != TerminalSelectionMode::Block && last_column == snapshot.cols.saturating_sub(1)
-                && !cells.iter().any(Cell::soft_wrap) {
-                while output.len() > row_start && output.ends_with(' ') { output.pop(); }
+            if self.mode != TerminalSelectionMode::Block
+                && last_column == snapshot.cols.saturating_sub(1)
+                && !cells.iter().any(Cell::soft_wrap)
+            {
+                while output.len() > row_start && output.ends_with(' ') {
+                    output.pop();
+                }
             }
         }
         Ok(output)
@@ -166,7 +172,10 @@ impl TerminalSelection {
     }
 
     fn endpoints(self, snapshot: &FrameSnapshot) -> (TerminalCellPoint, TerminalCellPoint) {
-        let (mut start, mut end) = ordered_points(snap_wide_point(snapshot, self.anchor), snap_wide_point(snapshot, self.focus));
+        let (mut start, mut end) = ordered_points(
+            snap_wide_point(snapshot, self.anchor),
+            snap_wide_point(snapshot, self.focus),
+        );
         if self.mode == TerminalSelectionMode::Word {
             start = word_edge(snapshot, start, false, DEFAULT_WORD_DELIMITERS);
             end = word_edge(snapshot, end, true, DEFAULT_WORD_DELIMITERS);
@@ -177,58 +186,148 @@ impl TerminalSelection {
     /// Expand once at pointer-event time, rather than scanning words per glyph.
     #[must_use]
     pub fn expanded(self, snapshot: &FrameSnapshot) -> Self {
-        if self.mode != TerminalSelectionMode::Word { return self; }
+        if self.mode != TerminalSelectionMode::Word {
+            return self;
+        }
         let (anchor, focus) = self.endpoints(snapshot);
-        Self { anchor, focus, mode: TerminalSelectionMode::Character }
+        Self {
+            anchor,
+            focus,
+            mode: TerminalSelectionMode::Character,
+        }
     }
     #[must_use]
-    pub fn expanded_with_delimiters(self, snapshot:&FrameSnapshot, delimiters:&str)->Self {
-        if self.mode!=TerminalSelectionMode::Word{return self;}
-        let (start,end)=ordered_points(snap_wide_point(snapshot,self.anchor),snap_wide_point(snapshot,self.focus));
-        Self { anchor:word_edge(snapshot,start,false,delimiters),focus:word_edge(snapshot,end,true,delimiters),mode:TerminalSelectionMode::Character }
+    pub fn expanded_with_delimiters(self, snapshot: &FrameSnapshot, delimiters: &str) -> Self {
+        if self.mode != TerminalSelectionMode::Word {
+            return self;
+        }
+        let (start, end) = ordered_points(
+            snap_wide_point(snapshot, self.anchor),
+            snap_wide_point(snapshot, self.focus),
+        );
+        Self {
+            anchor: word_edge(snapshot, start, false, delimiters),
+            focus: word_edge(snapshot, end, true, delimiters),
+            mode: TerminalSelectionMode::Character,
+        }
     }
     #[must_use]
-    pub fn expanded_lines(self,snapshot:&FrameSnapshot)->Self {
-        let mut first=self.anchor.row.min(self.focus.row);let mut last=self.anchor.row.max(self.focus.row);
-        while first>0&&snapshot.row(first-1).is_some_and(|r|r.iter().any(Cell::soft_wrap)){first-=1;}
-        while last.saturating_add(1)<snapshot.rows&&snapshot.row(last).is_some_and(|r|r.iter().any(Cell::soft_wrap)){last+=1;}
-        Self {anchor:TerminalCellPoint{row:first,column:0},focus:TerminalCellPoint{row:last,column:snapshot.cols.saturating_sub(1)},mode:TerminalSelectionMode::Character}
+    pub fn expanded_lines(self, snapshot: &FrameSnapshot) -> Self {
+        let mut first = self.anchor.row.min(self.focus.row);
+        let mut last = self.anchor.row.max(self.focus.row);
+        while first > 0
+            && snapshot
+                .row(first - 1)
+                .is_some_and(|r| r.iter().any(Cell::soft_wrap))
+        {
+            first -= 1;
+        }
+        while last.saturating_add(1) < snapshot.rows
+            && snapshot
+                .row(last)
+                .is_some_and(|r| r.iter().any(Cell::soft_wrap))
+        {
+            last += 1;
+        }
+        Self {
+            anchor: TerminalCellPoint {
+                row: first,
+                column: 0,
+            },
+            focus: TerminalCellPoint {
+                row: last,
+                column: snapshot.cols.saturating_sub(1),
+            },
+            mode: TerminalSelectionMode::Character,
+        }
     }
 }
 
 /// Shared by native preferences and callers that use the default word rules.
 pub const DEFAULT_WORD_DELIMITERS: &str = "\"'`[]{}()<>|;,:=：，；（）【】「」『』“”‘’";
 
-fn word_edge(snapshot: &FrameSnapshot, point: TerminalCellPoint, right: bool, delimiters:&str) -> TerminalCellPoint {
+fn word_edge(
+    snapshot: &FrameSnapshot,
+    point: TerminalCellPoint,
+    right: bool,
+    delimiters: &str,
+) -> TerminalCellPoint {
     let class = |c: char| -> u8 {
-        if c.is_whitespace() { 0 }
-        else if delimiters.contains(c) { 2 }
-        else { 1 }
+        if c.is_whitespace() {
+            0
+        } else if delimiters.contains(c) {
+            2
+        } else {
+            1
+        }
     };
-    let Some(row) = snapshot.row(point.row) else { return point; };
-    let Some(cell) = row.get(usize::from(point.column)) else { return point; };
+    let Some(row) = snapshot.row(point.row) else {
+        return point;
+    };
+    let Some(cell) = row.get(usize::from(point.column)) else {
+        return point;
+    };
     let category = class(cell.character);
-    if category == 2 { return point; }
+    if category == 2 {
+        return point;
+    }
     let mut current = point;
     loop {
         let next = if right {
-            if current.column + 1 < snapshot.cols { TerminalCellPoint { column: current.column + 1, ..current } }
-            else if current.row + 1 < snapshot.rows && snapshot.row(current.row).is_some_and(|r| r.iter().any(Cell::soft_wrap)) {
-                TerminalCellPoint { row: current.row + 1, column: 0 }
-            } else { break; }
-        } else if current.column > 0 { TerminalCellPoint { column: current.column - 1, ..current } }
-        else if current.row > 0 && snapshot.row(current.row - 1).is_some_and(|r| r.iter().any(Cell::soft_wrap)) {
-            TerminalCellPoint { row: current.row - 1, column: snapshot.cols.saturating_sub(1) }
-        } else { break; };
-        let Some(cell) = snapshot.row(next.row).and_then(|r| r.get(usize::from(next.column))) else { break; };
+            if current.column + 1 < snapshot.cols {
+                TerminalCellPoint {
+                    column: current.column + 1,
+                    ..current
+                }
+            } else if current.row + 1 < snapshot.rows
+                && snapshot
+                    .row(current.row)
+                    .is_some_and(|r| r.iter().any(Cell::soft_wrap))
+            {
+                TerminalCellPoint {
+                    row: current.row + 1,
+                    column: 0,
+                }
+            } else {
+                break;
+            }
+        } else if current.column > 0 {
+            TerminalCellPoint {
+                column: current.column - 1,
+                ..current
+            }
+        } else if current.row > 0
+            && snapshot
+                .row(current.row - 1)
+                .is_some_and(|r| r.iter().any(Cell::soft_wrap))
+        {
+            TerminalCellPoint {
+                row: current.row - 1,
+                column: snapshot.cols.saturating_sub(1),
+            }
+        } else {
+            break;
+        };
+        let Some(cell) = snapshot
+            .row(next.row)
+            .and_then(|r| r.get(usize::from(next.column)))
+        else {
+            break;
+        };
         // The second column of a wide punctuation character belongs to that
         // punctuation. Skipping its class lets the left boundary land on the
         // spacer, which later snaps back and incorrectly includes the mark.
         let character = if cell.width == CellWidth::WideSpacer {
-            snapshot.row(next.row).and_then(|row| row.get(usize::from(next.column.saturating_sub(1))))
+            snapshot
+                .row(next.row)
+                .and_then(|row| row.get(usize::from(next.column.saturating_sub(1))))
                 .map_or(cell.character, |leader| leader.character)
-        } else { cell.character };
-        if cell.width != CellWidth::LeadingWideSpacer && class(character) != category { break; }
+        } else {
+            cell.character
+        };
+        if cell.width != CellWidth::LeadingWideSpacer && class(character) != category {
+            break;
+        }
         current = next;
     }
     current
@@ -422,15 +521,34 @@ fn push_bounded(output: &mut String, text: &str) -> Result<(), TerminalInteracti
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     #[test]
     fn custom_word_delimiters_and_logical_line_selection_follow_wrapping() {
-        use cshell_terminal::{AlacrittyTerminalEngine,TerminalEngine};
-        let mut engine=AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(3,8));
-        engine.feed(b"/var/log/file\r\nnext");let s=engine.snapshot();
-        let selection=super::TerminalSelection{anchor:super::TerminalCellPoint{row:0,column:2},focus:super::TerminalCellPoint{row:0,column:2},mode:super::TerminalSelectionMode::Word};
-        assert_eq!(selection.expanded_with_delimiters(&s,"/").text(&s).unwrap(),"var");
-        assert_eq!(selection.expanded_lines(&s).text(&s).unwrap(),"/var/log/file");
+        use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
+        let mut engine = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(3, 8));
+        engine.feed(b"/var/log/file\r\nnext");
+        let s = engine.snapshot();
+        let selection = super::TerminalSelection {
+            anchor: super::TerminalCellPoint { row: 0, column: 2 },
+            focus: super::TerminalCellPoint { row: 0, column: 2 },
+            mode: super::TerminalSelectionMode::Word,
+        };
+        assert_eq!(
+            selection
+                .expanded_with_delimiters(&s, "/")
+                .text(&s)
+                .unwrap(),
+            "var"
+        );
+        assert_eq!(
+            selection.expanded_lines(&s).text(&s).unwrap(),
+            "/var/log/file"
+        );
     }
     #[test]
     fn copy_joins_soft_wrap_but_preserves_hard_break_and_block_padding() {
@@ -438,17 +556,30 @@ mod tests {
         let mut terminal = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(4, 6));
         terminal.feed(b"abcdefgh\r\nnext");
         let snapshot = terminal.snapshot();
-        assert!(snapshot.row(0).unwrap().iter().any(cshell_terminal::Cell::soft_wrap));
+        assert!(
+            snapshot
+                .row(0)
+                .unwrap()
+                .iter()
+                .any(cshell_terminal::Cell::soft_wrap)
+        );
         let selection = super::TerminalSelection {
             anchor: super::TerminalCellPoint { row: 0, column: 0 },
             focus: super::TerminalCellPoint { row: 2, column: 5 },
             mode: super::TerminalSelectionMode::Character,
         };
         assert_eq!(selection.text(&snapshot).unwrap(), "abcdefgh\nnext");
-        let block = super::TerminalSelection { mode: super::TerminalSelectionMode::Block, ..selection };
+        let block = super::TerminalSelection {
+            mode: super::TerminalSelectionMode::Block,
+            ..selection
+        };
         assert_eq!(block.text(&snapshot).unwrap(), "abcdef\ngh    \nnext  ");
-        let word = super::TerminalSelection { anchor: super::TerminalCellPoint { row: 1, column: 1 },
-            focus: super::TerminalCellPoint { row: 1, column: 1 }, mode: super::TerminalSelectionMode::Word }.expanded(&snapshot);
+        let word = super::TerminalSelection {
+            anchor: super::TerminalCellPoint { row: 1, column: 1 },
+            focus: super::TerminalCellPoint { row: 1, column: 1 },
+            mode: super::TerminalSelectionMode::Word,
+        }
+        .expanded(&snapshot);
         assert_eq!(word.text(&snapshot).unwrap(), "abcdefgh");
     }
     use super::{

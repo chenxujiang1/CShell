@@ -13,8 +13,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = args.get(1).ok_or("supply an output .ppm path")?;
     let width: usize = args.get(2).map_or(Ok(1280), |s| s.parse())?;
     let height: usize = args.get(3).map_or(Ok(800), |s| s.parse())?;
-    let scale:f32=args.get(5).map_or(Ok(1.0),|s|s.parse())?;
-    if !(1.0..=2.0).contains(&scale){return Err("scale must be 1 through 2".into());}
+    let scale: f32 = args.get(5).map_or(Ok(1.0), |s| s.parse())?;
+    if !(1.0..=2.0).contains(&scale) {
+        return Err("scale must be 1 through 2".into());
+    }
     let context = egui::Context::default();
     context.set_pixels_per_point(scale);
     cshell_ui::install_workbench_style(&context);
@@ -26,7 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))),
     );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        let chain=fonts.families.entry(family).or_default();chain.insert(1.min(chain.len()),"cjk".into());
+        let chain = fonts.families.entry(family).or_default();
+        chain.insert(1.min(chain.len()), "cjk".into());
     }
     context.set_fonts(fonts);
     let folder = cshell_domain::FolderId::new();
@@ -73,41 +76,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         model.profile_folders[0].name = "开发环境 / 长分组名称测试".into();
         model.saved_ssh_profiles[0].name = "应用服务器 / Production SSH".into();
     }
-    let show_tabs=args.get(4).is_some_and(|value|value=="tab-search");
+    let show_tabs = args.get(4).is_some_and(|value| value == "tab-search");
     if show_tabs {
-        for index in 3..20 {model.tabs.push(WorkspaceTabViewModel{id:TabId::new(),title:format!("维护服务器 {index:02}"),session_id:Some(SessionId::new())});}
+        for index in 3..20 {
+            model.tabs.push(WorkspaceTabViewModel {
+                id: TabId::new(),
+                title: format!("维护服务器 {index:02}"),
+                session_id: Some(SessionId::new()),
+            });
+        }
     }
     let mut document = cshell_domain::WorkspaceDocument::default();
     for (index, tab) in model.tabs.iter().enumerate() {
         document.tab_groups[0].tabs.push(tab.id);
         document.bindings.push(cshell_domain::WorkspaceBinding {
             tab_id: tab.id,
-            profile_id: if index != 2 {Some(model.saved_ssh_profiles[index % model.saved_ssh_profiles.len()].id)} else {None},
+            profile_id: if index != 2 {
+                Some(model.saved_ssh_profiles[index % model.saved_ssh_profiles.len()].id)
+            } else {
+                None
+            },
             title: tab.title.clone(),
         });
-        if index != 2 {model.ssh_tab_states.insert(tab.id,cshell_ui::SshConnectionState::Connected);}
+        if index != 2 {
+            model
+                .ssh_tab_states
+                .insert(tab.id, cshell_ui::SshConnectionState::Connected);
+        }
     }
-    if args.get(4).is_some_and(|value|value=="environment-split") {
+    if args
+        .get(4)
+        .is_some_and(|value| value == "environment-split")
+    {
         use cshell_domain::*;
-        model.profile_folders[0].name="服务器".into();
-        model.saved_ssh_profiles[0].target="deploy@prod-app.example:22".into();
-        model.saved_ssh_profiles[1].target="admin@staging-db.example:22".into();
-        model.profile_environments.insert(model.saved_ssh_profiles[0].id,cshell_ui::environment::Environment::Production);
-        model.profile_environments.insert(model.saved_ssh_profiles[1].id,cshell_ui::environment::Environment::Staging);
-        let original=document.tab_groups[0].id;let other=TabGroupId::new();let first=PaneId::new();let second=PaneId::new();
-        document.panes[0].content=WorkspacePaneContent::Split{axis:SplitAxis::Horizontal,ratio_permille:500,first,second};
-        document.panes.extend([WorkspacePane{id:first,content:WorkspacePaneContent::Tabs{group_id:original}},WorkspacePane{id:second,content:WorkspacePaneContent::Tabs{group_id:other}}]);
-        document.tab_groups[0].tabs=vec![model.tabs[0].id,model.tabs[2].id];
-        document.tab_groups.push(WorkspaceTabGroup{id:other,tabs:vec![model.tabs[1].id],active_tab:Some(model.tabs[1].id)});
+        model.profile_folders[0].name = "服务器".into();
+        model.saved_ssh_profiles[0].target = "deploy@prod-app.example:22".into();
+        model.saved_ssh_profiles[1].target = "admin@staging-db.example:22".into();
+        model.profile_environments.insert(
+            model.saved_ssh_profiles[0].id,
+            cshell_ui::environment::Environment::Production,
+        );
+        model.profile_environments.insert(
+            model.saved_ssh_profiles[1].id,
+            cshell_ui::environment::Environment::Staging,
+        );
+        let original = document.tab_groups[0].id;
+        let other = TabGroupId::new();
+        let first = PaneId::new();
+        let second = PaneId::new();
+        document.panes[0].content = WorkspacePaneContent::Split {
+            axis: SplitAxis::Horizontal,
+            ratio_permille: 500,
+            first,
+            second,
+        };
+        document.panes.extend([
+            WorkspacePane {
+                id: first,
+                content: WorkspacePaneContent::Tabs { group_id: original },
+            },
+            WorkspacePane {
+                id: second,
+                content: WorkspacePaneContent::Tabs { group_id: other },
+            },
+        ]);
+        document.tab_groups[0].tabs = vec![model.tabs[0].id, model.tabs[2].id];
+        document.tab_groups.push(WorkspaceTabGroup {
+            id: other,
+            tabs: vec![model.tabs[1].id],
+            active_tab: Some(model.tabs[1].id),
+        });
     }
-    if args.get(4).is_some_and(|value|value=="focus") {model.sidebar_hidden=true;model.toolbar_hidden=true;}
+    if args.get(4).is_some_and(|value| value == "focus") {
+        model.sidebar_hidden = true;
+        model.toolbar_hidden = true;
+    }
     document.tab_groups[0].active_tab = model.selected_tab;
     model.workspace_window_id = Some(document.windows[0].id);
     model.workspace_document = Some(document);
-    if show_tabs {model.tab_navigator.show(model.selected_tab);}
+    if show_tabs {
+        model.tab_navigator.show(model.selected_tab);
+    }
     model.can_disconnect_ssh = true;
     model.can_restart_ssh = true;
-    model.reusable_ssh_sessions = model.tabs.iter().filter_map(|t|t.session_id).collect();
+    model.reusable_ssh_sessions = model.tabs.iter().filter_map(|t| t.session_id).collect();
     if args.get(4).is_some_and(|value| value == "disconnected") {
         model.daemon_connected = false;
         model.can_sftp = false;
@@ -115,7 +167,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         model.can_disconnect_ssh = false;
         model.reusable_ssh_sessions.clear();
         model.tabs[0].session_id = None;
-        model.ssh_tab_states.insert(model.tabs[0].id, cshell_ui::SshConnectionState::Disconnected);
+        model.ssh_tab_states.insert(
+            model.tabs[0].id,
+            cshell_ui::SshConnectionState::Disconnected,
+        );
     }
     let mut textures = HashMap::<TextureId, egui::ColorImage>::new();
     let mut primitives = Vec::new();
@@ -138,17 +193,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let _ = ui.button("同步输入");
-                            let _ = ui.selectable_label(false,"查找");
-                            let _ = ui.selectable_label(false,"发送");
-                            let _ = ui.selectable_label(false,"快捷命令");
+                            let _ = ui.selectable_label(false, "查找");
+                            let _ = ui.selectable_label(false, "发送");
+                            let _ = ui.selectable_label(false, "快捷命令");
                             let mut secure = false;
                             ui.checkbox(&mut secure, "安全输入");
                         });
                     });
                 let rect = cshell_ui::draw_workbench_content(ui, &mut model);
                 for pane in &model.pane_views {
-                    ui.painter().with_clip_rect(pane.rect).rect_filled(pane.rect,0.0,Color32::from_rgb(15,20,29));
-                    if pane.tab_id!=model.selected_tab {ui.painter().with_clip_rect(pane.rect).text(pane.rect.min+vec2(18.0,18.0),egui::Align2::LEFT_TOP,"示例会话 · 未连接服务器",FontId::proportional(13.0),Color32::from_rgb(140,158,184));}
+                    ui.painter().with_clip_rect(pane.rect).rect_filled(
+                        pane.rect,
+                        0.0,
+                        Color32::from_rgb(15, 20, 29),
+                    );
+                    if pane.tab_id != model.selected_tab {
+                        ui.painter().with_clip_rect(pane.rect).text(
+                            pane.rect.min + vec2(18.0, 18.0),
+                            egui::Align2::LEFT_TOP,
+                            "示例会话 · 未连接服务器",
+                            FontId::proportional(13.0),
+                            Color32::from_rgb(140, 158, 184),
+                        );
+                    }
                 }
                 let painter = ui.painter().with_clip_rect(rect);
                 painter.rect_filled(rect, 0.0, Color32::from_rgb(15, 20, 29));
@@ -219,8 +286,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         primitives = context.tessellate(frame.shapes, scale);
     }
     for primitive in &mut primitives {
-        primitive.clip_rect=egui::Rect::from_min_max(pos2(primitive.clip_rect.min.x*scale,primitive.clip_rect.min.y*scale),pos2(primitive.clip_rect.max.x*scale,primitive.clip_rect.max.y*scale));
-        if let egui::epaint::Primitive::Mesh(mesh)=&mut primitive.primitive {for vertex in &mut mesh.vertices {vertex.pos=pos2(vertex.pos.x*scale,vertex.pos.y*scale);}}
+        primitive.clip_rect = egui::Rect::from_min_max(
+            pos2(
+                primitive.clip_rect.min.x * scale,
+                primitive.clip_rect.min.y * scale,
+            ),
+            pos2(
+                primitive.clip_rect.max.x * scale,
+                primitive.clip_rect.max.y * scale,
+            ),
+        );
+        if let egui::epaint::Primitive::Mesh(mesh) = &mut primitive.primitive {
+            for vertex in &mut mesh.vertices {
+                vertex.pos = pos2(vertex.pos.x * scale, vertex.pos.y * scale);
+            }
+        }
     }
-    raster::write(output,(width as f32*scale).round() as usize,(height as f32*scale).round() as usize,primitives,&textures)
+    raster::write(
+        output,
+        (width as f32 * scale).round() as usize,
+        (height as f32 * scale).round() as usize,
+        primitives,
+        &textures,
+    )
 }

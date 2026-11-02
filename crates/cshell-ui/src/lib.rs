@@ -1,9 +1,9 @@
 //! Egui workbench controls. Terminal cells are never represented as egui widgets.
 
-pub mod form;
-pub mod feedback;
-pub mod theme;
 pub mod environment;
+pub mod feedback;
+pub mod form;
+pub mod theme;
 pub mod workbench_layout;
 
 use cshell_domain::{
@@ -198,8 +198,18 @@ pub enum WorkbenchMenuCommand {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod menu_layout_tests;
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod polish_tests;
 mod workbench;
 pub mod workbench_icons;
@@ -209,6 +219,11 @@ pub use workbench::{
 };
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::{WorkbenchMenuCommand, WorkbenchViewModel, draw_workbench};
 
@@ -576,18 +591,53 @@ mod tests {
 
     #[test]
     fn shared_ssh_copy_menu_separates_channel_from_independent_session() {
-        let context=classic_context();context.enable_accesskit();
-        let tab=cshell_domain::TabId::new();let source=cshell_domain::SessionId::new();
-        let mut model=WorkbenchViewModel{selected_tab:Some(tab),tabs:vec![super::WorkspaceTabViewModel{id:tab,title:"SSH host".into(),session_id:Some(source)}],reusable_ssh_sessions:vec![source],..Default::default()};
-        model.ssh_tab_states.insert(tab,super::SshConnectionState::Connected);
-        for _ in 0..2{frame(&context,&mut model,vec![]);}
-        let tree=frame(&context,&mut model,vec![]);click(&context,&mut model,button_center(&tree,"会话"));
-        let tree=frame(&context,&mut model,vec![]);let _=button_center(&tree,"复制 SSH 会话");
-        click(&context,&mut model,button_center(&tree,"复制 SSH 渠道"));assert_eq!(model.menu_command,Some(WorkbenchMenuCommand::CloneSshChannel(tab)));
-        model.menu_command=None;let tree=frame(&context,&mut model,vec![]);click(&context,&mut model,button_center(&tree,"会话"));
-        let tree=frame(&context,&mut model,vec![]);click(&context,&mut model,button_center(&tree,"复制 SSH 会话"));assert_eq!(model.menu_command,Some(WorkbenchMenuCommand::CloneWorkspaceSession(tab)));
-        model.reusable_ssh_sessions.clear();let tree=frame(&context,&mut model,vec![]);click(&context,&mut model,button_center(&tree,"会话"));
-        let tree=frame(&context,&mut model,vec![]);assert!(tree.nodes.iter().any(|(_,n)|n.label()==Some("复制 SSH 渠道") && n.is_disabled()));
+        let context = classic_context();
+        context.enable_accesskit();
+        let tab = cshell_domain::TabId::new();
+        let source = cshell_domain::SessionId::new();
+        let mut model = WorkbenchViewModel {
+            selected_tab: Some(tab),
+            tabs: vec![super::WorkspaceTabViewModel {
+                id: tab,
+                title: "SSH host".into(),
+                session_id: Some(source),
+            }],
+            reusable_ssh_sessions: vec![source],
+            ..Default::default()
+        };
+        model
+            .ssh_tab_states
+            .insert(tab, super::SshConnectionState::Connected);
+        for _ in 0..2 {
+            frame(&context, &mut model, vec![]);
+        }
+        let tree = frame(&context, &mut model, vec![]);
+        click(&context, &mut model, button_center(&tree, "会话"));
+        let tree = frame(&context, &mut model, vec![]);
+        let _ = button_center(&tree, "复制 SSH 会话");
+        click(&context, &mut model, button_center(&tree, "复制 SSH 渠道"));
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::CloneSshChannel(tab))
+        );
+        model.menu_command = None;
+        let tree = frame(&context, &mut model, vec![]);
+        click(&context, &mut model, button_center(&tree, "会话"));
+        let tree = frame(&context, &mut model, vec![]);
+        click(&context, &mut model, button_center(&tree, "复制 SSH 会话"));
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::CloneWorkspaceSession(tab))
+        );
+        model.reusable_ssh_sessions.clear();
+        let tree = frame(&context, &mut model, vec![]);
+        click(&context, &mut model, button_center(&tree, "会话"));
+        let tree = frame(&context, &mut model, vec![]);
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, n)| n.label() == Some("复制 SSH 渠道") && n.is_disabled())
+        );
     }
 
     #[test]
@@ -714,13 +764,48 @@ mod tests {
 
     #[test]
     fn saved_profile_context_menu_can_open_sftp_without_any_terminal() {
-        let context=classic_context();context.enable_accesskit();let id=cshell_domain::ProfileId::new();
-        let mut model=WorkbenchViewModel{saved_ssh_profiles:vec![super::SavedSshProfileViewModel{id,name:"SFTP only".into(),target:"files@example.test:22".into(),favorite:false,folder_id:None,kind:cshell_domain::ProfileKind::Ssh}],..Default::default()};
-        let tree=frame(&context,&mut model,vec![]);let pos=button_center(&tree,"SFTP only");
-        for pressed in [true,false] {frame(&context,&mut model,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Secondary,pressed,modifiers:Default::default()}]);}
-        for _ in 0..3 {frame(&context,&mut model,vec![]);}
-        let tree=frame(&context,&mut model,vec![]);let target=button_center(&tree,"打开 SFTP");click(&context,&mut model,target);
-        assert_eq!(model.menu_command,Some(WorkbenchMenuCommand::OpenSavedSftp(id)));assert!(model.sessions.is_empty());
+        let context = classic_context();
+        context.enable_accesskit();
+        let id = cshell_domain::ProfileId::new();
+        let mut model = WorkbenchViewModel {
+            saved_ssh_profiles: vec![super::SavedSshProfileViewModel {
+                id,
+                name: "SFTP only".into(),
+                target: "files@example.test:22".into(),
+                favorite: false,
+                folder_id: None,
+                kind: cshell_domain::ProfileKind::Ssh,
+            }],
+            ..Default::default()
+        };
+        let tree = frame(&context, &mut model, vec![]);
+        let pos = button_center(&tree, "SFTP only");
+        for pressed in [true, false] {
+            frame(
+                &context,
+                &mut model,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        for _ in 0..3 {
+            frame(&context, &mut model, vec![]);
+        }
+        let tree = frame(&context, &mut model, vec![]);
+        let target = button_center(&tree, "打开 SFTP");
+        click(&context, &mut model, target);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::OpenSavedSftp(id))
+        );
+        assert!(model.sessions.is_empty());
     }
 
     #[test]
@@ -809,7 +894,11 @@ mod tests {
         let active = cshell_domain::SessionId::new();
         let mut model = WorkbenchViewModel {
             selected: Some(active),
-            sessions: vec![super::SessionTabViewModel { id: target, title: "Retained session".into(), connected: false }],
+            sessions: vec![super::SessionTabViewModel {
+                id: target,
+                title: "Retained session".into(),
+                connected: false,
+            }],
             ..Default::default()
         };
         let first = frame(&context, &mut model, vec![]);
@@ -923,18 +1012,37 @@ mod tests {
         let mut model = WorkbenchViewModel::default();
         frame(&context, &mut model, vec![]);
         frame(&context, &mut model, vec![]);
-        let panel_width = || egui::containers::panel::PanelState::load(&context, egui::Id::new("classic-session-tree")).unwrap().size().x;
+        let panel_width = || {
+            egui::containers::panel::PanelState::load(
+                &context,
+                egui::Id::new("classic-session-tree"),
+            )
+            .unwrap()
+            .size()
+            .x
+        };
         let initial = panel_width();
-        model.saved_ssh_profiles.push(super::SavedSshProfileViewModel {
-            id: cshell_domain::ProfileId::new(), name: "Production SSH server with a long name".into(),
-            target: "operator@very-long-production-host.example.test:2222".into(),
-            favorite: false, folder_id: None, kind: cshell_domain::ProfileKind::Ssh,
-        });
+        model
+            .saved_ssh_profiles
+            .push(super::SavedSshProfileViewModel {
+                id: cshell_domain::ProfileId::new(),
+                name: "Production SSH server with a long name".into(),
+                target: "operator@very-long-production-host.example.test:2222".into(),
+                favorite: false,
+                folder_id: None,
+                kind: cshell_domain::ProfileKind::Ssh,
+            });
         frame(&context, &mut model, vec![]);
         let tree = frame(&context, &mut model, vec![]);
         let expanded = panel_width();
-        assert!(expanded > initial + 40.0, "sidebar must grow for content: {initial} -> {expanded}");
-        assert!(expanded <= 480.0 + 1.0, "auto width must leave terminal space");
+        assert!(
+            expanded > initial + 40.0,
+            "sidebar must grow for content: {initial} -> {expanded}"
+        );
+        assert!(
+            expanded <= 480.0 + 1.0,
+            "auto width must leave terminal space"
+        );
         let collapse = button_center(&tree, "收起会话管理器");
         click(&context, &mut model, collapse);
         assert!(model.sidebar_hidden);
@@ -944,26 +1052,73 @@ mod tests {
         assert!(!model.sidebar_hidden);
         frame(&context, &mut model, vec![]);
         let edge = egui::pos2(panel_width(), 350.0);
-        frame(&context, &mut model, vec![egui::Event::PointerMoved(edge), egui::Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]);
+        frame(
+            &context,
+            &mut model,
+            vec![
+                egui::Event::PointerMoved(edge),
+                egui::Event::PointerButton {
+                    pos: edge,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
         let dragged = edge - egui::vec2(100.0, 0.0);
-        frame(&context, &mut model, vec![egui::Event::PointerMoved(dragged)]);
-        frame(&context, &mut model, vec![egui::Event::PointerMoved(dragged)]);
-        frame(&context, &mut model, vec![egui::Event::PointerButton { pos: dragged, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]);
-        let tree = frame(&context, &mut model, vec![]);
-        assert!(model.sidebar_width.is_some(), "edge drag must enable manual sizing");
+        frame(
+            &context,
+            &mut model,
+            vec![egui::Event::PointerMoved(dragged)],
+        );
+        frame(
+            &context,
+            &mut model,
+            vec![egui::Event::PointerMoved(dragged)],
+        );
+        frame(
+            &context,
+            &mut model,
+            vec![egui::Event::PointerButton {
+                pos: dragged,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let _ = frame(&context, &mut model, vec![]);
+        assert!(
+            model.sidebar_width.is_some(),
+            "edge drag must enable manual sizing"
+        );
         let manual = panel_width();
         assert!(manual < expanded - 40.0, "manual drag must change width");
-        assert!((manual - dragged.x).abs() <= 1.0, "release must stay at the pointer: {manual} vs {}", dragged.x);
+        assert!(
+            (manual - dragged.x).abs() <= 1.0,
+            "release must stay at the pointer: {manual} vs {}",
+            dragged.x
+        );
         for _ in 0..120 {
-            frame(&context, &mut model, vec![egui::Event::PointerMoved(egui::pos2(1000.0, 500.0))]);
-            assert!((panel_width() - manual).abs() < 1.0, "manual width drifted after release: {manual} -> {}", panel_width());
+            frame(
+                &context,
+                &mut model,
+                vec![egui::Event::PointerMoved(egui::pos2(1000.0, 500.0))],
+            );
+            assert!(
+                (panel_width() - manual).abs() < 1.0,
+                "manual width drifted after release: {manual} -> {}",
+                panel_width()
+            );
         }
         let tree = frame(&context, &mut model, vec![]);
         click(&context, &mut model, button_center(&tree, "收起会话管理器"));
         let tree = frame(&context, &mut model, vec![]);
         click(&context, &mut model, button_center(&tree, "展开会话管理器"));
         let tree = frame(&context, &mut model, vec![]);
-        assert!((panel_width() - manual).abs() < 1.0, "collapse/expand must retain the released width");
+        assert!(
+            (panel_width() - manual).abs() < 1.0,
+            "collapse/expand must retain the released width"
+        );
         let fit = button_center(&tree, "自动适应侧栏宽度");
         click(&context, &mut model, fit);
         frame(&context, &mut model, vec![]);
@@ -977,24 +1132,66 @@ mod tests {
         context.enable_accesskit();
         let mut model = WorkbenchViewModel {
             profile_folders: vec![cshell_domain::ProfileFolder {
-                id: cshell_domain::FolderId::new(), name: "生产环境部署会话分组".repeat(12),
-                parent_id: None, terminal: Default::default(),
-            }], ..Default::default()
+                id: cshell_domain::FolderId::new(),
+                name: "生产环境部署会话分组".repeat(12),
+                parent_id: None,
+                terminal: Default::default(),
+            }],
+            ..Default::default()
         };
-        for _ in 0..2 { frame(&context, &mut model, vec![]); }
-        let width = || egui::containers::panel::PanelState::load(&context, egui::Id::new("classic-session-tree")).unwrap().size().x;
+        for _ in 0..2 {
+            frame(&context, &mut model, vec![]);
+        }
+        let width = || {
+            egui::containers::panel::PanelState::load(
+                &context,
+                egui::Id::new("classic-session-tree"),
+            )
+            .unwrap()
+            .size()
+            .x
+        };
         let edge = egui::pos2(width(), 350.0);
-        frame(&context, &mut model, vec![egui::Event::PointerMoved(edge), egui::Event::PointerButton {pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE}]);
+        frame(
+            &context,
+            &mut model,
+            vec![
+                egui::Event::PointerMoved(edge),
+                egui::Event::PointerButton {
+                    pos: edge,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
         let end = egui::pos2(300.0, 350.0);
         frame(&context, &mut model, vec![egui::Event::PointerMoved(end)]);
         frame(&context, &mut model, vec![egui::Event::PointerMoved(end)]);
-        frame(&context, &mut model, vec![
-            egui::Event::PointerButton {pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE},
-            egui::Event::PointerMoved(egui::pos2(1000.0, 500.0)),
-        ]);
+        frame(
+            &context,
+            &mut model,
+            vec![
+                egui::Event::PointerButton {
+                    pos: end,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerMoved(egui::pos2(1000.0, 500.0)),
+            ],
+        );
         for _ in 0..120 {
-            frame(&context, &mut model, vec![egui::Event::PointerMoved(egui::pos2(1000.0, 500.0))]);
-            assert!((width() - end.x).abs() <= 1.0, "folder content expanded the released sidebar: {}", width());
+            frame(
+                &context,
+                &mut model,
+                vec![egui::Event::PointerMoved(egui::pos2(1000.0, 500.0))],
+            );
+            assert!(
+                (width() - end.x).abs() <= 1.0,
+                "folder content expanded the released sidebar: {}",
+                width()
+            );
         }
     }
 

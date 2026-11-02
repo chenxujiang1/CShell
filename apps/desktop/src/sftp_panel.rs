@@ -5,11 +5,11 @@ use cshell_ipc::SftpOperation;
 use cshell_ipc::{MAX_SFTP_PATH_BYTES, SftpCleanupLocation, SftpTransferState};
 mod advanced;
 mod browser;
-mod layout;
-mod visuals;
 mod connection;
+mod layout;
 mod tabs;
-pub(crate) use tabs::{RemoteTab,TabAction};
+mod visuals;
+pub(crate) use tabs::{RemoteTab, TabAction};
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
@@ -18,10 +18,11 @@ mod workflow_preview;
 pub struct SftpPanel {
     terminal_path: Option<TerminalPath>,
     pub open: bool,
-    pub(crate) remote_tabs:Vec<RemoteTab>,
-    pub(crate) available_hosts:Vec<(cshell_domain::ProfileId,String,String)>,
-    pub(crate) verification_overrides:std::collections::BTreeMap<cshell_domain::ProfileId,cshell_domain::SftpVerification>,
-    tab_action:Option<TabAction>,
+    pub(crate) remote_tabs: Vec<RemoteTab>,
+    pub(crate) available_hosts: Vec<(cshell_domain::ProfileId, String, String)>,
+    pub(crate) verification_overrides:
+        std::collections::BTreeMap<cshell_domain::ProfileId, cshell_domain::SftpVerification>,
+    tab_action: Option<TabAction>,
     host_prompt: Option<crate::host_key_prompt::HostKeyPrompt>,
     prompt_attempt: Option<SessionId>,
     profile_command: Option<crate::profile_connection::ProfileClientCommand>,
@@ -42,7 +43,13 @@ pub struct SftpPanel {
     browser: browser::BrowserState,
     layout: layout::LayoutState,
 }
-struct TerminalPath { session:SessionId,path:String,download:bool,phase:u8,generation:u64 }
+struct TerminalPath {
+    session: SessionId,
+    path: String,
+    download: bool,
+    phase: u8,
+    generation: u64,
+}
 
 impl std::fmt::Debug for SftpPanel {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,9 +66,13 @@ impl Default for SftpPanel {
         Self {
             terminal_path: None,
             open: false,
-            remote_tabs:Vec::new(),available_hosts:Vec::new(),tab_action:None,
-            verification_overrides:Default::default(),
-            host_prompt:None,prompt_attempt:None,profile_command:None,
+            remote_tabs: Vec::new(),
+            available_hosts: Vec::new(),
+            tab_action: None,
+            verification_overrides: Default::default(),
+            host_prompt: None,
+            prompt_attempt: None,
+            profile_command: None,
             page: 0,
             remote_directory: "/".into(),
             remote_file: String::new(),
@@ -83,9 +94,16 @@ impl Default for SftpPanel {
 }
 
 impl SftpPanel {
-    pub(crate) fn queue_terminal_path(&mut self,session:SessionId,path:String,download:bool) {
-        self.page=0;self.open=true;
-        self.terminal_path=Some(TerminalPath{session,path,download,phase:0,generation:0});
+    pub(crate) fn queue_terminal_path(&mut self, session: SessionId, path: String, download: bool) {
+        self.page = 0;
+        self.open = true;
+        self.terminal_path = Some(TerminalPath {
+            session,
+            path,
+            download,
+            phase: 0,
+            generation: 0,
+        });
     }
     fn browse(&self, session: SessionId, local: bool, path: String) -> SftpClientCommand {
         SftpClientCommand::BrowseManaged(
@@ -139,7 +157,7 @@ impl SftpPanel {
     ) -> Option<SftpClientCommand> {
         let context = ui.ctx().clone();
         if self.bound_session_id != session_id {
-            let local=self.take_local_ui();
+            let local = self.take_local_ui();
             self.bound_session_id = session_id;
             self.remote_directory = "/".into();
             self.remote_file.clear();
@@ -169,38 +187,76 @@ impl SftpPanel {
                 ui.label("在会话管理器中右键服务器，选择“打开 SFTP”。");
                 return;
             };
-            self.host_toolbar(ui,session,view,&mut command);
-            if let Some(view)=view && crate::connection_diagnostics::draw(ui,view.connection_trace.as_ref(),view.connection_phase==crate::sftp_connection::ConnectionPhase::Connecting,!view.connection_phase.busy()&&command.is_none()) {
-                if let Some(profile)=view.connection_profile{command=Some(crate::sftp_connection::lifecycle::connect(profile,view.connection_previous.or(Some(session))));}
+            self.host_toolbar(ui, session, view, &mut command);
+            if let Some(view) = view
+                && crate::connection_diagnostics::draw(
+                    ui,
+                    view.connection_trace.as_ref(),
+                    view.connection_phase == crate::sftp_connection::ConnectionPhase::Connecting,
+                    !view.connection_phase.busy() && command.is_none(),
+                )
+                && let Some(profile) = view.connection_profile
+            {
+                command = Some(crate::sftp_connection::lifecycle::connect(
+                    profile,
+                    view.connection_previous.or(Some(session)),
+                ));
             }
             ui.separator();
             if let Some(view) = view {
                 if let Some(error) = &view.error {
-                    let feedback=cshell_ui::feedback::explain(error);
-                    cshell_ui::form::utility_bar().show(ui,|ui| {
+                    let feedback = cshell_ui::feedback::explain(error);
+                    cshell_ui::form::utility_bar().show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(cshell_ui::theme::WARNING,feedback.title);
-                            if !view.connection_phase.busy() && ui.button("刷新任务状态").clicked(){command=Some(SftpClientCommand::QueueGet(session));}
-                            let connected=view.connection_profile.is_none()||view.connection_phase==crate::sftp_connection::ConnectionPhase::Connected;
-                            if connected && ui.button("刷新远端目录").clicked(){command=Some(self.navigate(session,false,view.remote_loaded_directory.clone().unwrap_or_else(||self.remote_directory.clone())));}
+                            ui.colored_label(cshell_ui::theme::WARNING, feedback.title);
+                            if !view.connection_phase.busy() && ui.button("刷新任务状态").clicked()
+                            {
+                                command = Some(SftpClientCommand::QueueGet(session));
+                            }
+                            let connected = view.connection_profile.is_none()
+                                || view.connection_phase
+                                    == crate::sftp_connection::ConnectionPhase::Connected;
+                            if connected && ui.button("刷新远端目录").clicked() {
+                                command = Some(
+                                    self.navigate(
+                                        session,
+                                        false,
+                                        view.remote_loaded_directory
+                                            .clone()
+                                            .unwrap_or_else(|| self.remote_directory.clone()),
+                                    ),
+                                );
+                            }
                         });
-                        if !feedback.guidance.is_empty(){ui.weak(feedback.guidance);}
-                        ui.collapsing("错误详情",|ui|{ui.label(error);});
+                        if !feedback.guidance.is_empty() {
+                            ui.weak(feedback.guidance);
+                        }
+                        ui.collapsing("错误详情", |ui| {
+                            ui.label(error);
+                        });
                     });
                 }
-                if view.connection_profile.is_some() && view.connection_phase != crate::sftp_connection::ConnectionPhase::Connected {self.page=0;}
-                if self.page!=0 {self.draw_remote_tabs(ui);}
+                if view.connection_profile.is_some()
+                    && view.connection_phase != crate::sftp_connection::ConnectionPhase::Connected
+                {
+                    self.page = 0;
+                }
+                if self.page != 0 {
+                    self.draw_remote_tabs(ui);
+                }
                 if self.page == 0 {
                     self.draw_browser(ui, &context, session, view, &mut command);
-                } else if self.page==2 {
-                    self.advanced.editor_page(ui,session,view,&self.remote_file,&mut command);
+                } else if self.page == 2 {
+                    self.advanced
+                        .editor_page(ui, session, view, &self.remote_file, &mut command);
                 } else {
                     egui::ScrollArea::vertical()
                         .id_salt("sftp-advanced-pages")
                         .show(ui, |ui| {
-                            if self.page == 1 && self
-                                .advanced
-                                .controls(ui, session, Some(view), &mut command)
+                            if self.page == 1
+                                && self
+                                    .advanced
+                                    .controls(ui, session, Some(view), &mut command)
                             {
                                 self.queue_confirm = false;
                             }
@@ -240,12 +296,18 @@ impl SftpPanel {
                 }
             }
         })();
-        self.draw_host_prompt(&context,view,&mut command);
+        self.draw_host_prompt(&context, view, &mut command);
         if let (Some(session), Some(view)) = (session_id, view) {
             self.file_operation_dialog(&context, session, view, &mut command);
         }
-        if let Some(error)=self.layout.flush(&context) {self.browser.set_layout_error(error);}
-        if command.is_none() && let Some(view)=view { command=self.process_terminal_path(&context,view); }
+        if let Some(error) = self.layout.flush(&context) {
+            self.browser.set_layout_error(error);
+        }
+        if command.is_none()
+            && let Some(view) = view
+        {
+            command = self.process_terminal_path(&context, view);
+        }
         command
     }
 

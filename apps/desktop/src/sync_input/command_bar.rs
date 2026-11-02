@@ -60,8 +60,13 @@ impl DesktopSyncInput {
         }
     }
     pub(super) fn request_compose_send(&mut self, active: TabId, force_preview: bool) {
-        if self.modal_blocked || self.panel_open || self.arm_review.is_some(){return;}
-        if !self.compose_can_send(){self.status="正文为空或超过发送长度限制，请调整后再发送".into();return;}
+        if self.modal_blocked || self.panel_open || self.arm_review.is_some() {
+            return;
+        }
+        if !self.compose_can_send() {
+            self.status = "正文为空或超过发送长度限制，请调整后再发送".into();
+            return;
+        }
         let source = if self.compose_uses_targets() && self.command_only {
             let Some(tab) = self
                 .controller
@@ -84,17 +89,22 @@ impl DesktopSyncInput {
                 .is_some_and(|p| !p.risk().requires_confirmation())
             {
                 if let Some(prepared) = self.pending_current.take() {
-                    if self.dispatch_current_with_approval(prepared, SyncInputApproval::Explicit) { self.finish_command_send(); }
-                    else { self.compose.focus_requested = true; }
+                    if self.dispatch_current_with_approval(prepared, SyncInputApproval::Explicit) {
+                        self.finish_command_send();
+                    } else {
+                        self.compose.focus_requested = true;
+                    }
                 }
             } else if self
                 .pending
                 .as_ref()
                 .is_some_and(|p| !p.risk().requires_confirmation())
+                && let Some(prepared) = self.pending.take()
             {
-                if let Some(prepared) = self.pending.take() {
-                    if self.dispatch(prepared, SyncInputApproval::Explicit) { self.finish_command_send(); }
-                    else { self.compose.focus_requested = true; }
+                if self.dispatch(prepared, SyncInputApproval::Explicit) {
+                    self.finish_command_send();
+                } else {
+                    self.compose.focus_requested = true;
                 }
             }
         }

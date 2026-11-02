@@ -84,7 +84,12 @@ fn entries(model: &WorkbenchViewModel) -> Vec<Entry> {
     }
     result
 }
-pub(super) fn searchable_tabs(model:&WorkbenchViewModel)->Vec<(TabId,String,String)>{entries(model).into_iter().map(|e|(e.tab,e.title,e.target)).collect()}
+pub(super) fn searchable_tabs(model: &WorkbenchViewModel) -> Vec<(TabId, String, String)> {
+    entries(model)
+        .into_iter()
+        .map(|e| (e.tab, e.title, e.target))
+        .collect()
+}
 
 pub(super) fn header(
     ui: &mut egui::Ui,
@@ -92,7 +97,7 @@ pub(super) fn header(
     header: egui::Rect,
     id: egui::Id,
 ) -> egui::Rect {
-    let width = header.width().max(0.0).min(88.0);
+    let width = header.width().clamp(0.0, 88.0);
     let tools =
         egui::Rect::from_min_max(egui::pos2(header.max.x - width, header.min.y), header.max);
     let mut row = ui.new_child(
@@ -118,9 +123,16 @@ pub(super) fn header(
             !model.ssh_control_busy && !model.layout_paused,
             egui::Button::new("标签").min_size(egui::vec2(48.0_f32.min(width * 0.6), 28.0)),
         )
-        .on_hover_text(format!("搜索本窗口全部标签（含其他分屏） · Ctrl+Shift+P\n{} 个标签有新输出", model.unread_output_tabs.len()));
+        .on_hover_text(format!(
+            "搜索本窗口全部标签（含其他分屏） · Ctrl+Shift+P\n{} 个标签有新输出",
+            model.unread_output_tabs.len()
+        ));
     if !model.unread_output_tabs.is_empty() {
-        row.painter().circle_filled(tab_list.rect.right_top() + egui::vec2(-5.0, 5.0), 3.0, theme::DANGER);
+        row.painter().circle_filled(
+            tab_list.rect.right_top() + egui::vec2(-5.0, 5.0),
+            3.0,
+            theme::DANGER,
+        );
     }
     if tab_list.clicked() {
         model.tab_navigator.show(model.selected_tab);
@@ -218,7 +230,9 @@ pub(super) fn draw(context: &egui::Context, model: &mut WorkbenchViewModel) {
                         entry.title, entry.target, entry.state, entry.group
                     );
                     let unread = model.unread_output_tabs.contains(&entry.tab);
-                    if unread { full.push_str(" · 有新输出"); }
+                    if unread {
+                        full.push_str(" · 有新输出");
+                    }
                     let response = ui
                         .push_id(entry.tab, |ui| {
                             let response = ui.add_enabled(
@@ -232,7 +246,13 @@ pub(super) fn draw(context: &egui::Context, model: &mut WorkbenchViewModel) {
                             });
                             let rect = response.rect;
                             let painter = ui.painter().with_clip_rect(rect);
-                            if unread { painter.circle_filled(rect.right_top() + egui::vec2(-10.0, 11.0), 3.0, theme::DANGER); }
+                            if unread {
+                                painter.circle_filled(
+                                    rect.right_top() + egui::vec2(-10.0, 11.0),
+                                    3.0,
+                                    theme::DANGER,
+                                );
+                            }
                             let text = rect.shrink2(egui::vec2(9.0, 0.0));
                             paint_line(
                                 &painter,

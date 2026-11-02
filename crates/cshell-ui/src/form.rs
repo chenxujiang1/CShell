@@ -65,8 +65,12 @@ pub fn menu(ui: &mut egui::Ui) {
 /// Menus use full-width rows so labels, hover feedback and hit targets align.
 pub fn menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
     ui.add_enabled_ui(enabled, |ui| {
-        ui.add_sized([ui.available_width(), 28.0], egui::Button::new(label).right_text(()))
-    }).inner
+        ui.add_sized(
+            [ui.available_width(), 28.0],
+            egui::Button::new(label).right_text(()),
+        )
+    })
+    .inner
 }
 
 /// Keep long submenus reachable without increasing their parent window.

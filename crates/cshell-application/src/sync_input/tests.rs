@@ -306,17 +306,54 @@ fn current_compose_confirmation_and_audit_failures_preserve_real_queue_outcome()
 
 #[test]
 fn explicit_command_enter_is_direct_but_embedded_controls_and_risky_bodies_require_review() {
-    let (mut controller,tabs)=fixture(2,SyncInputTargetKind::Ssh);
-    let review=controller.review_arm(SyncInputSelection::Manual,&tabs).checked();
-    controller.arm(review,SyncInputApproval::Confirmed).checked();
-    let prepared=controller.prepare_input(tabs[0],InputAction::Compose{text:"hostname".into(),append_enter:true},SyncInputContext::TerminalCommit,false).checked();
+    let (mut controller, tabs) = fixture(2, SyncInputTargetKind::Ssh);
+    let review = controller
+        .review_arm(SyncInputSelection::Manual, &tabs)
+        .checked();
+    controller
+        .arm(review, SyncInputApproval::Confirmed)
+        .checked();
+    let prepared = controller
+        .prepare_input(
+            tabs[0],
+            InputAction::Compose {
+                text: "hostname".into(),
+                append_enter: true,
+            },
+            SyncInputContext::TerminalCommit,
+            false,
+        )
+        .checked();
     assert!(!prepared.risk().requires_confirmation());
-    let receipt=controller.dispatch(prepared,SyncInputApproval::Explicit).checked();
-    assert_eq!(receipt.deliveries.len(),2);
-    for text in ["whoami\nhostname","echo x\rwhoami","echo \u{1b}[A","rm -rf /tmp/test","echo \u{202e}hidden","echo \u{200b}hidden","echo one\u{2028}two"] {
-        let prepared=controller.prepare_input(tabs[0],InputAction::Compose{text:text.into(),append_enter:true},SyncInputContext::TerminalCommit,false).checked();
+    let receipt = controller
+        .dispatch(prepared, SyncInputApproval::Explicit)
+        .checked();
+    assert_eq!(receipt.deliveries.len(), 2);
+    for text in [
+        "whoami\nhostname",
+        "echo x\rwhoami",
+        "echo \u{1b}[A",
+        "rm -rf /tmp/test",
+        "echo \u{202e}hidden",
+        "echo \u{200b}hidden",
+        "echo one\u{2028}two",
+    ] {
+        let prepared = controller
+            .prepare_input(
+                tabs[0],
+                InputAction::Compose {
+                    text: text.into(),
+                    append_enter: true,
+                },
+                SyncInputContext::TerminalCommit,
+                false,
+            )
+            .checked();
         assert!(prepared.risk().requires_confirmation());
-        assert!(matches!(controller.dispatch(prepared,SyncInputApproval::Explicit),Err(SyncInputError::ConfirmationRequired)));
+        assert!(matches!(
+            controller.dispatch(prepared, SyncInputApproval::Explicit),
+            Err(SyncInputError::ConfirmationRequired)
+        ));
     }
 }
 

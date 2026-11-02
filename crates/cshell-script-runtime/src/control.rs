@@ -11,6 +11,7 @@ pub struct ScriptTaskBinding {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct ScriptLiveScope {
     pub session: Option<SessionId>,
     pub secret_parameters: BTreeSet<String>,
@@ -18,17 +19,6 @@ pub struct ScriptLiveScope {
     pub trigger_event: Option<u64>,
     #[serde(default)]
     pub trigger_on_next_match: bool,
-}
-impl Default for ScriptLiveScope {
-    fn default() -> Self {
-        Self {
-            session: None,
-            secret_parameters: BTreeSet::new(),
-            tasks: Vec::new(),
-            trigger_event: None,
-            trigger_on_next_match: false,
-        }
-    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +81,10 @@ pub struct ScriptLiveView {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 pub enum ScriptControlCommand {
     Preview {
         proposal: ScriptLiveProposal,
@@ -145,6 +139,10 @@ impl ScriptControlCommand {
     content = "value",
     rename_all = "snake_case",
     deny_unknown_fields
+)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
 )]
 pub enum ScriptControlReply {
     Review(ScriptLiveReview),

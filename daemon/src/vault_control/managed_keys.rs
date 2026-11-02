@@ -105,12 +105,14 @@ fn read_file(value: &str) -> ResultKey<Zeroizing<String>> {
 }
 fn export_pair(record: &Record, destination: &Path) -> ResultKey<()> {
     // A new dedicated directory prevents accidental replacement of existing SSH keys.
-    let mut builder = std::fs::DirBuilder::new();
+    let builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder.create(destination).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
             bad("导出目录已存在，请使用新的目录名；已有文件不会被覆盖")

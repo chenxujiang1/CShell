@@ -633,8 +633,8 @@ impl UploadStatusDocument {
                 return Err(TaskError::Invalid);
             }
         }
-        if let Some(job) = &self.recovery {
-            if job.row_revision == 0
+        if let Some(job) = &self.recovery
+            && (job.row_revision == 0
                 || job.row_revision > i64::MAX as u64
                 || !self
                     .targets
@@ -650,10 +650,9 @@ impl UploadStatusDocument {
                     && job.operation == UploadRecoveryOperation::Probe
                     && job.probe.is_none()
                 || job.status == UploadRecoveryStatus::Failed
-                    && (job.error.is_none() || job.probe.is_some())
-            {
-                return Err(TaskError::Invalid);
-            }
+                    && (job.error.is_none() || job.probe.is_some()))
+        {
+            return Err(TaskError::Invalid);
         }
         Ok(())
     }

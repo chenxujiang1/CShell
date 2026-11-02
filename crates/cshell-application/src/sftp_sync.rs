@@ -160,6 +160,11 @@ impl SftpSyncEntry {
     }
 }
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

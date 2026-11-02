@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use crate::{
     DesktopApp,
@@ -17,35 +24,73 @@ use std::{
 
 #[test]
 fn persistent_stop_button_revokes_queued_broadcast_in_a_small_window() {
-    let directory=tempfile::tempdir().unwrap();
-    let mut sync=DesktopSyncInput::with_audit(audit_in(directory.path()));
-    let window=WorkspaceWindowId::new();
-    let group=TabGroupId::new();
-    let (first,view,mut queue)=ready_target(window,group);
-    let (second,_,_second_queue)=ready_target(window,group);
-    let tabs=[first.opened.tab_id,second.opened.tab_id];
-    let session=first.opened.session_id;
-    sync.replace_window(window,vec![first,second]);
-    arm(&mut sync,&tabs);
-    assert!(sync.route(tabs[0],InputAction::Text("x".into())));
-    let input=queue.try_recv().unwrap();
-    assert_eq!(input.validate(&view,session),Ok(()));
-    let context=crate::ui_layout_gate::context();
-    let mut draw=|events:Vec<egui::Event>| {
-        let mut output=context.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(720.0,480.0))),events,..Default::default()},|ui|{sync.draw(ui,window,group,Some(tabs[0]),false);});
+    let directory = tempfile::tempdir().unwrap();
+    let mut sync = DesktopSyncInput::with_audit(audit_in(directory.path()));
+    let window = WorkspaceWindowId::new();
+    let group = TabGroupId::new();
+    let (first, view, mut queue) = ready_target(window, group);
+    let (second, _, _second_queue) = ready_target(window, group);
+    let tabs = [first.opened.tab_id, second.opened.tab_id];
+    let session = first.opened.session_id;
+    sync.replace_window(window, vec![first, second]);
+    arm(&mut sync, &tabs);
+    assert!(sync.route(tabs[0], InputAction::Text("x".into())));
+    let input = queue.try_recv().unwrap();
+    assert_eq!(input.validate(&view, session), Ok(()));
+    let context = crate::ui_layout_gate::context();
+    let mut draw = |events: Vec<egui::Event>| {
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(720.0, 480.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                sync.draw(ui, window, group, Some(tabs[0]), false);
+            },
+        );
         output.textures_delta.clear();
         output.platform_output.accesskit_update.unwrap()
     };
-    for _ in 0..3 {draw(vec![]);}
-    let tree=draw(vec![]);
-    assert!(tree.nodes.iter().any(|(_,n)|n.label()==Some("同步 2 个目标") || n.value()==Some("同步 2 个目标")));
-    let rect=crate::ui_layout_gate::bounds(&tree.nodes.iter().find(|(_,n)|n.label()==Some("停止同步")).unwrap().1);
-    assert!(rect.min.x>=0.0 && rect.max.x<=720.0);
-    let pos=rect.center();
-    draw(vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:egui::Modifiers::NONE}]);
-    draw(vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:egui::Modifiers::NONE}]);
+    for _ in 0..3 {
+        draw(vec![]);
+    }
+    let tree = draw(vec![]);
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("同步 2 个目标") || n.value() == Some("同步 2 个目标"))
+    );
+    let rect = crate::ui_layout_gate::bounds(
+        &tree
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("停止同步"))
+            .unwrap()
+            .1,
+    );
+    assert!(rect.min.x >= 0.0 && rect.max.x <= 720.0);
+    let pos = rect.center();
+    draw(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    draw(vec![egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
     assert!(!sync.is_armed());
-    assert!(input.validate(&view,session).is_err());
+    assert!(input.validate(&view, session).is_err());
 }
 
 pub(super) fn ready_target(

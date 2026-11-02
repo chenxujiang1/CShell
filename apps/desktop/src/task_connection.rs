@@ -274,15 +274,15 @@ impl TaskConnection {
                     return false;
                 }
             }
-            Operation::Compare(key, _, revision) => {
+            Operation::Compare(key, _, revision)
                 if view.detail.as_ref().is_none_or(|detail| {
                     detail.id != key.run
                         || detail.meta.revision != *revision
                         || !task_terminal(detail.meta.state)
                         || detail.runner_active
-                }) {
-                    return false;
-                }
+                }) =>
+            {
+                return false;
             }
             _ => {}
         }
@@ -621,7 +621,8 @@ pub(crate) fn output_log_page(bytes: &[u8], offset: u64) -> Arc<LogPage> {
             truncated: false,
         });
     }
-    Arc::new(LogPage { first_line_id: 1,
+    Arc::new(LogPage {
+        first_line_id: 1,
         source_id: LogSourceId(0),
         revision: 0,
         anchor_line_id: 1,
@@ -666,7 +667,7 @@ fn comparison_log_page(comparison: &TaskOutputComparison) -> Arc<LogPage> {
                 }
             }
             rows.push(LogRow {
-            soft_wrap: false,
+                soft_wrap: false,
                 line_id: rows.len() as u64 + 1,
                 text: text.into(),
                 style_spans: Arc::from([]),
@@ -683,7 +684,8 @@ fn comparison_log_page(comparison: &TaskOutputComparison) -> Arc<LogPage> {
             truncated: false,
         });
     }
-    Arc::new(LogPage { first_line_id: 1,
+    Arc::new(LogPage {
+        first_line_id: 1,
         source_id: LogSourceId(0),
         revision: 0,
         anchor_line_id: 1,

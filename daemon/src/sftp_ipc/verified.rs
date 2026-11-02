@@ -4,8 +4,8 @@ use super::*;
 use crate::download_local::LocalDownload;
 use cshell_application::*;
 use cshell_domain::SftpQueueItemId;
-use cshell_sftp::{PinnedRead, StagedUpload, ReadProgress};
 use cshell_ipc::SftpTransferPhase;
+use cshell_sftp::{PinnedRead, ReadProgress, StagedUpload};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -196,9 +196,17 @@ enum Engine {
     },
 }
 impl Engine {
-    async fn set_modified(&mut self,seconds:u32)->Result<()>{
-        match self {Self::Upload{staged,..}=>staged.set_modified(seconds).await.map_err(|_|"temporary modification time update unconfirmed"),
-            Self::Download{local,..}=>local.set_modified(seconds).await.map_err(|_|"local temporary modification time update unconfirmed")}
+    async fn set_modified(&mut self, seconds: u32) -> Result<()> {
+        match self {
+            Self::Upload { staged, .. } => staged
+                .set_modified(seconds)
+                .await
+                .map_err(|_| "temporary modification time update unconfirmed"),
+            Self::Download { local, .. } => local
+                .set_modified(seconds)
+                .await
+                .map_err(|_| "local temporary modification time update unconfirmed"),
+        }
     }
     async fn expected_permissions(&self, expected: Option<u32>) -> Result<()> {
         if let Some(expected) = expected
@@ -207,15 +215,13 @@ impl Engine {
                 destination,
                 ..
             } = self
-        {
-            if staged
+            && staged
                 .permissions(destination)
                 .await
                 .map_err(|_| "destination permissions unavailable")?
                 != Some(expected)
-            {
-                return Err("reviewed destination permissions changed");
-            }
+        {
+            return Err("reviewed destination permissions changed");
         }
         Ok(())
     }
@@ -399,13 +405,17 @@ impl Engine {
         }
     }
     async fn write(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
-        self.write_buffered(at,bytes).await?;
+        self.write_buffered(at, bytes).await?;
         self.flush().await
     }
-    async fn flush(&mut self)->Result<()> {
+    async fn flush(&mut self) -> Result<()> {
         match self {
-            Self::Upload{staged,..}=>staged.flush().await.map_err(|_|"remote flush unconfirmed"),
-            Self::Download{local,..}=>local.flush().await.map_err(|_|"local flush unconfirmed"),
+            Self::Upload { staged, .. } => {
+                staged.flush().await.map_err(|_| "remote flush unconfirmed")
+            }
+            Self::Download { local, .. } => {
+                local.flush().await.map_err(|_| "local flush unconfirmed")
+            }
         }
     }
     async fn write_buffered(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
@@ -434,7 +444,11 @@ impl Engine {
             }
         }
     }
-    async fn verify(&mut self, maximum: u64, progress:&ReadProgress) -> Result<SftpVerifiedContent> {
+    async fn verify(
+        &mut self,
+        maximum: u64,
+        progress: &ReadProgress,
+    ) -> Result<SftpVerifiedContent> {
         match self {
             Self::Upload {
                 staged, temporary, ..
@@ -463,7 +477,7 @@ impl Engine {
     async fn probe(
         &mut self,
         maximum: u64,
-        progress:Option<&ReadProgress>,
+        progress: Option<&ReadProgress>,
     ) -> Result<(Option<SftpVerifiedContent>, Option<SftpVerifiedContent>)> {
         match self {
             Self::Upload {
@@ -474,19 +488,33 @@ impl Engine {
             } => {
                 // Both checks are retained. Overlap their bounded read pipelines;
                 // join also drains both handles before an error is reported.
-                let (t,d)=if let Some(progress)=progress {
-                    let totals=Arc::new(Mutex::new([(0u64,0u64);2]));
-                    let make=|index:usize|->ReadProgress {
-                        let totals=totals.clone();let report=Arc::clone(progress);
-                        Arc::new(move|done,total| {let mut values=totals.lock().unwrap_or_else(std::sync::PoisonError::into_inner);values[index]=(done,total);report(values[0].0+values[1].0,values[0].1+values[1].1);})
+                let (t, d) = if let Some(progress) = progress {
+                    let totals = Arc::new(Mutex::new([(0u64, 0u64); 2]));
+                    let make = |index: usize| -> ReadProgress {
+                        let totals = totals.clone();
+                        let report = Arc::clone(progress);
+                        Arc::new(move |done, total| {
+                            let mut values = totals
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            values[index] = (done, total);
+                            report(values[0].0 + values[1].0, values[0].1 + values[1].1);
+                        })
                     };
-                    let a=make(0);let b=make(1);
-                    tokio::join!(staged.probe_with_progress(temporary,maximum,&a),staged.probe_with_progress(destination,MAX_SFTP_VERIFIED_BYTES,&b))
+                    let a = make(0);
+                    let b = make(1);
+                    tokio::join!(
+                        staged.probe_with_progress(temporary, maximum, &a),
+                        staged.probe_with_progress(destination, MAX_SFTP_VERIFIED_BYTES, &b)
+                    )
                 } else {
-                    tokio::join!(staged.probe(temporary,maximum),staged.probe(destination,MAX_SFTP_VERIFIED_BYTES))
+                    tokio::join!(
+                        staged.probe(temporary, maximum),
+                        staged.probe(destination, MAX_SFTP_VERIFIED_BYTES)
+                    )
                 };
-                let t=t.map_err(|_|"remote temporary probe failed")?;
-                let d=d.map_err(|_|"remote destination probe failed")?;
+                let t = t.map_err(|_| "remote temporary probe failed")?;
+                let d = d.map_err(|_| "remote destination probe failed")?;
                 Ok((
                     t.map(|c| SftpVerifiedContent {
                         size: c.size,
@@ -710,16 +738,23 @@ struct Journal {
     value: SftpVerifiedTransfer,
 }
 impl Journal {
-    fn progress(&self,phase:SftpTransferPhase)->ReadProgress {
-        let jobs=self.service.jobs.clone();let transfer=self.transfer;
-        let report:ReadProgress=Arc::new(move|done,total| {
-            if let Some(job)=jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(transfer.as_uuid().as_bytes().as_slice()) {
-                if job.snapshot.state==SftpTransferState::Running as i32 {
-                    job.snapshot.phase=phase as i32;job.snapshot.phase_bytes=done;job.snapshot.phase_total=Some(total);
-                }
+    fn progress(&self, phase: SftpTransferPhase) -> ReadProgress {
+        let jobs = self.service.jobs.clone();
+        let transfer = self.transfer;
+        let report: ReadProgress = Arc::new(move |done, total| {
+            if let Some(job) = jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(transfer.as_uuid().as_bytes().as_slice())
+                && job.snapshot.state == SftpTransferState::Running as i32
+            {
+                job.snapshot.phase = phase as i32;
+                job.snapshot.phase_bytes = done;
+                job.snapshot.phase_total = Some(total);
             }
         });
-        report(0,0);report
+        report(0, 0);
+        report
     }
     async fn update(
         &mut self,
@@ -790,15 +825,17 @@ async fn compare_prefix(engine: &mut Engine, size: u64) -> Result<Sha256> {
     Ok(hash)
 }
 async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAction) -> Result<()> {
-    if let VerifiedAction::Transfer{resume}=action {
-        if journal.draft.verification.is_some() && journal.draft.publication_policy.is_none()
-            && journal.draft.expected_source.is_none() && journal.draft.expected_destination.is_none() {
-            return streaming::execute(engine,journal,resume).await;
-        }
+    if let VerifiedAction::Transfer { resume } = action
+        && journal.draft.verification.is_some()
+        && journal.draft.publication_policy.is_none()
+        && journal.draft.expected_source.is_none()
+        && journal.draft.expected_destination.is_none()
+    {
+        return streaming::execute(engine, journal, resume).await;
     }
     match action {
         VerifiedAction::Transfer { resume } => {
-            let _=journal.progress(SftpTransferPhase::Preparing);
+            let _ = journal.progress(SftpTransferPhase::Preparing);
             let content = engine.source_content().await?;
             engine
                 .expected_permissions(journal.draft.expected_permissions)
@@ -811,7 +848,7 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
                 if journal.value.content != Some(content) {
                     return Err("source differs from saved SHA-256");
                 }
-                let (temporary, destination) = engine.probe(content.size,None).await?;
+                let (temporary, destination) = engine.probe(content.size, None).await?;
                 let previous = journal.value.publication.and_then(|p| p.previous).map(|c| {
                     SftpVerifiedContent {
                         size: c.size,
@@ -876,7 +913,7 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
                     })
                     .await?;
             }
-            let _=journal.progress(SftpTransferPhase::Transferring);
+            let _ = journal.progress(SftpTransferPhase::Transferring);
             let rate_start = tokio::time::Instant::now();
             let rate_offset = journal.value.bytes;
             while journal.value.bytes < content.size {
@@ -916,9 +953,9 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
                     })
                     .await?;
             }
-            let progress=journal.progress(SftpTransferPhase::Verifying);
+            let progress = journal.progress(SftpTransferPhase::Verifying);
             if engine.source_content().await? != content
-                || engine.verify(content.size,&progress).await? != content
+                || engine.verify(content.size, &progress).await? != content
             {
                 return Err("full transfer SHA-256 mismatch");
             }
@@ -940,10 +977,14 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
                     })
                     .await?;
             }
-            if let Some(seconds)=journal.draft.modified_unix_seconds {
-                journal.update(|v|v.intent=SftpVerifiedIntent::Permissions).await?;
+            if let Some(seconds) = journal.draft.modified_unix_seconds {
+                journal
+                    .update(|v| v.intent = SftpVerifiedIntent::Permissions)
+                    .await?;
                 engine.set_modified(seconds).await?;
-                journal.update(|v|v.intent=SftpVerifiedIntent::None).await?;
+                journal
+                    .update(|v| v.intent = SftpVerifiedIntent::None)
+                    .await?;
             }
             engine
                 .expected_permissions(journal.draft.expected_permissions)
@@ -953,7 +994,7 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
                     v.intent = SftpVerifiedIntent::Publish;
                 })
                 .await?;
-            let _=journal.progress(SftpTransferPhase::Publishing);
+            let _ = journal.progress(SftpTransferPhase::Publishing);
             let publication = engine.publish(journal.value.publication, content).await?;
             journal
                 .update(|v| {
@@ -962,8 +1003,8 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
                     v.intent = SftpVerifiedIntent::None;
                 })
                 .await?;
-            let progress=journal.progress(SftpTransferPhase::CheckingPublished);
-            let (temporary, destination) = engine.probe(content.size,Some(&progress)).await?;
+            let progress = journal.progress(SftpTransferPhase::CheckingPublished);
+            let (temporary, destination) = engine.probe(content.size, Some(&progress)).await?;
             if temporary.is_some_and(|c| c != content) || destination != Some(content) {
                 return Err("published content changed; cleanup refused");
             }
@@ -972,7 +1013,7 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
                     v.intent = SftpVerifiedIntent::Cleanup;
                 })
                 .await?;
-            let _=journal.progress(SftpTransferPhase::Cleaning);
+            let _ = journal.progress(SftpTransferPhase::Cleaning);
             if temporary.is_some() {
                 engine.cleanup().await?;
             }
@@ -990,7 +1031,7 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
             {
                 return Err("publication adoption is not eligible");
             }
-            let (temporary, destination) = engine.probe(content.size,None).await?;
+            let (temporary, destination) = engine.probe(content.size, None).await?;
             if destination != Some(content) || temporary.is_some_and(|t| t != content) {
                 return Err("publication does not match saved SHA-256");
             }
@@ -1016,7 +1057,7 @@ async fn execute(engine: &mut Engine, journal: &mut Journal, action: VerifiedAct
             {
                 return Err("cleanup is not eligible");
             }
-            let (temporary, destination) = engine.probe(content.size,None).await?;
+            let (temporary, destination) = engine.probe(content.size, None).await?;
             if journal.value.committed {
                 if destination != Some(content) {
                     return Err("committed destination changed; cleanup refused");

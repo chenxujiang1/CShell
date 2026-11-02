@@ -124,7 +124,11 @@ async fn openssh_ipc_import_is_atomic_revision_checked_and_remaps_skipped_jump_a
     assert!(preview.can_commit);
     assert_eq!(preview.change_count, 2);
     assert!(preview.items[1].details.contains("imported@app.test:22"));
-    assert!(preview.items[1].details.contains("jumps jump (operator@original.test:22)"));
+    assert!(
+        preview.items[1]
+            .details
+            .contains("jumps jump (operator@original.test:22)")
+    );
     assert!(!preview.items[1].details.contains("replacement.test"));
     assert_eq!(profiles.handle(ProfileRequest::default()).await.revision, 1);
 

@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use crate::ui_layout_gate::{bounds, context};
 
@@ -30,7 +37,9 @@ fn render_auxiliary_tools_preview() {
         ("ssh-settings", egui::vec2(720.0, 480.0), true),
     ] {
         let ctx = context();
-        if settings {sync.close_compose();}
+        if settings {
+            sync.close_compose();
+        }
         let mut model = cshell_ui::WorkbenchViewModel::default();
         let mut defaults = crate::zmodem_panel::Panel::default();
         defaults.open_defaults(false);
@@ -48,7 +57,8 @@ fn render_auxiliary_tools_preview() {
                     cshell_ui::draw_workbench_chrome(ui, &mut model);
                     sync.draw(ui, window, group, Some(tab), false);
                     let rect = cshell_ui::draw_workbench_content(ui, &mut model);
-                    ui.painter().rect_filled(rect,0.0,egui::Color32::from_rgb(15,20,29));
+                    ui.painter()
+                        .rect_filled(rect, 0.0, egui::Color32::from_rgb(15, 20, 29));
                     ui.painter().with_clip_rect(rect).text(
                         rect.min + egui::vec2(20.0, 20.0),
                         egui::Align2::LEFT_TOP,
@@ -138,12 +148,7 @@ fn dock_switches_tools_preserves_draft_and_escape_returns_focus_without_sending(
         let (tree, terminal) = render(&ctx, &mut sync, window, tab, size, vec![]);
         assert!(terminal.height() >= size.y - 82.0, "{terminal:?}");
         assert!(ctx.memory(|m| m.focused()).is_some());
-        for label in [
-            "当前会话",
-            "历史",
-            "发送",
-            "更多",
-        ] {
+        for label in ["当前会话", "历史", "发送", "更多"] {
             let node = &tree
                 .nodes
                 .iter()

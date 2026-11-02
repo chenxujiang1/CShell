@@ -37,26 +37,10 @@ pub fn save(path: &Path, pixels: u16) -> std::io::Result<()> {
 }
 
 pub(crate) fn settings_path() -> Option<PathBuf> {
-    if let Some(database) = std::env::var_os("CSHELL_PROFILE_DB") {
-        return PathBuf::from(database)
-            .parent()
-            .map(|parent| parent.join("display-settings.json"));
-    }
-    if let Some(root) = std::env::var_os("CSHELL_DATA_DIR") {
-        return Some(PathBuf::from(root).join("display-settings.json"));
-    }
-    #[cfg(windows)]
-    let root = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)?
-        .join("CShell");
-    #[cfg(target_os = "macos")]
-    let root = std::env::var_os("HOME")
-        .map(PathBuf::from)?
-        .join("Library/Application Support/CShell");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let root = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))?
-        .join("cshell");
-    Some(root.join("display-settings.json"))
+    Some(
+        cshell_ipc::StoragePaths::for_current_user()
+            .ok()?
+            .data_root
+            .join("display-settings.json"),
+    )
 }

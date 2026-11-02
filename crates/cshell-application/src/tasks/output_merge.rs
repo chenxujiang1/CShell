@@ -182,6 +182,13 @@ pub fn decode_output_merge(bytes: &[u8], body: &[u8]) -> Result<OutputMergePage,
     Ok(value)
 }
 pub struct OutputMergedBody(pub Vec<u8>);
+impl std::fmt::Debug for OutputMergedBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputMergedBody")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 impl Drop for OutputMergedBody {
     fn drop(&mut self) {
         self.0.zeroize();

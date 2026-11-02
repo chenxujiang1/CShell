@@ -381,7 +381,9 @@ impl LocalTerminalSession {
                         Ok(count) => reader_ingress
                             .submit_blocking(buffer[..count].to_vec())
                             .map_err(|error| match error {
-                                SubmitError::Backpressure(_) | SubmitError::TooLarge(_) => unreachable!("blocking submit"),
+                                SubmitError::Backpressure(_) | SubmitError::TooLarge(_) => {
+                                    unreachable!("blocking submit")
+                                }
                                 SubmitError::Closed(_) => LocalSessionError::Closed,
                             })?,
                         Err(error) if is_transport_eof(&error) => return Ok(()),

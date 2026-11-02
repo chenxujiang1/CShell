@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CSHELL_REQUIRE_OPENSSH_EXPORT_ORACLE: '1'
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '2'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -23,9 +25,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo fmt --all -- --check
-      - run: bash .github/scripts/run-with-diagnostics.sh cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features
-      - run: cargo test --workspace --doc --all-features
+      - run: bash .github/scripts/run-with-diagnostics.sh cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features --locked
+      - run: cargo test --workspace --doc --all-features --locked
       - run: bash .github/scripts/run-with-diagnostics.sh cargo deny check
 
   platform-test:
@@ -54,13 +56,13 @@ jobs:
       - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
       - name: Install Linux Secret Service
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes dbus-user-session gnome-keyring
+        run: sudo apt-get update && sudo apt-get install --yes dbus-user-session gnome-keyring libsecret-tools
       - name: Native Linux keychain round trip
         if: runner.os == 'Linux'
         run: |
           dbus-run-session -- bash -euo pipefail -c '
             printf %s cshell-ci-ephemeral | gnome-keyring-daemon --components=secrets --unlock >/dev/null
-            CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshell-vault native_ --locked --target ${{ matrix.target }} -- --test-threads=1
+            CSHELL_KEYCHAIN_NATIVE_TEST=1 CSHELL_SECRET_TOOL_ORACLE=1 cargo test -p cshell-vault native_ --locked --target ${{ matrix.target }} -- --test-threads=1
             CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshelld --lib saved_profile_ipc_uses_keychain_and_verified_host --locked --target ${{ matrix.target }}
             CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshelld --lib native_system_root_vault --locked --target ${{ matrix.target }}
             CSHELL_KEYCHAIN_NATIVE_TEST=1 cargo test -p cshelld --test profile_control saved_key_passphrase_control_is_bound_to_profile_key_path --locked --target ${{ matrix.target }}

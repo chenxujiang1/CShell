@@ -15,6 +15,10 @@ pub struct QuickCommandSnapshot {
     pub catalog: QuickCommandCatalog,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 pub enum QuickCommandChange {
     Upsert(QuickCommandRecord),
     Remove(QuickCommandId),

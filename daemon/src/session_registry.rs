@@ -628,7 +628,10 @@ mod tests {
         profile.program = directory.path().join("missing-program");
         assert!(matches!(
             registry.spawn_local(&profile, TerminalSize::cells(300, 300)),
-            Err(SessionRegistryError::InvalidTerminalSize { rows: 300, cols: 300 })
+            Err(SessionRegistryError::InvalidTerminalSize {
+                rows: 300,
+                cols: 300
+            })
         ));
         assert!(registry.list().unwrap().is_empty());
     }
@@ -640,8 +643,8 @@ mod tests {
             TerminalSize::cells(512, 128),
             TerminalSize::cells(64, 1024),
         ] {
-            let checked = super::validated_terminal_size(u32::from(size.rows), u32::from(size.cols))
-                .unwrap();
+            let checked =
+                super::validated_terminal_size(u32::from(size.rows), u32::from(size.cols)).unwrap();
             assert_eq!(checked, size);
             let parser = cshell_terminal::AlacrittyTerminalEngine::new(checked);
             let snapshot = cshell_terminal::TerminalEngine::snapshot(&parser);

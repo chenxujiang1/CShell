@@ -1,7 +1,7 @@
 use cshell_application::*;
 use cshell_ipc::{ExportDirectoryStaging, ExportStaging, TaskOperation, TaskRequest};
 use std::{
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom, Write},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -238,8 +238,8 @@ pub(crate) async fn run(args: &[String]) -> Result<(), &'static str> {
             request.run_id = doc.sources[0].run_id.as_uuid().as_bytes().to_vec();
             request.result_id = doc.job_id.as_uuid().as_bytes().to_vec();
             request.offset = offset;
-            request.expected_targets_json = serde_json::to_vec(&doc)
-                .map_err(|_| "invalid workspace job")?;
+            request.expected_targets_json =
+                serde_json::to_vec(&doc).map_err(|_| "invalid workspace job")?;
             let reply = crate::task_output_transport::send(request, doc.sources[0].kind).await?;
             if decode_output_workspace(&reply.document_json)
                 .map_err(|_| "invalid download reply")?
@@ -375,7 +375,8 @@ pub(crate) async fn run(args: &[String]) -> Result<(), &'static str> {
     }
     println!(
         "{}",
-        std::str::from_utf8(&reply.document_json).map_err(|_| "invalid workspace reply encoding")?
+        std::str::from_utf8(&reply.document_json)
+            .map_err(|_| "invalid workspace reply encoding")?
     );
     Ok(())
 }

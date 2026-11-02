@@ -77,9 +77,8 @@ impl OutputWorkspacePanel {
                     if ui.selectable_value(&mut self.action, action, label).changed() { self.deactivate(); }
                 }
             });
-            if self.action == OutputWorkspaceAction::Search {
-                if ui.add(egui::TextEdit::multiline(&mut *self.query).desired_rows(2).char_limit(4096).hint_text("字面查询，允许换行；保存请求时含查询正文")).changed() { self.confirmed = false; }
-            }
+            if self.action == OutputWorkspaceAction::Search
+                && ui.add(egui::TextEdit::multiline(&mut *self.query).desired_rows(2).char_limit(4096).hint_text("字面查询，允许换行；保存请求时含查询正文")).changed() { self.confirmed = false; }
             ui.label(format!("已选 {} / {} 个可用输出；混合列表换页保留已选项。", self.selected.len(), candidates.len()));
             ui.horizontal_wrapped(|ui| {
                 if ui.button("清空选择").clicked() { self.selected.clear(); self.deactivate(); }
@@ -142,9 +141,8 @@ impl OutputWorkspacePanel {
                     if ui.add_enabled(!view.busy && !self.bundle_path.is_empty(), egui::Button::new("下载并校验整包")).clicked() { connection.enqueue(Operation::Export(document.clone(), PathBuf::from(&self.bundle_path))); }
                 }
             }
-            if let Some(plan) = &view.retention_plan {
-                if ui.add_enabled(!view.busy, egui::Button::new("核对最近提交的删除回执")).clicked() { connection.enqueue(Operation::Receipt(plan.clone())); }
-            }
+            if let Some(plan) = &view.retention_plan
+                && ui.add_enabled(!view.busy, egui::Button::new("核对最近提交的删除回执")).clicked() { connection.enqueue(Operation::Receipt(plan.clone())); }
             if let Some(page) = &view.page {
                 ui.label(format!("结果 {}..{} / {}", page.offset, page.next, page.total));
                 egui::ScrollArea::vertical().id_salt("workspace-result-page").max_height(300.0).show(ui, |ui| {
@@ -152,20 +150,18 @@ impl OutputWorkspacePanel {
                         match row {
                             OutputWorkspaceRow::Index { entry } => {
                                 ui.label(format!("输出 {}：{} 字节 / {} 行；索引 {} 行", entry.source, entry.digest.bytes, entry.lines, entry.indexed_lines));
-                                if let Some(document) = &view.document && let Some(scope) = document.sources.get(entry.source) {
-                                    if ui.add_enabled(!view.busy, egui::Button::new("读取持久行索引")).clicked() {
+                                if let Some(document) = &view.document && let Some(scope) = document.sources.get(entry.source)
+                                    && ui.add_enabled(!view.busy, egui::Button::new("读取持久行索引")).clicked() {
                                         connection.enqueue(Operation::Index(scope.clone(), entry.clone(), 0));
                                     }
-                                }
                             }
                             OutputWorkspaceRow::Diff { row } => { ui.monospace(format!("{:?} L{:?} R{:?}", row.kind, row.left_line, row.right_line)); ui.monospace(crate::sync_input::compose::visible_body(&row.text).as_str()); }
                             _ => { ui.label(format!("{row:?}")); }
                         }
                     }
                 });
-                if let Some(document) = &view.document {
-                    if ui.add_enabled(!view.busy && page.next < page.total, egui::Button::new("结果下一页")).clicked() { connection.enqueue(Operation::Page(document.clone(), page.next)); }
-                }
+                if let Some(document) = &view.document
+                    && ui.add_enabled(!view.busy && page.next < page.total, egui::Button::new("结果下一页")).clicked() { connection.enqueue(Operation::Page(document.clone(), page.next)); }
             }
             if let Some(receipt) = &view.receipt { ui.label(format!("持久回执 {}：{:?}", receipt.plan.id, receipt.states)); }
             ui.separator(); ui.label("本机归档检查与提取（不执行内容）");

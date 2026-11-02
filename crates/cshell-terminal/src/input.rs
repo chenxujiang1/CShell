@@ -166,6 +166,11 @@ fn encode_mouse(event: cshell_domain::MouseEvent, modes: TerminalModes) -> Vec<u
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod mouse_tests {
     use super::*;
     use cshell_domain::{MouseButton as B, MouseEvent as E, MouseEventKind as K};
@@ -595,6 +600,7 @@ fn with_alt_prefix(bytes: &[u8], modifiers: Modifiers) -> Vec<u8> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::field_reassign_with_default)]
 mod tests {
     use super::{InputEncoder, TerminalModes};
     use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};

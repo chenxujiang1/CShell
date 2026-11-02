@@ -1,0 +1,50 @@
+[
+  {
+    "crate": "accesskit_atspi_common",
+    "version": "0.18.1",
+    "registry_checksum": "1e8c61bee90b42a772d39d06a740207dc71a4e780004ace1db8d99fb1baaa954",
+    "source": "https://crates.io/crates/accesskit_atspi_common/0.18.1"
+  },
+  {
+    "crate": "accesskit_unix",
+    "version": "0.21.1",
+    "registry_checksum": "b016ca8db0ea0ea2ceff29a9d6240391492d960716aa471967c00e8cc8cb197c",
+    "source": "https://crates.io/crates/accesskit_unix/0.21.1"
+  },
+  {
+    "crate": "atspi-common",
+    "version": "0.13.0",
+    "registry_checksum": "20c5617155740c98003016429ad13fe43ce7a77b007479350a9f8bf95a29f63d",
+    "source": "https://crates.io/crates/atspi-common/0.13.0"
+  },
+  {
+    "crate": "atspi-proxies",
+    "version": "0.13.0",
+    "registry_checksum": "2230e48787ed3eb4088996eab66a32ca20c0b67bbd4fd6cdfe79f04f1f04c9fc",
+    "source": "https://crates.io/crates/atspi-proxies/0.13.0"
+  },
+  {
+    "crate": "secret-service",
+    "version": "5.2.0",
+    "registry_checksum": "5107b24b91445dd2aa449a258a1807b63240942157292354dc5bfdbeb8bc6db8",
+    "source": "https://crates.io/crates/secret-service/5.2.0"
+  },
+  {
+    "crate": "zbus-lockstep",
+    "version": "0.5.2",
+    "registry_checksum": "6998de05217a084b7578728a9443d04ea4cd80f2a0839b8d78770b76ccd45863",
+    "source": "https://crates.io/crates/zbus-lockstep/0.5.2"
+  },
+  {
+    "crate": "zbus-lockstep-macros",
+    "version": "0.5.2",
+    "registry_checksum": "10da05367f3a7b7553c8cdf8fa91aee6b64afebe32b51c95177957efc47ca3a0",
+    "source": "https://crates.io/crates/zbus-lockstep-macros/0.5.2"
+  },
+  {
+    "crate": "zbus-secret-service-keyring-store",
+    "version": "1.0.1",
+    "registry_checksum": "74801d001b9e7729adb4f1825b67b398185fed424749aa3d8bacf70417137d9a",
+    "source": "https://crates.io/crates/zbus-secret-service-keyring-store/1.0.1"
+  }
+]

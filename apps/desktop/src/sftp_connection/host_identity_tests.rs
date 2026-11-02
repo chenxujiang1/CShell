@@ -1,5 +1,13 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use crate::daemon_connection::ResolvedDesktopEndpoint;
+use cshell_ipc::read_envelope;
 use cshell_ipc::{HandshakePolicy, server_handshake};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn opening_browser_fetches_authenticated_peer_before_listing_both_panes() {

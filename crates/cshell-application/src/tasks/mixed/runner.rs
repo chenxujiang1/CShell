@@ -16,6 +16,10 @@ pub struct MixedTaskRunner {
     clock: Arc<dyn TaskClock>,
 }
 impl MixedTaskRunner {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
     pub async fn repair(
         &self,
         id: TaskRunId,

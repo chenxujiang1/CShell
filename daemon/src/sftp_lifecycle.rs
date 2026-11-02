@@ -465,21 +465,18 @@ impl SessionIpcService {
         let vault = &profiles.vault;
         cshell_ssh::connection_progress::peer(0, &plan.target.host, plan.target.port);
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::Credentials);
-        crate::keyboard_auth::for_sftp(
-            session,
-            vault.prepare_plan(&plan),
-        )
-        .await
-        .map_err(|error| {
-            (
-                if matches!(error, cshell_ssh::SshError::AuthenticationCancelled) {
-                    SftpStatus::Cancelled
-                } else {
-                    SftpStatus::Failed
-                },
-                format!("凭据库解锁未完成：{error}"),
-            )
-        })?;
+        crate::keyboard_auth::for_sftp(session, vault.prepare_plan(&plan))
+            .await
+            .map_err(|error| {
+                (
+                    if matches!(error, cshell_ssh::SshError::AuthenticationCancelled) {
+                        SftpStatus::Cancelled
+                    } else {
+                        SftpStatus::Failed
+                    },
+                    format!("凭据库解锁未完成：{error}"),
+                )
+            })?;
         let mut cancellation = vault.cancellation();
         let epoch = *cancellation.borrow();
         let connect = async {

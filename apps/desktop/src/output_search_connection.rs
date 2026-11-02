@@ -10,6 +10,10 @@ pub(crate) struct SearchView {
     pub busy: bool,
     pub status: String,
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 enum Operation {
     Launch(OutputSearchRequest, [u8; 32], TaskRunId),
     Get(Arc<OutputSearchDocument>, bool),

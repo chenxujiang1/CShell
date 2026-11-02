@@ -120,7 +120,10 @@ impl VaultController {
         confirmed: bool,
         publish: impl FnOnce(&Path, &Path) -> Result<(), VaultError>,
     ) -> Result<(), VaultError> {
-        let _transition=self.transition_gate.try_lock().map_err(|_|VaultError::Busy)?;
+        let _transition = self
+            .transition_gate
+            .try_lock()
+            .map_err(|_| VaultError::Busy)?;
         if !confirmed
             || (system && !password.expose().is_empty())
             || (!system && !(8..=1024).contains(&password.expose().len()))
@@ -203,7 +206,7 @@ impl VaultController {
             state.path = path;
             state.root = root;
             state.unlocked_at = Some(Instant::now());
-            self.manually_locked.store(false,Ordering::Release);
+            self.manually_locked.store(false, Ordering::Release);
             self.enabled.store(true, Ordering::Release);
             #[cfg(unix)]
             if File::open(parent).and_then(|f| f.sync_all()).is_err() {

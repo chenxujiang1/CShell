@@ -179,7 +179,9 @@ impl SftpPanel {
                 }
             }
         }
-        if context.text_edit_focused() {return;}
+        if context.text_edit_focused() {
+            return;
+        }
         let local = self.browser.navigation.active == 0;
         let pressed = |modifiers, key| context.input_mut(|input| input.consume_key(modifiers, key));
         if pressed(egui::Modifiers::CTRL, egui::Key::L)
@@ -198,12 +200,11 @@ impl SftpPanel {
             if let Some(path) = loaded_path(view, local) {
                 *command = Some(self.navigate(session, local, path.into()));
             }
-        } else if pressed(egui::Modifiers::CTRL, egui::Key::D) {
-            if let Some(favorite) =
+        } else if pressed(egui::Modifiers::CTRL, egui::Key::D)
+            && let Some(favorite) =
                 favorite_for(view, local, loaded_path(view, local).unwrap_or(""))
-            {
-                self.toggle_favorite(favorite);
-            }
+        {
+            self.toggle_favorite(favorite);
         }
     }
     fn toggle_favorite(&mut self, favorite: Favorite) {
@@ -231,10 +232,18 @@ impl SftpPanel {
                 (false, "←", "后退 · Alt+Left"),
                 (true, "→", "前进 · Alt+Right"),
             ] {
-                if visuals::tool(ui,if forward {Icon::Forward}else{Icon::Back},label,
-                        self.browser.navigation.history[side].target(forward).is_some(),None,true)
-                    .on_hover_text(hint)
-                    .clicked()
+                if visuals::tool(
+                    ui,
+                    if forward { Icon::Forward } else { Icon::Back },
+                    label,
+                    self.browser.navigation.history[side]
+                        .target(forward)
+                        .is_some(),
+                    None,
+                    true,
+                )
+                .on_hover_text(hint)
+                .clicked()
                 {
                     *command = self.history_command(session, local, forward);
                 }
@@ -406,7 +415,7 @@ impl SftpPanel {
                             });
                     },
                 );
-                if visuals::tool(ui,Icon::Edit,"编辑",true,None,true)
+                if visuals::tool(ui, Icon::Edit, "编辑", true, None, true)
                     .on_hover_text("编辑路径 · Ctrl+L / Alt+D；Enter 转到，Esc 取消")
                     .clicked()
                 {

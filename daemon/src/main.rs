@@ -255,31 +255,5 @@ fn required_hex<const N: usize>(name: &'static str) -> Result<[u8; N], Box<dyn E
 }
 
 fn profile_database_path() -> Result<PathBuf, Box<dyn Error>> {
-    if let Some(path) = std::env::var_os("CSHELL_PROFILE_DB") {
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(root) = std::env::var_os("CSHELL_DATA_DIR") {
-        return Ok(PathBuf::from(root).join("cshell.db"));
-    }
-    #[cfg(windows)]
-    let root = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .ok_or("LOCALAPPDATA is required for Profile storage")?
-        .join("CShell");
-    #[cfg(target_os = "macos")]
-    let root = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is required for Profile storage")?
-        .join("Library")
-        .join("Application Support")
-        .join("CShell");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let root = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
-        })
-        .ok_or("HOME or XDG_DATA_HOME is required for Profile storage")?
-        .join("cshell");
-    Ok(root.join("cshell.db"))
+    Ok(cshell_ipc::StoragePaths::for_current_user()?.profile_database)
 }

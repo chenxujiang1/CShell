@@ -15,7 +15,10 @@ impl VaultController {
             .collect();
         self.prepare_profiles(
             targets,
-            format!("{}@{}:{}", plan.target.username, plan.target.host, plan.target.port),
+            format!(
+                "{}@{}:{}",
+                plan.target.username, plan.target.host, plan.target.port
+            ),
         )
         .await
     }
@@ -43,7 +46,7 @@ impl VaultController {
                         required = true;
                         confirmation = true;
                     }
-                    Ok(false) => {},
+                    Ok(false) => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -58,7 +61,8 @@ impl VaultController {
             return Err(cshell_ssh::SshError::AuthenticationCancelled);
         }
         if required.0 {
-            self.prepare_connection_with_confirmation(label, required.1).await?;
+            self.prepare_connection_with_confirmation(label, required.1)
+                .await?;
         }
         Ok(())
     }
@@ -81,6 +85,10 @@ impl VaultController {
             SystemVaultRootKeys::delete,
         )
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
     fn protect_with(
         &self,
         revision: u64,
@@ -231,11 +239,10 @@ impl VaultController {
             && rebuild::active_path(&self.path)
                 .as_ref()
                 .is_ok_and(|active| active != &path)
+            && delete(root).is_err()
         {
-            if delete(root).is_err() {
-                persist_root(&old_path.with_file_name("retired"), root)?;
-                return Err(VaultError::RootCleanupRequired);
-            }
+            persist_root(&old_path.with_file_name("retired"), root)?;
+            return Err(VaultError::RootCleanupRequired);
         }
         result
     }
@@ -281,7 +288,8 @@ impl VaultController {
         self: &Arc<Self>,
         target: String,
     ) -> Result<(), cshell_ssh::SshError> {
-        self.prepare_connection_with_confirmation(target, false).await
+        self.prepare_connection_with_confirmation(target, false)
+            .await
     }
     async fn prepare_connection_with_confirmation(
         self: &Arc<Self>,

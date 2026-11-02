@@ -195,7 +195,8 @@ where
         return Ok(());
     }
     if negotiated.feature_bits
-        & (features::ZMODEM | features::FULL_FRAME_RECOVERY
+        & (features::ZMODEM
+            | features::FULL_FRAME_RECOVERY
             | features::LOG_PAGING
             | features::TERMINAL_CONTROL
             | features::HISTORY_SEARCH

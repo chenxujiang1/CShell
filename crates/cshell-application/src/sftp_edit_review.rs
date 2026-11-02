@@ -63,21 +63,33 @@ impl SftpEditReview {
         {
             return Err("invalid editor comparison scope");
         }
-        if let Some(text) = &self.backup_text {
-            if text.len() > MAX_SFTP_INLINE_EDIT_BYTES
+        if let Some(text) = &self.backup_text
+            && (text.len() > MAX_SFTP_INLINE_EDIT_BYTES
                 || !self.backups.iter().any(|b| {
                     Some(b.item) == self.selected_backup
                         && sftp_digest(text.as_bytes()) == b.content
-                })
-            {
-                return Err("invalid backup comparison");
-            }
+                }))
+        {
+            return Err("invalid backup comparison");
         }
         Ok(())
     }
 }
 
+impl std::fmt::Debug for SftpEditReview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SftpEditReview")
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
@@ -111,12 +123,5 @@ mod tests {
         value.validate().unwrap();
         value.remote_permissions = Some(0o100644);
         assert!(value.validate().is_err());
-    }
-}
-impl std::fmt::Debug for SftpEditReview {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SftpEditReview")
-            .field("revision", &self.revision)
-            .finish_non_exhaustive()
     }
 }

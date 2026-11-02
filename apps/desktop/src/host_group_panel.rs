@@ -139,7 +139,7 @@ impl HostGroupPanel {
         if self.group_base.is_none() {
             self.group_base = current;
         }
-        cshell_ui::form::dialog(&context, "主机与主机组").open(&mut open).default_width(760.0).vscroll(true).collapsible(false).show(context,|ui| {
+        cshell_ui::form::dialog(context, "主机与主机组").open(&mut open).default_width(760.0).vscroll(true).collapsible(false).show(context,|ui| {
             ui.label("主机引用已保存 SSH Profile 的认证/跳板配置；目标地址、标签独立保存。平台仅为提示。");ui.label(&view.status);
             reload=ui.add_enabled(!view.busy,egui::Button::new("重新加载主机与 Profile 版本")).clicked();if !self.status.is_empty() {ui.colored_label(cshell_ui::theme::WARNING,&self.status);}
             ui.collapsing("主机列表与编辑",|ui| {

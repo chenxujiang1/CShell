@@ -108,9 +108,12 @@ impl SftpPanel {
             } else {
                 cshell_ui::theme::ACCENT
             };
-            let shared=view.and_then(|v|v.connection_info.as_ref()).is_some_and(|i|i.shared_from.is_some());
-            let menu_width =
-                (if self.page == 0 { 88.0 } else { 176.0 }) + if owned { 230.0 } else { 0.0 } + if shared {80.0} else {0.0};
+            let shared = view
+                .and_then(|v| v.connection_info.as_ref())
+                .is_some_and(|i| i.shared_from.is_some());
+            let menu_width = (if self.page == 0 { 88.0 } else { 176.0 })
+                + if owned { 230.0 } else { 0.0 }
+                + if shared { 80.0 } else { 0.0 };
             let host_width = (ui.available_width() - menu_width - 8.0).max(80.0);
             ui.allocate_ui_with_layout(
                 vec2(host_width, 28.0),
@@ -151,8 +154,14 @@ impl SftpPanel {
                     },
                     phase.label(),
                 );
-                if view.connection_info.as_ref().is_some_and(|i|i.shared_from.is_some()) {
-                    ui.weak("复用 SSH").on_hover_text("使用已认证的 SSH 连接，无需再次输入动态码；关闭任一窗口不会关闭其他渠道");
+                if view
+                    .connection_info
+                    .as_ref()
+                    .is_some_and(|i| i.shared_from.is_some())
+                {
+                    ui.weak("复用 SSH").on_hover_text(
+                        "使用已认证的 SSH 连接，无需再次输入动态码；关闭任一窗口不会关闭其他渠道",
+                    );
                 }
                 if tool(
                     ui,
@@ -201,7 +210,11 @@ impl SftpPanel {
                         v.connection_phase == crate::sftp_connection::ConnectionPhase::Connected
                     }),
                 |ui| {
-                    if ui.available_width()>380.0 && ui.button("目录比较 / 同步").clicked(){self.open_directory_sync();self.page=0;}
+                    if ui.available_width() > 380.0 && ui.button("目录比较 / 同步").clicked()
+                    {
+                        self.open_directory_sync();
+                        self.page = 0;
+                    }
                     menu(ui, "更多功能", 180.0, |ui| {
                         cshell_ui::form::menu(ui);
                         ui.set_width(180.0);
@@ -223,7 +236,11 @@ impl SftpPanel {
                             }
                         }
                         ui.separator();
-                        if ui.button("目录比较 / 同步").clicked(){self.open_directory_sync();self.page=0;ui.close();}
+                        if ui.button("目录比较 / 同步").clicked() {
+                            self.open_directory_sync();
+                            self.page = 0;
+                            ui.close();
+                        }
                         if ui.button("刷新任务").clicked() {
                             *command = Some(SftpClientCommand::QueueGet(session));
                             ui.close();

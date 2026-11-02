@@ -3,6 +3,13 @@ use super::*;
 use std::io::{self, Read};
 use zeroize::Zeroize;
 pub struct OutputArchiveBytes(pub Vec<u8>);
+impl std::fmt::Debug for OutputArchiveBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputArchiveBytes")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 impl Drop for OutputArchiveBytes {
     fn drop(&mut self) {
         self.0.zeroize();
@@ -190,6 +197,7 @@ pub fn decode_output_archive_chunk(
     Ok(value)
 }
 /// Receives one ordered transfer without buffering its payload.
+#[derive(Debug)]
 pub struct OutputArchiveCollector {
     artifact: OutputArchiveArtifact,
     offset: u64,

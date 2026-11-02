@@ -16,7 +16,7 @@ pub(super) struct View {
     pub raw: Option<Arc<RawJournalSlice>>,
     pub raw_epoch: u64,
     pub shell: Option<cshell_domain::ShellHistory>,
-    pub shell_epoch:u64,
+    pub shell_epoch: u64,
     pub generation: u64,
     pub busy: bool,
     pub writable: bool,
@@ -57,11 +57,13 @@ impl Connection {
                         match result{
                             Ok(TerminalToolsReply::View(catalog))=>{
                                 if view.catalog.as_ref().is_some_and(|old|old.catalog.revision>catalog.catalog.revision){view.error=Some("配置版本回退，请重新读取".into());view.writable=false;}
-                                else{if request.operation==Op::Save as i32{view.saved=Some(Arc::new(catalog.catalog.clone()));}view.catalog=Some(Arc::new(catalog));view.error=None;view.status="已读取终端工具状态".into();if explicit&&request.operation==Op::Get as i32{view.writable=true;}if request.operation==Op::Save as i32{view.imported=None;}}
+                                else{if request.operation==Op::Save as i32{view.saved=Some(Arc::new(catalog.catalog.clone()));}view.catalog=Some(Arc::new(catalog));view.error=None;view.status="已读取终端工具状态".into();if explicit&&request.operation==Op::Get as i32{view.writable=true;}
+if request.operation==Op::Save as i32{view.imported=None;}}
                             },
                             Ok(TerminalToolsReply::Shell(data))=>{view.shell=Some(data);view.shell_epoch=epoch;view.error=None;},
                             Ok(TerminalToolsReply::Raw(raw))=>{view.raw=Some(Arc::new(raw));view.raw_epoch=epoch;view.error=None;},
-                            Err(error)=>{view.error=Some(error);if mutation{view.writable=false;}if request.operation==Op::RawJournal as i32{view.raw=None;}}
+                            Err(error)=>{view.error=Some(error);if mutation{view.writable=false;}
+if request.operation==Op::RawJournal as i32{view.raw=None;}}
                         }
                     },
                     Command::Import(path,epoch)=>{
@@ -82,7 +84,8 @@ impl Connection {
                             let end=request.cursor.checked_add(count).ok_or("日志范围溢出".to_owned())?;if count==0||count>4096{return Err("日志导出最多 4096 条记录".into());}
                             let deadline=tokio::time::Instant::now()+Duration::from_secs(120);let mut bytes=Vec::new();while request.cursor<end{
                                 let TerminalToolsReply::Raw(raw)=tokio::time::timeout_at(deadline,query(&config,&request)).await.map_err(|_|"ANSI 导出超过 120 秒".to_owned())??else{return Err("日志回复类型错误".into());};
-                                if raw.total_records<end{return Err("日志范围不完整".into());}if bytes.len()+raw.data.len()>8*1024*1024{return Err("ANSI 导出超过 8 MiB".into());}bytes.extend_from_slice(&raw.data);(request.cursor,request.offset)=raw.next_cursor();
+                                if raw.total_records<end{return Err("日志范围不完整".into());}
+if bytes.len()+raw.data.len()>8*1024*1024{return Err("ANSI 导出超过 8 MiB".into());}bytes.extend_from_slice(&raw.data);(request.cursor,request.offset)=raw.next_cursor();
                             }crate::profile_export::save_export(&path,&bytes)
                         }=>r};
                         let mut view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);view.busy=false;view.generation=view.generation.wrapping_add(1);match result{Ok(())=>{view.status="ANSI 原始输出已导出（不含输入/时间旁路）".into();view.error=None;},Err(error)=>view.error=Some(error)}
@@ -181,7 +184,9 @@ pub(super) async fn query(
         let negotiated = client_handshake(&mut stream, 1, hello)
             .await
             .map_err(|_| "daemon 认证失败".to_owned())?;
-        if request.operation==Op::ShellHistory as i32 && negotiated.protocol_minor<75{return Err("请一起更新 GUI 与后台，以支持命令导航".into());}
+        if request.operation == Op::ShellHistory as i32 && negotiated.protocol_minor < 75 {
+            return Err("请一起更新 GUI 与后台，以支持命令导航".into());
+        }
         if negotiated.feature_bits & features::TERMINAL_TOOLS == 0 {
             return Err("daemon 不支持终端工具".into());
         }
@@ -229,7 +234,10 @@ pub(super) async fn query(
         let expectation = match Op::try_from(request.operation)
             .map_err(|_| "无效终端工具操作".to_owned())?
         {
-            Op::ShellHistory => TerminalToolsExpectation::Shell {session:id.ok_or("missing shell session")?,id:request.cursor},
+            Op::ShellHistory => TerminalToolsExpectation::Shell {
+                session: id.ok_or("missing shell session")?,
+                id: request.cursor,
+            },
             Op::Get => TerminalToolsExpectation::View { after: 0 },
             Op::Poll => TerminalToolsExpectation::View {
                 after: request.cursor,

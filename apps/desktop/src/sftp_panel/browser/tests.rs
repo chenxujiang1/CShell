@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::*;
 use crate::ui_layout_gate::{bounds, check_window, context};
 use cshell_application::{
@@ -7,17 +8,48 @@ use egui::{Event, PointerButton, Pos2, Vec2, accesskit};
 mod preview;
 #[test]
 fn session_verification_override_is_frozen_into_each_new_transfer() {
-    let (mut panel,mut view,session)=fixture();let profile=cshell_domain::ProfileId::new();view.connection_profile=Some(profile);
-    let file=DragFile{session,local:true,name:"policy.bin".into(),path:if cfg!(windows){"C:/policy.bin"}else{"/policy.bin"}.into()};
-    panel.verification_overrides.insert(profile,cshell_domain::SftpVerification::Full);
-    panel.stage_file(session,&view,&file,false);
-    assert_eq!(panel.browser.staged[0].verification,Some(cshell_domain::SftpVerification::Full));
-    panel.verification_overrides.insert(profile,cshell_domain::SftpVerification::Standard);
-    assert_eq!(panel.browser.staged[0].verification,Some(cshell_domain::SftpVerification::Full));
-    panel.browser.staged.clear();panel.stage_file(session,&view,&file,false);
-    assert_eq!(panel.browser.staged[0].verification,Some(cshell_domain::SftpVerification::Standard));
-    panel.browser.staged.clear();panel.verification_overrides.clear();panel.stage_file(session,&view,&file,false);
-    assert_eq!(panel.browser.staged[0].verification,Some(crate::zmodem_settings::load().sftp_verification));
+    let (mut panel, mut view, session) = fixture();
+    let profile = cshell_domain::ProfileId::new();
+    view.connection_profile = Some(profile);
+    let file = DragFile {
+        session,
+        local: true,
+        name: "policy.bin".into(),
+        path: if cfg!(windows) {
+            "C:/policy.bin"
+        } else {
+            "/policy.bin"
+        }
+        .into(),
+    };
+    panel
+        .verification_overrides
+        .insert(profile, cshell_domain::SftpVerification::Full);
+    panel.stage_file(session, &view, &file, false);
+    assert_eq!(
+        panel.browser.staged[0].verification,
+        Some(cshell_domain::SftpVerification::Full)
+    );
+    panel
+        .verification_overrides
+        .insert(profile, cshell_domain::SftpVerification::Standard);
+    assert_eq!(
+        panel.browser.staged[0].verification,
+        Some(cshell_domain::SftpVerification::Full)
+    );
+    panel.browser.staged.clear();
+    panel.stage_file(session, &view, &file, false);
+    assert_eq!(
+        panel.browser.staged[0].verification,
+        Some(cshell_domain::SftpVerification::Standard)
+    );
+    panel.browser.staged.clear();
+    panel.verification_overrides.clear();
+    panel.stage_file(session, &view, &file, false);
+    assert_eq!(
+        panel.browser.staged[0].verification,
+        Some(crate::zmodem_settings::load().sftp_verification)
+    );
 }
 
 #[test]

@@ -62,12 +62,14 @@ mod sftp_queue;
 mod tunnels;
 pub use host_authorities::*;
 pub use tunnels::*;
+mod sftp_tree;
 mod sftp_workspace;
 mod terminal_upload;
-mod sftp_tree;
-pub use sftp_tree::{SftpTreeStart,SftpTreeSnapshot};
-pub use terminal_upload::{TerminalUploadProtocol, TerminalUploadSnapshot, TerminalUploadStart, TerminalUploadState};
+pub use sftp_tree::{SftpTreeSnapshot, SftpTreeStart};
 pub use sftp_workspace::*;
+pub use terminal_upload::{
+    TerminalUploadProtocol, TerminalUploadSnapshot, TerminalUploadStart, TerminalUploadState,
+};
 mod tasks;
 pub use sftp_queue::*;
 pub use tasks::*;

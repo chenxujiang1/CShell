@@ -199,27 +199,30 @@ async fn prompt<T>(
     // A wrong answer performs Argon2 before publishing the retry prompt. Use
     // the real connection budget under parallel KDF load, but fail immediately
     // if preparation finishes without publishing the expected challenge.
-    tokio::time::timeout(CONNECTION_PREPARATION_TIMEOUT + Duration::from_secs(1), async {
-        loop {
-            let r = c.keyboard_auth.handle(
-                c,
-                cshell_ipc::VaultOperation::KeyboardAuthPoll,
-                cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::KeyboardAuthPoll),
-            );
-            if let Some(p) = r.auth_challenge {
-                eprintln!(
-                    "vault prompt ready after {} ms",
-                    started.elapsed().as_millis()
+    tokio::time::timeout(
+        CONNECTION_PREPARATION_TIMEOUT + Duration::from_secs(1),
+        async {
+            loop {
+                let r = c.keyboard_auth.handle(
+                    c,
+                    cshell_ipc::VaultOperation::KeyboardAuthPoll,
+                    cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::KeyboardAuthPoll),
                 );
-                return p;
+                if let Some(p) = r.auth_challenge {
+                    eprintln!(
+                        "vault prompt ready after {} ms",
+                        started.elapsed().as_millis()
+                    );
+                    return p;
+                }
+                assert!(
+                    !work.is_finished(),
+                    "connection preparation finished before the expected prompt"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            assert!(
-                !work.is_finished(),
-                "connection preparation finished before the expected prompt"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
+        },
+    )
     .await
     .unwrap()
 }
@@ -385,7 +388,10 @@ fn unlock_survives_long_idle_manual_lock_still_cancels_and_restart_starts_locked
     let cancellation = c.cancellation();
     for _ in 0..3 {
         assert!(c.response(None).unlocked);
-        assert_eq!(c.read(&target, Kind::Password).unwrap().expose(), b"saved-password");
+        assert_eq!(
+            c.read(&target, Kind::Password).unwrap().expose(),
+            b"saved-password"
+        );
     }
     assert!(!cancellation.has_changed().unwrap());
     assert_eq!(c.commit_auth(before, || "connected").unwrap(), "connected");
@@ -393,8 +399,14 @@ fn unlock_survives_long_idle_manual_lock_still_cancels_and_restart_starts_locked
     assert!(c.response(None).manually_locked);
     assert!(!c.response(None).unlocked);
     assert!(cancellation.has_changed().unwrap());
-    assert_eq!(c.read(&target, Kind::Password).unwrap_err(), VaultError::Locked);
-    assert_eq!(c.commit_auth(before, || ()).unwrap_err(), VaultError::Locked);
+    assert_eq!(
+        c.read(&target, Kind::Password).unwrap_err(),
+        VaultError::Locked
+    );
+    assert_eq!(
+        c.commit_auth(before, || ()).unwrap_err(),
+        VaultError::Locked
+    );
     c.unlock(&password(), generation(&c)).unwrap();
     assert!(!c.response(None).manually_locked);
     drop(cancellation);
@@ -402,7 +414,10 @@ fn unlock_survives_long_idle_manual_lock_still_cancels_and_restart_starts_locked
     let reopened = VaultController::new(root.path().join("master.vault"));
     assert!(!reopened.response(None).unlocked);
     reopened.unlock(&password(), generation(&reopened)).unwrap();
-    assert_eq!(reopened.read(&target, Kind::Password).unwrap().expose(), b"saved-password");
+    assert_eq!(
+        reopened.read(&target, Kind::Password).unwrap().expose(),
+        b"saved-password"
+    );
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -411,30 +426,58 @@ fn desktop_lock_suspend_and_monitor_failure_do_not_revoke_unlocked_credentials()
     let (_root, c, target) = fixture();
     let before = generation(&c);
     let cancellation = c.cancellation();
-    for state in [VaultSessionState::Active, VaultSessionState::Locked,
-        VaultSessionState::Disconnected, VaultSessionState::Suspended, VaultSessionState::Unavailable,
-        VaultSessionState::Unsupported, VaultSessionState::Active] {
+    for state in [
+        VaultSessionState::Active,
+        VaultSessionState::Locked,
+        VaultSessionState::Disconnected,
+        VaultSessionState::Suspended,
+        VaultSessionState::Unavailable,
+        VaultSessionState::Unsupported,
+        VaultSessionState::Active,
+    ] {
         c.observe_desktop_session(state);
         assert_eq!(c.session_state(), state);
         assert!(c.response(None).unlocked);
-        assert_eq!(c.read(&target, Kind::Password).unwrap().expose(), b"saved-password");
+        assert_eq!(
+            c.read(&target, Kind::Password).unwrap().expose(),
+            b"saved-password"
+        );
         assert_eq!(generation(&c), before);
         assert!(!cancellation.has_changed().unwrap());
         assert_eq!(c.commit_auth(before, || "connected").unwrap(), "connected");
     }
-    c.protect_with(c.response(None).revision, generation(&c), &password(), true,
-        |_| Ok(system_key()), |_| Ok(system_key()), rebuild::publish, |_| Ok(())).unwrap();
+    c.protect_with(
+        c.response(None).revision,
+        generation(&c),
+        &password(),
+        true,
+        |_| Ok(system_key()),
+        |_| Ok(system_key()),
+        rebuild::publish,
+        |_| Ok(()),
+    )
+    .unwrap();
     let system_generation = generation(&c);
     c.guard().unlocked_at = Some(Instant::now() - Duration::from_secs(24 * 60 * 60));
-    for state in [VaultSessionState::Locked, VaultSessionState::Suspended, VaultSessionState::Unavailable] {
+    for state in [
+        VaultSessionState::Locked,
+        VaultSessionState::Suspended,
+        VaultSessionState::Unavailable,
+    ] {
         c.observe_desktop_session(state);
         assert!(c.response(None).system && c.response(None).unlocked);
-        assert_eq!(c.read(&target, Kind::Password).unwrap().expose(), b"saved-password");
+        assert_eq!(
+            c.read(&target, Kind::Password).unwrap().expose(),
+            b"saved-password"
+        );
         assert_eq!(generation(&c), system_generation);
     }
     c.lock_manually();
     c.observe_desktop_session(VaultSessionState::Active);
-    assert!(!c.response(None).unlocked, "unlocking the desktop must not undo a manual Vault lock");
+    assert!(
+        !c.response(None).unlocked,
+        "unlocking the desktop must not undo a manual Vault lock"
+    );
     assert!(c.response(None).manually_locked);
 }
 

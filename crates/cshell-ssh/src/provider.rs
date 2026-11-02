@@ -56,7 +56,11 @@ pub fn select_ssh_provider(
 pub(crate) fn authentication_requirements(auth: &SshAuthentication) -> SshProviderRequirements {
     let mut req = SshProviderRequirements::default();
     match auth {
-        SshAuthentication::Ordered(ordered) => {for method in &ordered.methods {req.capabilities.insert(method.capability());}}
+        SshAuthentication::Ordered(ordered) => {
+            for method in &ordered.methods {
+                req.capabilities.insert(method.capability());
+            }
+        }
         SshAuthentication::Password(_) => {
             req.capabilities.insert(C::Password);
         }
@@ -105,8 +109,13 @@ impl std::fmt::Debug for SshConnection {
     }
 }
 impl SshConnection {
-    pub fn authenticated_username(&self)->Option<&str>{self.authenticated_username.as_deref()}
-    pub(crate) fn with_authenticated_username(mut self,username:String)->Self{self.authenticated_username=Some(username);self}
+    pub fn authenticated_username(&self) -> Option<&str> {
+        self.authenticated_username.as_deref()
+    }
+    pub(crate) fn with_authenticated_username(mut self, username: String) -> Self {
+        self.authenticated_username = Some(username);
+        self
+    }
     pub async fn connect_known_hosts(
         username: String,
         authentication: SshAuthentication,
@@ -123,7 +132,7 @@ impl SshConnection {
         Self {
             backend: ConnectionBackend::Russh(Arc::new(client)),
             descriptor: russh_descriptor(),
-            authenticated_username:None,
+            authenticated_username: None,
         }
     }
     pub fn provider_id(&self) -> SshProviderId {
@@ -176,11 +185,19 @@ impl SshConnection {
             .open_terminal_with_type(rows, cols, terminal_type)
             .await
     }
-    pub async fn open_terminal_tracked(&self,rows:u32,cols:u32,terminal_type:&str,marker:Option<&str>)->Result<SshTerminal,SshError> {
+    pub async fn open_terminal_tracked(
+        &self,
+        rows: u32,
+        cols: u32,
+        terminal_type: &str,
+        marker: Option<&str>,
+    ) -> Result<SshTerminal, SshError> {
         self.require(C::Pty)?;
-        self.russh().open_terminal_tracked(rows,cols,terminal_type,marker).await
+        self.russh()
+            .open_terminal_tracked(rows, cols, terminal_type, marker)
+            .await
     }
-    pub async fn remote_working_directory(&self,marker:&str)->Option<String> {
+    pub async fn remote_working_directory(&self, marker: &str) -> Option<String> {
         self.require(C::Exec).ok()?;
         self.russh().remote_working_directory(marker).await
     }
@@ -188,11 +205,13 @@ impl SshConnection {
         self.require(C::Exec)?;
         self.russh().open_exec().await
     }
-    pub async fn file_checksum_probe(&self,path:&str,nonce:&[u8])->bool {
-        if self.require(C::Exec).is_err() {return false;}
-        self.russh().file_checksum_probe(path,nonce).await
+    pub async fn file_checksum_probe(&self, path: &str, nonce: &[u8]) -> bool {
+        if self.require(C::Exec).is_err() {
+            return false;
+        }
+        self.russh().file_checksum_probe(path, nonce).await
     }
-    pub async fn file_sha256(&self,path:&str)->Option<[u8;32]> {
+    pub async fn file_sha256(&self, path: &str) -> Option<[u8; 32]> {
         self.require(C::Exec).ok()?;
         self.russh().file_sha256(path).await
     }

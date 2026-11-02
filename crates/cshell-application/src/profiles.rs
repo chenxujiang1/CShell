@@ -621,7 +621,8 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
         if !connection.options.is_valid()
             || connection.port == 0
             || !valid_target_field(&connection.host, MAX_SSH_HOST_BYTES)
-            || (!connection.username.is_empty() && !valid_target_field(&connection.username, MAX_SSH_USERNAME_BYTES))
+            || (!connection.username.is_empty()
+                && !valid_target_field(&connection.username, MAX_SSH_USERNAME_BYTES))
             || connection
                 .private_key_path
                 .as_deref()
@@ -634,14 +635,19 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
                 !value.starts_with("SHA256:") || !valid_target_field(value, 128)
             })
             || (connection.uses_private_key() && connection.private_key_path.is_none())
-            || (connection.authentication_steps().contains(&cshell_domain::SshAuthStep::Certificate) && connection.certificate_path.is_none())
-            || (connection.options.authentication_order.is_empty() && match connection.auth_method {
-                SshAuthMethod::Password | SshAuthMethod::Agent => false,
-                SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
-                    connection.private_key_path.is_none()
-                }
-            })
-            || (connection.options.authentication_order.is_empty() && connection.auth_method == SshAuthMethod::Certificate
+            || (connection
+                .authentication_steps()
+                .contains(&cshell_domain::SshAuthStep::Certificate)
+                && connection.certificate_path.is_none())
+            || (connection.options.authentication_order.is_empty()
+                && match connection.auth_method {
+                    SshAuthMethod::Password | SshAuthMethod::Agent => false,
+                    SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
+                        connection.private_key_path.is_none()
+                    }
+                })
+            || (connection.options.authentication_order.is_empty()
+                && connection.auth_method == SshAuthMethod::Certificate
                 && connection.certificate_path.is_none())
         {
             return Err(CatalogError::InvalidSshTarget);

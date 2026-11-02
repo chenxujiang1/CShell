@@ -22,10 +22,21 @@ pub(crate) struct Connection {
 }
 impl Connection {
     #[cfg(test)]
-    pub fn preview(transfers:Vec<cshell_ipc::ZmodemTransfer>)->Self {
-        let (sender,_receiver)=tokio::sync::mpsc::channel(1);
-        let (stop,_stopped)=tokio::sync::watch::channel(false);
-        Self{shared:Arc::new(Mutex::new(View{response:ZmodemResponse{transfers,error:String::new()},..Default::default()})),sender,stop,worker:None}
+    pub fn preview(transfers: Vec<cshell_ipc::ZmodemTransfer>) -> Self {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let (stop, _stopped) = tokio::sync::watch::channel(false);
+        Self {
+            shared: Arc::new(Mutex::new(View {
+                response: ZmodemResponse {
+                    transfers,
+                    error: String::new(),
+                },
+                ..Default::default()
+            })),
+            sender,
+            stop,
+            worker: None,
+        }
     }
 
     pub fn start(config: DesktopConnectionConfig) -> std::io::Result<Self> {

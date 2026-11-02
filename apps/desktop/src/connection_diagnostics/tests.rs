@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use crate::ui_layout_gate::{bounds, context};
 use cshell_domain::{ConnectionStep, SessionId};
@@ -9,14 +16,20 @@ fn diagnostics_window_never_reserves_terminal_layout_space() {
     for open in [false, true, false] {
         app.view_model.connection_diagnostics_open = open;
         let mut shift = 0.0;
-        let mut output = ctx.run_ui(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(720.0, 480.0))),
-            ..Default::default()
-        }, |ui| {
-            let before = ui.cursor().min.y;
-            app.draw_connection_diagnostics(ui);
-            shift = ui.cursor().min.y - before;
-        });
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(720.0, 480.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let before = ui.cursor().min.y;
+                app.draw_connection_diagnostics(ui);
+                shift = ui.cursor().min.y - before;
+            },
+        );
         output.textures_delta.clear();
         assert_eq!(shift, 0.0, "diagnostics must use an independent window");
     }
@@ -283,6 +296,15 @@ fn success_collapses_the_same_attempt_and_failure_summary_names_its_stage() {
         egui::vec2(720.0, 480.0),
         vec![],
     );
-    let texts=tree.nodes.iter().filter_map(|(_,n)|n.label().or(n.value())).collect::<Vec<_>>();
-    assert!(texts.iter().any(|s|s.starts_with("连接失败 · 等待输入 / 解锁确认")),"{texts:?}");
+    let texts = tree
+        .nodes
+        .iter()
+        .filter_map(|(_, n)| n.label().or(n.value()))
+        .collect::<Vec<_>>();
+    assert!(
+        texts
+            .iter()
+            .any(|s| s.starts_with("连接失败 · 等待输入 / 解锁确认")),
+        "{texts:?}"
+    );
 }

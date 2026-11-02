@@ -1062,16 +1062,16 @@ impl TaskPanel {
         if self.output_reflow.is_none() && self.output_surface.is_some() {
             self.output_reflow = TaskReflowWorker::start().ok();
         }
-        if let Some(worker) = &self.output_reflow {
-            if let Some(result) = worker.take_result() {
-                changed = true;
-                if let Some(surface) = &mut self.output_surface {
-                    match result {
-                        Ok(layout) => {
-                            surface.submit_reflow(layout);
-                        }
-                        Err(_) => surface.reflow_failed(),
+        if let Some(worker) = &self.output_reflow
+            && let Some(result) = worker.take_result()
+        {
+            changed = true;
+            if let Some(surface) = &mut self.output_surface {
+                match result {
+                    Ok(layout) => {
+                        surface.submit_reflow(layout);
                     }
+                    Err(_) => surface.reflow_failed(),
                 }
             }
         }

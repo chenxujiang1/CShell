@@ -61,12 +61,19 @@ impl SftpPanel {
                     ));
                 }
                 Some(crate::host_key_prompt::Action::Dismiss) => {
-                    if prompt.cancelled_connection_profile().is_some_and(|profile|Some(profile)==view.and_then(|view|view.connection_profile))
-                        && self.bound_session_id.is_some() && self.bound_session_id==view.and_then(|view|view.session_id) {
-                        if let Some(tab)=self.remote_tabs.iter().find(|tab|tab.active) {self.tab_action=Some(super::TabAction::Close(tab.id));}
+                    if prompt
+                        .cancelled_connection_profile()
+                        .is_some_and(|profile| {
+                            Some(profile) == view.and_then(|view| view.connection_profile)
+                        })
+                        && self.bound_session_id.is_some()
+                        && self.bound_session_id == view.and_then(|view| view.session_id)
+                        && let Some(tab) = self.remote_tabs.iter().find(|tab| tab.active)
+                    {
+                        self.tab_action = Some(super::TabAction::Close(tab.id));
                     }
                     self.host_prompt = None;
-                },
+                }
                 None => {}
             }
         }

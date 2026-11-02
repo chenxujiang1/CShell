@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 use std::sync::Arc;
 
@@ -147,42 +154,114 @@ fn opening_another_file_never_overwrites_unsaved_draft() {
     let (mut panel, _, session) = fixture();
     panel.edit_dirty = true;
     panel.edit_buffer = "keep".into();
-    assert!(panel.prepare_editor("/other/file",session));
+    assert!(panel.prepare_editor("/other/file", session));
     assert_eq!(panel.edit_buffer, "keep");
-    assert_eq!(panel.editor_target.as_deref(),Some("/other/file"));
+    assert_eq!(panel.editor_target.as_deref(), Some("/other/file"));
 }
 #[test]
-fn document_switch_restores_unsaved_text_and_never_sends_it_to_another_file(){
-    let ctx=crate::ui_layout_gate::context();let (mut panel,view,_)=fixture();frame(&ctx,&mut panel,&view,vec![]);
-    panel.edit_buffer="unsaved first document".into();panel.edit_dirty=true;
-    assert!(panel.prepare_editor("/etc/second.conf",view.session_id.unwrap()));
-    let mut second=view.clone();let mut doc=(**view.edit.as_ref().unwrap()).clone();doc.id=SessionId::new();doc.remote_path="/etc/second.conf".into();second.edit=Some(Arc::new(doc));second.edit_text=Some(Arc::new("second document".into()));
-    assert!(frame(&ctx,&mut panel,&second,vec![]).1.is_none());assert_eq!(panel.edit_buffer,"second document");assert!(!panel.edit_dirty);
-    assert!(frame(&ctx,&mut panel,&view,vec![]).1.is_none());assert_eq!(panel.edit_buffer,"unsaved first document");assert!(panel.edit_dirty);
+fn document_switch_restores_unsaved_text_and_never_sends_it_to_another_file() {
+    let ctx = crate::ui_layout_gate::context();
+    let (mut panel, view, _) = fixture();
+    frame(&ctx, &mut panel, &view, vec![]);
+    panel.edit_buffer = "unsaved first document".into();
+    panel.edit_dirty = true;
+    assert!(panel.prepare_editor("/etc/second.conf", view.session_id.unwrap()));
+    let mut second = view.clone();
+    let mut doc = (**view.edit.as_ref().unwrap()).clone();
+    doc.id = SessionId::new();
+    doc.remote_path = "/etc/second.conf".into();
+    second.edit = Some(Arc::new(doc));
+    second.edit_text = Some(Arc::new("second document".into()));
+    assert!(frame(&ctx, &mut panel, &second, vec![]).1.is_none());
+    assert_eq!(panel.edit_buffer, "second document");
+    assert!(!panel.edit_dirty);
+    assert!(frame(&ctx, &mut panel, &view, vec![]).1.is_none());
+    assert_eq!(panel.edit_buffer, "unsaved first document");
+    assert!(panel.edit_dirty);
 }
 #[test]
-fn long_file_editor_keeps_save_in_fixed_footer_even_with_find_bar(){
-    let ctx=crate::ui_layout_gate::context();let (advanced,mut view,session)=fixture();view.edit_text=Some(Arc::new("line content\n".repeat(2000)));
-    let mut panel=SftpPanel::default();panel.bound_session_id=Some(session);panel.page=2;panel.advanced=advanced;
+fn long_file_editor_keeps_save_in_fixed_footer_even_with_find_bar() {
+    let ctx = crate::ui_layout_gate::context();
+    let (advanced, mut view, session) = fixture();
+    view.edit_text = Some(Arc::new("line content\n".repeat(2000)));
+    let mut panel = SftpPanel::default();
+    panel.bound_session_id = Some(session);
+    panel.page = 2;
+    panel.advanced = advanced;
     for frame in 0..4 {
-        let events=if frame==2{vec![egui::Event::ModifiersChanged(egui::Modifiers::CTRL),egui::Event::Key{key:egui::Key::F,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers::CTRL}]}else{vec![]};
-        let size=egui::vec2(720.0,480.0);let mut out=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,size)),events,..Default::default()},|ui|{let _=panel.draw_contents(ui,Some(session),Some(&view));});out.textures_delta.clear();
-        let tree=out.platform_output.accesskit_update.unwrap();let save=&tree.nodes.iter().find(|(_,n)|n.label()==Some("保存并上传    Ctrl+S")).unwrap().1;
-        assert!(egui::Rect::from_min_size(egui::Pos2::ZERO,size).contains_rect(crate::ui_layout_gate::bounds(save)));assert!(crate::ui_layout_gate::bounds(save).top()>300.0);
+        let events = if frame == 2 {
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
+                egui::Event::Key {
+                    key: egui::Key::F,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                },
+            ]
+        } else {
+            vec![]
+        };
+        let size = egui::vec2(720.0, 480.0);
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let _ = panel.draw_contents(ui, Some(session), Some(&view));
+            },
+        );
+        out.textures_delta.clear();
+        let tree = out.platform_output.accesskit_update.unwrap();
+        let save = &tree
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("保存并上传    Ctrl+S"))
+            .unwrap()
+            .1;
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, size)
+                .contains_rect(crate::ui_layout_gate::bounds(save))
+        );
+        assert!(crate::ui_layout_gate::bounds(save).top() > 300.0);
     }
 }
 
 #[test]
-fn review_is_read_only_and_rebase_reply_preserves_unsaved_draft(){
-    let ctx=crate::ui_layout_gate::context();let(mut panel,mut view,session)=fixture();
-    frame(&ctx,&mut panel,&view,vec![]);
-    panel.edit_buffer="my unsaved merge\n".into();panel.edit_dirty=true;
-    let doc=view.edit.as_ref().unwrap().clone();let remote=sftp_digest(b"server changed\n");
-    view.edit_review=Some(Arc::new(SftpEditReview{session,id:doc.id,revision:doc.revision,base_content:doc.base,base:Some("original\n".into()),remote_content:remote,remote_permissions:Some(0o644),remote:"server changed\n".into(),backups:vec![],selected_backup:None,backup_text:None}));
+fn review_is_read_only_and_rebase_reply_preserves_unsaved_draft() {
+    let ctx = crate::ui_layout_gate::context();
+    let (mut panel, mut view, session) = fixture();
+    frame(&ctx, &mut panel, &view, vec![]);
+    panel.edit_buffer = "my unsaved merge\n".into();
+    panel.edit_dirty = true;
+    let doc = view.edit.as_ref().unwrap().clone();
+    let remote = sftp_digest(b"server changed\n");
+    view.edit_review = Some(Arc::new(SftpEditReview {
+        session,
+        id: doc.id,
+        revision: doc.revision,
+        base_content: doc.base,
+        base: Some("original\n".into()),
+        remote_content: remote,
+        remote_permissions: Some(0o644),
+        remote: "server changed\n".into(),
+        backups: vec![],
+        selected_backup: None,
+        backup_text: None,
+    }));
     panel.preview_editor_review(doc.id);
-    assert!(frame(&ctx,&mut panel,&view,vec![]).1.is_none());assert_eq!(panel.edit_buffer,"my unsaved merge\n");
-    panel.review.pending=Some((doc.id,doc.revision,remote));
-    let mut updated=(*doc).clone();updated.revision+=1;updated.base=remote;view.edit=Some(Arc::new(updated));
-    assert!(frame(&ctx,&mut panel,&view,vec![]).1.is_none());
-    assert_eq!(panel.edit_buffer,"my unsaved merge\n");assert!(panel.edit_dirty);assert_eq!(panel.edit_stamp.unwrap().3,remote);
+    assert!(frame(&ctx, &mut panel, &view, vec![]).1.is_none());
+    assert_eq!(panel.edit_buffer, "my unsaved merge\n");
+    panel.review.pending = Some((doc.id, doc.revision, remote));
+    let mut updated = (*doc).clone();
+    updated.revision += 1;
+    updated.base = remote;
+    view.edit = Some(Arc::new(updated));
+    assert!(frame(&ctx, &mut panel, &view, vec![]).1.is_none());
+    assert_eq!(panel.edit_buffer, "my unsaved merge\n");
+    assert!(panel.edit_dirty);
+    assert_eq!(panel.edit_stamp.unwrap().3, remote);
 }

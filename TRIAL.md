@@ -37,6 +37,20 @@ bash .github/scripts/package-trial-macos.sh target/aarch64-apple-darwin/release 
 
 打包产物复用 `artifacts/ui-refresh-20261015/bin` 中固定名称，不生成逐轮历史副本；Mac app 按架构保存在该目录内。更新前正常退出相关程序，保留既有用户数据。macOS 脚本在检测到相关进程时拒绝覆盖。
 
+## 升级与配置保留
+
+更新前正常退出桌面程序及后台，再替换整套程序文件或 `CShell.app`。不要删除用户数据目录：
+
+- Windows 普通分发版：`%LOCALAPPDATA%\CShell`。
+- macOS 普通分发版：`~/Library/Application Support/CShell`；替换或移动 app 不改变该目录。
+- 早期 Windows 本地试用目录：保留 `Start-Trial.cmd`、`data` 和 `runtime`。新版在原 `bin` 中直接启动也会识别该布局；复制便携目录时须带上数据，而不能只复制 EXE。
+
+数据路径由桌面和后台共用同一套解析：显式 `CSHELL_PROFILE_DB` 优先于 `CSHELL_DATA_DIR`，其次识别旧试用布局，最后使用系统用户目录。自定义存储使用对应的独立后台目录；显式 `CSHELL_RUNTIME_DIR` 仍优先。路径解析不会扫描其他磁盘，不按文件大小或修改时间猜测数据位置，也不自动复制、覆盖或合并不同数据库。
+
+数据库 schema 升级沿用原有的升级前备份和失败回滚机制。配置 ID 保持稳定，以保留凭据绑定；凭据库、主机信任与显示设置沿用原位置。较新且不支持的 schema 会拒绝打开，不能通过创建空库掩盖失败。系统钥匙串仍属于原操作系统账户，替换签名发生变化的试用程序时可能再次出现系统授权提示。
+
+升级回归检查在临时目录中验证：旧布局直接启动、显式路径优先级、普通应用移动、多个数据库后台隔离、缺失数据时拒绝回退、旧 schema 升级、配置和文件夹保留、旁路文件不变、重开不重复迁移，以及解锁后原凭据仍可读取。人工验收还须使用实际下载包完成一次旧版覆盖升级。
+
 ## macOS 签名限制
 
 当前脚本使用本地 ad-hoc 签名以验证 app 结构，没有 Developer ID 身份和 Apple 公证。它不能提供开发者身份信任，也不能保证浏览器下载后的首次打开会通过 Gatekeeper。

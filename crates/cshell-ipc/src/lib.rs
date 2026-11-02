@@ -8,6 +8,8 @@ pub use clipboard_policy::*;
 mod codec;
 pub use clipboard::*;
 mod discovery;
+mod storage_paths;
+pub use storage_paths::StoragePaths;
 mod handshake;
 mod host_authorities;
 mod message;
@@ -68,9 +70,10 @@ pub use message::{
 pub use replica::{
     ApplyResult, ReplicaError, ReplicaState, TerminalReplicaError, TerminalReplicaState,
 };
-pub use sftp::{SftpTransferPhase,
+pub use sftp::{
     MAX_SFTP_DIRECTORY_ENTRIES, MAX_SFTP_PATH_BYTES, SftpCleanupLocation, SftpDirectoryEntry,
-    SftpOperation, SftpRequest, SftpResponse, SftpStatus, SftpTransfer, SftpTransferState,
+    SftpOperation, SftpRequest, SftpResponse, SftpStatus, SftpTransfer, SftpTransferPhase,
+    SftpTransferState,
 };
 pub use subscription::{ClientFrameUpdate, SubscriptionClientError, TerminalSubscriptionReplica};
 
@@ -79,8 +82,8 @@ pub use profile::{
     ProfileCatalogData, ProfileChange, ProfileCodecError, ProfileDefaultsData, ProfileFolderData,
     ProfileImportAction, ProfileImportItemData, ProfileImportItemKind, ProfileImportPolicy,
     ProfileImportPreviewData, ProfileKindData, ProfileOperation, ProfileRecordData, ProfileRequest,
-    ProfileResponse, ProfileStatus, ProfileTerminalOverridesData, SshConnectionData, SshConnectionOptionsData, SshRouteData,
-    ThemeData, decode_id, profile_change,
+    ProfileResponse, ProfileStatus, ProfileTerminalOverridesData, SshConnectionData,
+    SshConnectionOptionsData, SshRouteData, ThemeData, decode_id, profile_change,
 };
 mod export_file;
 mod upload_source;
@@ -91,10 +94,9 @@ pub use export_file::{
     publish_export_file,
 };
 pub use vault::{
-    ManagedKeyInfo, ManagedKeyRequest,
-    KeyboardAuthChallenge, KeyboardAuthPrompt, KeyboardAuthAnswer,
-    CredentialPackageItem, CredentialPackagePreview, MAX_CREDENTIAL_PACKAGE_BYTES,
-    MAX_CREDENTIAL_PACKAGE_PROFILES, VaultControlStatus, VaultOperation, VaultRequest,
+    CredentialPackageItem, CredentialPackagePreview, KeyboardAuthAnswer, KeyboardAuthChallenge,
+    KeyboardAuthPrompt, MAX_CREDENTIAL_PACKAGE_BYTES, MAX_CREDENTIAL_PACKAGE_PROFILES,
+    ManagedKeyInfo, ManagedKeyRequest, VaultControlStatus, VaultOperation, VaultRequest,
     VaultResponse, VaultSessionState,
 };
 mod connection_diagnostics;

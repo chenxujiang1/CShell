@@ -227,17 +227,17 @@ impl DownloadPanel {
             })
             .response
             .rect;
-        if *open && let Some(document) = &view.document {
-            if (document.active || view.cancel_busy || self.read_requested)
-                && !view.busy
-                && self
-                    .refresh_at
-                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
-                && connection.get(document.id, false)
-            {
-                self.refresh_at = Some(Instant::now());
-                self.read_requested = false;
-            }
+        if *open
+            && let Some(document) = &view.document
+            && (document.active || view.cancel_busy || self.read_requested)
+            && !view.busy
+            && self
+                .refresh_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+            && connection.get(document.id, false)
+        {
+            self.refresh_at = Some(Instant::now());
+            self.read_requested = false;
         }
         rect
     }

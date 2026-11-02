@@ -167,8 +167,19 @@ pub fn ssh_connection_requirements(
         jump_hops: u8::try_from(jump_hops).map_err(|_| "SSH jump depth overflow")?,
         ..Default::default()
     };
-    for method in target.authentication_steps(){requirements.capabilities.insert(match method {cshell_domain::SshAuthStep::KeyboardInteractive=>SshCapability::KeyboardInteractive,cshell_domain::SshAuthStep::Password=>SshCapability::Password,cshell_domain::SshAuthStep::PrivateKey=>SshCapability::PublicKey,cshell_domain::SshAuthStep::Certificate=>SshCapability::UserCertificate,cshell_domain::SshAuthStep::Agent=>SshCapability::Agent});}
-    if target.authentication_steps().contains(&cshell_domain::SshAuthStep::Agent) {
+    for method in target.authentication_steps() {
+        requirements.capabilities.insert(match method {
+            cshell_domain::SshAuthStep::KeyboardInteractive => SshCapability::KeyboardInteractive,
+            cshell_domain::SshAuthStep::Password => SshCapability::Password,
+            cshell_domain::SshAuthStep::PrivateKey => SshCapability::PublicKey,
+            cshell_domain::SshAuthStep::Certificate => SshCapability::UserCertificate,
+            cshell_domain::SshAuthStep::Agent => SshCapability::Agent,
+        });
+    }
+    if target
+        .authentication_steps()
+        .contains(&cshell_domain::SshAuthStep::Agent)
+    {
         match target.agent_backend {
             Agent::Auto => (),
             Agent::OpenSsh => {

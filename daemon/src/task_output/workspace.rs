@@ -1,4 +1,6 @@
 //! Full pinned observations, private persistent line indexes and explicit retention.
+type ObservedOutput = (OutputIndexEntry, Vec<(u64, u64)>, Vec<u8>, bool);
+
 use super::analysis::{PinnedOutput, storage};
 use super::*;
 use cshell_application::*;
@@ -163,6 +165,10 @@ impl TaskOutputStore {
         page.validate().map_err(|_| OutputAnalysisError::Invalid)?;
         Ok(page)
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
     fn observe_workspace(
         &self,
         source: &OutputAnalysisRequest,
@@ -172,7 +178,7 @@ impl TaskOutputStore {
         cancel: &AtomicBool,
         progress: &WorkspaceProgress,
         started: Instant,
-    ) -> Result<(OutputIndexEntry, Vec<(u64, u64)>, Vec<u8>, bool), OutputAnalysisError> {
+    ) -> Result<ObservedOutput, OutputAnalysisError> {
         let mut input = self.pin_analysis(
             binding.child_id,
             source.left,

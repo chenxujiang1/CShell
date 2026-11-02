@@ -37,21 +37,26 @@ pub(super) fn restore(saved: Option<WindowPlacement>, screens: &[Screen]) -> Win
         (f64::from(screen.size[0]) / scale - 32.0).max(320.0),
         (f64::from(screen.size[1]) / scale - 80.0).max(240.0),
     ];
-    for index in 0..2 {
-        value.inner_size[index] = value.inner_size[index].min(limits[index]);
+    for (size, limit) in value.inner_size.iter_mut().zip(limits) {
+        *size = size.min(limit);
     }
     if let Some(position) = &mut value.position {
-        for index in 0..2 {
+        for (index, coordinate) in position.iter_mut().enumerate() {
             let extent =
                 value.inner_size[index] * scale + if index == 0 { 16.0 } else { 64.0 } * scale;
             let low = f64::from(screen.origin[index]);
             let high = (low + f64::from(screen.size[index]) - extent).max(low);
-            position[index] = (f64::from(position[index])).clamp(low, high).round() as i32;
+            *coordinate = f64::from(*coordinate).clamp(low, high).round() as i32;
         }
     }
     value
 }
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]

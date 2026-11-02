@@ -47,7 +47,11 @@ impl WorkspaceConnection {
     #[cfg(test)]
     pub(crate) fn paused_for_test() -> Self {
         Self {
-            shared: Arc::new(Mutex::new(WorkspaceView { ready: true, paused: true, ..Default::default() })),
+            shared: Arc::new(Mutex::new(WorkspaceView {
+                ready: true,
+                paused: true,
+                ..Default::default()
+            })),
             sender: None,
             controls: tokio::sync::mpsc::channel(1).0,
             stop: tokio::sync::watch::channel(false).0,

@@ -14,12 +14,21 @@ fn auxiliary_metadata_signature_requires_unlock_and_binding_detects_disk_changes
     let mut vault = PortableVault::create(&path, &password()).unwrap();
     let binding = vault.metadata_binding().unwrap();
     let (public, signature) = vault.sign_metadata(b"routing metadata").unwrap();
-    UnparsedPublicKey::new(&ED25519, public).verify(b"routing metadata", &signature).unwrap();
-    assert!(UnparsedPublicKey::new(&ED25519, public).verify(b"modified metadata", &signature).is_err());
+    UnparsedPublicKey::new(&ED25519, public)
+        .verify(b"routing metadata", &signature)
+        .unwrap();
+    assert!(
+        UnparsedPublicKey::new(&ED25519, public)
+            .verify(b"modified metadata", &signature)
+            .is_err()
+    );
     assert_eq!(vault.status().record_count, 0);
     vault.lock();
     assert_eq!(vault.metadata_binding().unwrap(), binding);
-    assert_eq!(vault.sign_metadata(b"anything").unwrap_err(), VaultError::Locked);
+    assert_eq!(
+        vault.sign_metadata(b"anything").unwrap_err(),
+        VaultError::Locked
+    );
     std::fs::write(&path, b"damaged").unwrap();
     assert!(vault.metadata_binding().is_err());
 }
@@ -585,14 +594,63 @@ fn portable_record_and_file_limits_reject_changes_without_losing_previous_creden
 
 #[test]
 fn protection_copy_keeps_all_record_kinds_and_bindings_and_never_replaces_existing_files() {
-    let root=tempfile::tempdir().unwrap();let old=Secret::new(b"source-master-password".to_vec());let new=Secret::new(b"target-master-password".to_vec());
-    let source_path=root.path().join("source.vault");let target_path=root.path().join("target.vault");let mut source=PortableVault::create(&source_path,&old).unwrap();
-    let kinds=[VaultCredentialKind::Password,VaultCredentialKind::KeyPassphrase,VaultCredentialKind::PrivateKey,VaultCredentialKind::ProfileMode,VaultCredentialKind::ManagedKey,VaultCredentialKind::VaultSettings];
-    for (i,kind) in kinds.into_iter().enumerate(){source.write(VaultCredentialRef{profile_id:[i as u8+1;16],kind},"kept-binding",&Secret::new(b"kept-secret".to_vec())).unwrap();}
-    let before=std::fs::read(&source_path).unwrap();let target=source.copy_protected(&target_path,&new).unwrap();
-    for (i,kind) in kinds.into_iter().enumerate(){assert_eq!(target.read(VaultCredentialRef{profile_id:[i as u8+1;16],kind},"kept-binding").unwrap().expose(),b"kept-secret");}
-    assert_eq!(std::fs::read(&source_path).unwrap(),before);assert_eq!(source.status().record_count,target.status().record_count);
-    assert!(source.verify_password(&new).is_err());assert!(source.status().unlocked);assert!(source.copy_protected(&target_path,&new).is_err());
-    drop(target);let mut target=PortableVault::open(&target_path).unwrap();assert!(target.unlock(&old).is_err());target.unlock(&new).unwrap();
-    source.lock();assert!(source.copy_protected(root.path().join("must-not-exist"),&new).is_err());assert!(!root.path().join("must-not-exist").exists());
+    let root = tempfile::tempdir().unwrap();
+    let old = Secret::new(b"source-master-password".to_vec());
+    let new = Secret::new(b"target-master-password".to_vec());
+    let source_path = root.path().join("source.vault");
+    let target_path = root.path().join("target.vault");
+    let mut source = PortableVault::create(&source_path, &old).unwrap();
+    let kinds = [
+        VaultCredentialKind::Password,
+        VaultCredentialKind::KeyPassphrase,
+        VaultCredentialKind::PrivateKey,
+        VaultCredentialKind::ProfileMode,
+        VaultCredentialKind::ManagedKey,
+        VaultCredentialKind::VaultSettings,
+    ];
+    for (i, kind) in kinds.into_iter().enumerate() {
+        source
+            .write(
+                VaultCredentialRef {
+                    profile_id: [i as u8 + 1; 16],
+                    kind,
+                },
+                "kept-binding",
+                &Secret::new(b"kept-secret".to_vec()),
+            )
+            .unwrap();
+    }
+    let before = std::fs::read(&source_path).unwrap();
+    let target = source.copy_protected(&target_path, &new).unwrap();
+    for (i, kind) in kinds.into_iter().enumerate() {
+        assert_eq!(
+            target
+                .read(
+                    VaultCredentialRef {
+                        profile_id: [i as u8 + 1; 16],
+                        kind
+                    },
+                    "kept-binding"
+                )
+                .unwrap()
+                .expose(),
+            b"kept-secret"
+        );
+    }
+    assert_eq!(std::fs::read(&source_path).unwrap(), before);
+    assert_eq!(source.status().record_count, target.status().record_count);
+    assert!(source.verify_password(&new).is_err());
+    assert!(source.status().unlocked);
+    assert!(source.copy_protected(&target_path, &new).is_err());
+    drop(target);
+    let mut target = PortableVault::open(&target_path).unwrap();
+    assert!(target.unlock(&old).is_err());
+    target.unlock(&new).unwrap();
+    source.lock();
+    assert!(
+        source
+            .copy_protected(root.path().join("must-not-exist"), &new)
+            .is_err()
+    );
+    assert!(!root.path().join("must-not-exist").exists());
 }

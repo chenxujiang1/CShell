@@ -12,8 +12,8 @@ use std::{
     },
     time::UNIX_EPOCH,
 };
-pub(crate) mod compose;
 mod command_bar;
+pub(crate) mod compose;
 mod history;
 mod lifecycle;
 
@@ -363,13 +363,17 @@ impl DesktopSyncInput {
             .port_mut()
             .targets
             .retain(|_, target| target.opened.window_id != window);
-        if self.compose.owner == Some(window) { self.close_compose(); }
+        if self.compose.owner == Some(window) {
+            self.close_compose();
+        }
     }
 
     pub(crate) fn is_armed(&self) -> bool {
         self.controller.armed_snapshot().is_some()
     }
-    pub(crate) fn is_realtime(&self)->bool {self.is_armed() && !self.command_only}
+    pub(crate) fn is_realtime(&self) -> bool {
+        self.is_armed() && !self.command_only
+    }
     pub(crate) fn view_stamp(&self, active: Option<TabId>) -> DesktopSyncViewStamp {
         DesktopSyncViewStamp {
             snapshot: self.controller.armed_snapshot().map(SyncInputSnapshot::id),
@@ -407,11 +411,15 @@ impl DesktopSyncInput {
         }
     }
     pub(crate) fn blocks_input(&self) -> bool {
-        self.modal_blocked || self.panel_open
+        self.modal_blocked
+            || self.panel_open
             || self.arm_review.is_some()
             || self.pending.is_some()
             || self.pending_current.is_some()
-            || self.compose.owner.is_some() && (self.compose.focus_active || self.compose.focus_requested || self.compose.page != 0)
+            || self.compose.owner.is_some()
+                && (self.compose.focus_active
+                    || self.compose.focus_requested
+                    || self.compose.page != 0)
     }
     pub(crate) fn targeted(&self, tab: TabId) -> bool {
         self.controller
@@ -420,16 +428,31 @@ impl DesktopSyncInput {
     }
     pub(crate) fn target_badges(&self) -> BTreeMap<TabId, bool> {
         if !self.is_realtime() && self.ordinary_command_draft() && !self.compose_uses_targets() {
-            return self.compose.source.into_iter().map(|tab| (tab, false)).collect();
+            return self
+                .compose
+                .source
+                .into_iter()
+                .map(|tab| (tab, false))
+                .collect();
         }
-        self.controller.armed_snapshot().map(|snapshot| snapshot.targets().iter()
-            .map(|target| (target.tab_id, self.is_realtime())).collect()).unwrap_or_default()
+        self.controller
+            .armed_snapshot()
+            .map(|snapshot| {
+                snapshot
+                    .targets()
+                    .iter()
+                    .map(|target| (target.tab_id, self.is_realtime()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn disarm(&mut self, reason: SyncInputDisarmReason) {
         let editor = if self.ordinary_command_draft() && reason != SyncInputDisarmReason::Shutdown {
             Some(std::mem::take(&mut self.compose))
-        } else { None };
+        } else {
+            None
+        };
         self.controller.port().permit.revoke();
         self.pending = None;
         self.pending_current = None;
@@ -444,7 +467,9 @@ impl DesktopSyncInput {
             DesktopInputPermit::with_audit_health(Arc::clone(&self.controller.audit().healthy));
         if let Some(mut editor) = editor {
             editor.risk_ack = false;
-            if reason == SyncInputDisarmReason::User { editor.armed = false; }
+            if reason == SyncInputDisarmReason::User {
+                editor.armed = false;
+            }
             self.compose = editor;
         }
     }
@@ -452,7 +477,9 @@ impl DesktopSyncInput {
     pub(crate) fn source_changed(&mut self, tab: TabId) {
         let mut draft = if !self.is_realtime() && self.ordinary_command_draft() {
             Some(std::mem::take(&mut self.compose))
-        } else { None };
+        } else {
+            None
+        };
         self.controller.port().permit.revoke();
         self.controller.port_mut().permit =
             DesktopInputPermit::with_audit_health(Arc::clone(&self.controller.audit().healthy));
@@ -469,7 +496,11 @@ impl DesktopSyncInput {
             self.compose = saved;
         }
         if self.is_armed() && self.command_only {
-            self.source=self.controller.armed_snapshot().and_then(|s|s.targets().first()).map(|t|t.tab_id);
+            self.source = self
+                .controller
+                .armed_snapshot()
+                .and_then(|s| s.targets().first())
+                .map(|t| t.tab_id);
         } else if self.is_armed() && !self.targeted(tab) {
             self.disarm(SyncInputDisarmReason::SourceUnavailable);
         } else {
@@ -480,9 +511,12 @@ impl DesktopSyncInput {
     pub(crate) fn focus_lost(&mut self, tab: Option<TabId>) {
         // Command entry has no background keystroke route. Revoke queued work and
         // reviews, but keep the editor and frozen scope for the next explicit send.
-        if !self.is_realtime() && (self.ordinary_command_draft() || self.command_only && self.is_armed()) {
+        if !self.is_realtime()
+            && (self.ordinary_command_draft() || self.command_only && self.is_armed())
+        {
             self.controller.port().permit.revoke();
-            self.controller.port_mut().permit = DesktopInputPermit::with_audit_health(Arc::clone(&self.controller.audit().healthy));
+            self.controller.port_mut().permit =
+                DesktopInputPermit::with_audit_health(Arc::clone(&self.controller.audit().healthy));
             self.pending = None;
             self.pending_current = None;
             self.arm_review = None;
@@ -517,7 +551,9 @@ impl DesktopSyncInput {
                 self.pending = Some(prepared);
                 self.begin_paste_review();
             }
-            Ok(prepared) => { self.dispatch(prepared, SyncInputApproval::Explicit); },
+            Ok(prepared) => {
+                self.dispatch(prepared, SyncInputApproval::Explicit);
+            }
             Err(error) => {
                 self.disarm(SyncInputDisarmReason::SourceUnavailable);
                 self.status = error.to_string();
@@ -538,7 +574,11 @@ impl DesktopSyncInput {
                     .iter()
                     .filter(|result| result.delivery == SyncInputDelivery::QueueAccepted)
                     .count();
-                if accepted > 0 && let Some(body) = history_body { self.history.record(&body); }
+                if accepted > 0
+                    && let Some(body) = history_body
+                {
+                    self.history.record(&body);
+                }
                 let failures: Vec<_> = receipt
                     .deliveries
                     .iter()
@@ -589,134 +629,282 @@ impl DesktopSyncInput {
         active: Option<TabId>,
         search_open: bool,
     ) -> bool {
-        if !search_open { self.ensure_command_bar(window, active); }
-        let mut search_requested=false;
+        if !search_open {
+            self.ensure_command_bar(window, active);
+        }
+        let mut search_requested = false;
         let context = root.ctx().clone();
         if !self.compose_open(window) || self.compose.page != 0 || self.is_realtime() {
-        egui::Panel::bottom("synchronized-input-control")
-            .exact_size(30.0)
-            .frame(
-                cshell_ui::form::utility_bar(),
-            )
-            .show(root, |ui| {
-                ui.horizontal(|ui| {
-                    if self.is_armed() && (!self.command_only || !self.compose_open(window)) {
-                        if let Some(snapshot)=self.controller.armed_snapshot() {
-                            ui.colored_label(cshell_ui::theme::WARNING,egui::RichText::new(format!("{} {} 个目标",if self.command_only{"命令发送"}else{"同步"},snapshot.targets().len())).strong())
-                                .on_hover_text(snapshot.targets().iter().map(|t|t.title.as_str()).collect::<Vec<_>>().join("\n"));
-                        }
-                        if ui.button(egui::RichText::new("停止同步").color(cshell_ui::theme::WARNING))
-                             .on_hover_text("立即停止多目标发送 · Ctrl+Shift+Esc").clicked(){self.disarm(SyncInputDisarmReason::User);self.return_focus_requested=true;}
-                         if ui.small_button("更改目标").clicked(){self.picker_command_only=self.command_only;self.panel_open=true;}
-                    }else if !self.is_armed() && ui.button("键盘同步…").clicked(){self.picker_command_only=false;self.panel_open=true;}
-                    ui.separator();
-                    search_requested=ui.selectable_label(search_open,"查找").on_hover_text("Ctrl+Shift+F").clicked();
-                    if ui.selectable_label(self.compose_open(window) && self.compose.page==0,"命令栏").clicked(){
-                         if search_open {search_requested=true;self.compose.focus_requested=true;}
-                         else if self.compose_open(window) && self.compose.page==0 {self.hide_command_bar();}
-                        else if self.compose_open(window){self.compose.page=0;self.compose.focus_requested=true;}
-                        else {self.open_compose(window,active);}
-                    }
-                    if ui.selectable_label(self.compose_open(window) && self.compose.page==1,"快捷命令").clicked(){
-                        if self.compose_open(window) && self.compose.page==1 {self.close_compose();}else{self.open_quick_commands(window,active);}
-                    }
-                    if let Some(tab) = active {
-                        let mut secure = self.secure.contains(&tab);
-                        if ui.checkbox(&mut secure, "安全输入").changed() {
-                            self.disarm(SyncInputDisarmReason::SecureInput);
-                            if secure {
-                                self.secure.insert(tab);
-                            } else {
-                                self.secure.remove(&tab);
+            egui::Panel::bottom("synchronized-input-control")
+                .exact_size(30.0)
+                .frame(cshell_ui::form::utility_bar())
+                .show(root, |ui| {
+                    ui.horizontal(|ui| {
+                        if self.is_armed() && (!self.command_only || !self.compose_open(window)) {
+                            if let Some(snapshot) = self.controller.armed_snapshot() {
+                                ui.colored_label(
+                                    cshell_ui::theme::WARNING,
+                                    egui::RichText::new(format!(
+                                        "{} {} 个目标",
+                                        if self.command_only {
+                                            "命令发送"
+                                        } else {
+                                            "同步"
+                                        },
+                                        snapshot.targets().len()
+                                    ))
+                                    .strong(),
+                                )
+                                .on_hover_text(
+                                    snapshot
+                                        .targets()
+                                        .iter()
+                                        .map(|t| t.title.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                );
                             }
-                            if let Some(sender) = self
-                                .controller
-                                .port()
-                                .targets
-                                .get(&tab)
-                                .and_then(|entry| entry.sender.as_ref())
+                            if ui
+                                .button(
+                                    egui::RichText::new("停止同步")
+                                        .color(cshell_ui::theme::WARNING),
+                                )
+                                .on_hover_text("立即停止多目标发送 · Ctrl+Shift+Esc")
+                                .clicked()
                             {
-                                sender.set_security(if secure {
-                                    DesktopInputSecurity::Secure
-                                } else {
-                                    DesktopInputSecurity::Terminal
-                                });
+                                self.disarm(SyncInputDisarmReason::User);
+                                self.return_focus_requested = true;
+                            }
+                            if ui.small_button("更改目标").clicked() {
+                                self.picker_command_only = self.command_only;
+                                self.panel_open = true;
+                            }
+                        } else if !self.is_armed() && ui.button("键盘同步…").clicked() {
+                            self.picker_command_only = false;
+                            self.panel_open = true;
+                        }
+                        ui.separator();
+                        search_requested = ui
+                            .selectable_label(search_open, "查找")
+                            .on_hover_text("Ctrl+Shift+F")
+                            .clicked();
+                        if ui
+                            .selectable_label(
+                                self.compose_open(window) && self.compose.page == 0,
+                                "命令栏",
+                            )
+                            .clicked()
+                        {
+                            if search_open {
+                                search_requested = true;
+                                self.compose.focus_requested = true;
+                            } else if self.compose_open(window) && self.compose.page == 0 {
+                                self.hide_command_bar();
+                            } else if self.compose_open(window) {
+                                self.compose.page = 0;
+                                self.compose.focus_requested = true;
+                            } else {
+                                self.open_compose(window, active);
                             }
                         }
+                        if ui
+                            .selectable_label(
+                                self.compose_open(window) && self.compose.page == 1,
+                                "快捷命令",
+                            )
+                            .clicked()
+                        {
+                            if self.compose_open(window) && self.compose.page == 1 {
+                                self.close_compose();
+                            } else {
+                                self.open_quick_commands(window, active);
+                            }
+                        }
+                        if let Some(tab) = active {
+                            let mut secure = self.secure.contains(&tab);
+                            if ui.checkbox(&mut secure, "安全输入").changed() {
+                                self.disarm(SyncInputDisarmReason::SecureInput);
+                                if secure {
+                                    self.secure.insert(tab);
+                                } else {
+                                    self.secure.remove(&tab);
+                                }
+                                if let Some(sender) = self
+                                    .controller
+                                    .port()
+                                    .targets
+                                    .get(&tab)
+                                    .and_then(|entry| entry.sender.as_ref())
+                                {
+                                    sender.set_security(if secure {
+                                        DesktopInputSecurity::Secure
+                                    } else {
+                                        DesktopInputSecurity::Terminal
+                                    });
+                                }
+                            }
+                        }
+                        if !self.status.is_empty() {
+                            let brief: String = self.status.chars().take(36).collect();
+                            ui.add(egui::Label::new(egui::RichText::new(brief).small()).truncate())
+                                .on_hover_text(format!(
+                                    "{}\n入队仅代表已交给连接队列，不表示远端执行成功。",
+                                    self.status
+                                ));
+                        }
+                        let failures: Vec<_> = self
+                            .controller
+                            .port()
+                            .targets
+                            .values()
+                            .filter_map(|entry| {
+                                entry
+                                    .control_error
+                                    .as_ref()
+                                    .map(|error| format!("{}: {error}", entry.opened.title))
+                            })
+                            .collect();
+                        if !failures.is_empty() {
+                            ui.colored_label(
+                                cshell_ui::theme::WARNING,
+                                format!("{} 个终端输入被拒绝", failures.len()),
+                            )
+                            .on_hover_text(failures.join("\n"));
+                        }
+                    });
+                });
+        }
+        if search_requested {
+            self.compose.focus_active = false;
+            self.compose.focus_requested = false;
+        }
+        // A newly opened large-target review must not consume the Enable click.
+        let arm_review_was_open = self.arm_review.is_some();
+        if !search_open && !search_requested {
+            self.draw_compose(root, window, active);
+        }
+        search_requested |= std::mem::take(&mut self.search_requested);
+        if search_requested {
+            self.close_compose();
+        }
+        if self.panel_open {
+            let targets = &self.controller.port().targets;
+            self.selected.retain(|tab| {
+                targets
+                    .get(tab)
+                    .is_some_and(|t| t.opened.window_id == window)
+            });
+            let mut open = true;
+            cshell_ui::form::dialog(&context, "选择已打开的同步目标")
+                .default_width(600.0)
+                .open(&mut open)
+                .collapsible(false)
+                .show(&context, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.radio_value(&mut self.picker_command_only, true, "命令栏发送（推荐）");
+                        ui.radio_value(&mut self.picker_command_only, false, "实时键盘同步");
+                    });
+                    ui.weak(if self.picker_command_only {
+                        "选定一次目标，普通单行命令按 Enter 连续发送；新标签不会自动加入。"
+                    } else {
+                        "终端内逐键同步到固定目标；密码提示前请开启安全输入。"
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("清空选择").clicked() {
+                            self.selected.clear();
+                            self.selection = Some(SyncInputSelection::Manual);
+                        }
+                        for (label, selection) in [
+                            ("当前窗口 SSH", SyncInputSelection::CurrentWindow(window)),
+                            ("当前标签组 SSH", SyncInputSelection::CurrentTabGroup(group)),
+                        ] {
+                            if ui.button(label).clicked() {
+                                self.selection = Some(selection);
+                                self.selected = self
+                                    .controller
+                                    .port()
+                                    .targets
+                                    .iter()
+                                    .filter(|(tab, entry)| {
+                                        self.controller.port().opened_target(**tab).is_some_and(
+                                            |t| t.eligibility == SyncInputEligibility::Ready,
+                                        ) && entry.opened.window_id == window
+                                            && entry.opened.kind == SyncInputTargetKind::Ssh
+                                            && match selection {
+                                                SyncInputSelection::CurrentWindow(id) => {
+                                                    entry.opened.window_id == id
+                                                }
+                                                SyncInputSelection::CurrentTabGroup(id) => {
+                                                    entry.opened.group_id == id
+                                                }
+                                                SyncInputSelection::Manual => true,
+                                            }
+                                    })
+                                    .map(|(tab, _)| *tab)
+                                    .collect();
+                            }
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .max_height((context.content_rect().height() - 310.0).clamp(60.0, 240.0))
+                        .show(ui, |ui| {
+                            for (tab, entry) in &self.controller.port().targets {
+                                if entry.opened.window_id != window {
+                                    continue;
+                                }
+                                let mut selected = self.selected.contains(tab);
+                                let status = self
+                                    .controller
+                                    .port()
+                                    .opened_target(*tab)
+                                    .map(|target| target.eligibility);
+                                let ready = status == Some(SyncInputEligibility::Ready);
+                                let label = format!(
+                                    "{} · {} · {}",
+                                    entry.opened.title,
+                                    if entry.opened.kind == SyncInputTargetKind::Ssh {
+                                        "SSH"
+                                    } else {
+                                        "本地终端"
+                                    },
+                                    if ready { "已连接" } else { "暂不可用" }
+                                );
+                                if ui
+                                    .add_enabled(
+                                        ready || selected,
+                                        egui::Checkbox::new(&mut selected, label),
+                                    )
+                                    .changed()
+                                {
+                                    self.selection = Some(SyncInputSelection::Manual);
+                                    if selected {
+                                        self.selected.insert(*tab);
+                                    } else {
+                                        self.selected.remove(tab);
+                                    }
+                                }
+                            }
+                        });
+                    ui.weak("本地终端需手选，不与 SSH 混选；超过 10 个目标时再确认一次。");
+                    if ui
+                        .add_enabled(
+                            !self.selected.is_empty(),
+                            egui::Button::new(format!("启用 {} 个目标", self.selected.len())),
+                        )
+                        .clicked()
+                    {
+                        self.choose_targets(window, active);
                     }
                     if !self.status.is_empty() {
-                        let brief: String = self.status.chars().take(36).collect();
-                        ui.add(egui::Label::new(egui::RichText::new(brief).small()).truncate()).on_hover_text(format!("{}\n入队仅代表已交给连接队列，不表示远端执行成功。",self.status));
-                    }
-                    let failures: Vec<_> = self
-                        .controller
-                        .port()
-                        .targets
-                        .values()
-                        .filter_map(|entry| {
-                            entry
-                                .control_error
-                                .as_ref()
-                                .map(|error| format!("{}: {error}", entry.opened.title))
-                        })
-                        .collect();
-                    if !failures.is_empty() {
-                        ui.colored_label(
-                            cshell_ui::theme::WARNING,
-                            format!("{} 个终端输入被拒绝", failures.len()),
-                        )
-                        .on_hover_text(failures.join("\n"));
+                        ui.add(egui::Label::new(&self.status).truncate())
+                            .on_hover_text(&self.status);
                     }
                 });
-            });
-        }
-        if search_requested {self.compose.focus_active=false;self.compose.focus_requested=false;}
-        // A newly opened large-target review must not consume the Enable click.
-        let arm_review_was_open=self.arm_review.is_some();
-        if !search_open && !search_requested {self.draw_compose(root, window, active);}
-        search_requested |= std::mem::take(&mut self.search_requested);
-        if search_requested { self.close_compose(); }
-        if self.panel_open {
-            let targets=&self.controller.port().targets;
-            self.selected.retain(|tab|targets.get(tab).is_some_and(|t|t.opened.window_id==window));
-            let mut open = true;
-            cshell_ui::form::dialog(&context, "选择已打开的同步目标").default_width(600.0).open(&mut open).collapsible(false).show(&context, |ui| {
-                ui.horizontal_wrapped(|ui|{
-                    ui.radio_value(&mut self.picker_command_only,true,"命令栏发送（推荐）");
-                    ui.radio_value(&mut self.picker_command_only,false,"实时键盘同步");
-                });
-                ui.weak(if self.picker_command_only {"选定一次目标，普通单行命令按 Enter 连续发送；新标签不会自动加入。"}else{"终端内逐键同步到固定目标；密码提示前请开启安全输入。"});
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("清空选择").clicked() { self.selected.clear(); self.selection = Some(SyncInputSelection::Manual); }
-                    for (label, selection) in [("当前窗口 SSH", SyncInputSelection::CurrentWindow(window)), ("当前标签组 SSH", SyncInputSelection::CurrentTabGroup(group))] {
-                        if ui.button(label).clicked() {
-                            self.selection = Some(selection);
-                            self.selected = self.controller.port().targets.iter().filter(|(tab, entry)| self.controller.port().opened_target(**tab).is_some_and(|t|t.eligibility==SyncInputEligibility::Ready) && entry.opened.window_id==window && entry.opened.kind == SyncInputTargetKind::Ssh && match selection { SyncInputSelection::CurrentWindow(id) => entry.opened.window_id == id, SyncInputSelection::CurrentTabGroup(id) => entry.opened.group_id == id, SyncInputSelection::Manual => true }).map(|(tab,_)| *tab).collect();
-                        }
-                    }
-                });
-                egui::ScrollArea::vertical().max_height((context.content_rect().height()-310.0).clamp(60.0,240.0)).show(ui, |ui| {
-                    for (tab, entry) in &self.controller.port().targets {
-                        if entry.opened.window_id!=window {continue;}
-                        let mut selected = self.selected.contains(tab);
-                        let status = self.controller.port().opened_target(*tab).map(|target| target.eligibility);
-                        let ready=status==Some(SyncInputEligibility::Ready);
-                        let label=format!("{} · {} · {}",entry.opened.title,if entry.opened.kind==SyncInputTargetKind::Ssh {"SSH"}else{"本地终端"},if ready {"已连接"}else{"暂不可用"});
-                        if ui.add_enabled(ready || selected,egui::Checkbox::new(&mut selected,label)).changed() {
-                            self.selection = Some(SyncInputSelection::Manual);
-                            if selected { self.selected.insert(*tab); } else { self.selected.remove(tab); }
-                        }
-                    }
-                });
-                ui.weak("本地终端需手选，不与 SSH 混选；超过 10 个目标时再确认一次。");
-                if ui.add_enabled(!self.selected.is_empty(),egui::Button::new(format!("启用 {} 个目标",self.selected.len()))).clicked() {
-                    self.choose_targets(window,active);
-                }
-                if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).truncate()).on_hover_text(&self.status);}
-            });
-            if !open || context.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)) {
+            if !open
+                || context.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
                 self.panel_open = false;
-                self.compose.focus_requested=true;
+                self.compose.focus_requested = true;
             }
         }
         if arm_review_was_open && let Some(review) = &self.arm_review {
@@ -745,19 +933,22 @@ impl DesktopSyncInput {
                     confirm = ui.button("确认启用这些目标").clicked();
                     cancel = ui.button("取消").clicked();
                 });
-            if cancel || context.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)) {
+            if cancel
+                || context.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
                 self.arm_review = None;
-                self.compose.focus_requested=true;
+                self.compose.focus_requested = true;
             } else if confirm && let Some(review) = self.arm_review.take() {
-                self.enable_targets(review,window,active);
+                self.enable_targets(review, window, active);
             }
         }
         self.draw_paste_review(&context, window);
-        if let Some(prepared) = self
-            .pending
-            .as_ref()
-            .filter(|review| !matches!(review.action_for_review(), InputAction::Compose { .. } | InputAction::Paste { .. }))
-        {
+        if let Some(prepared) = self.pending.as_ref().filter(|review| {
+            !matches!(
+                review.action_for_review(),
+                InputAction::Compose { .. } | InputAction::Paste { .. }
+            )
+        }) {
             let mut confirm = false;
             let mut cancel = false;
             cshell_ui::form::dialog(&context, "确认同步输入正文与目标")
@@ -800,7 +991,7 @@ impl DesktopSyncInput {
                 self.dispatch(prepared, SyncInputApproval::Confirmed);
             }
         }
-            search_requested
+        search_requested
     }
 }
 

@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 //! Check desktop logical keys through the real IPC codec and terminal encoder.
 use super::*;
 use cshell_ipc::TerminalInputRequest;
@@ -338,20 +339,51 @@ fn terminal_tab_bypasses_ui_navigation_but_form_and_search_focus_keep_tab() {
     ));
 }
 
-
 #[test]
 fn workbench_navigation_does_not_steal_shell_control_keys() {
-    for letter in ["p","f","b","n","a","e","r","w"] {
-        let key=Key::Character(letter.into());
-        assert!(!workbench_navigation::shortcut(ElementState::Pressed,&key,ModifiersState::CONTROL,letter));
-        let modes=TerminalModes::default();
-        let encoded=action(&key,None,ModifiersState::CONTROL,modes,true,false,false).unwrap();
-        assert_eq!(bytes(&encoded,modes),vec![letter.as_bytes()[0]-b'a'+1]);
+    for letter in ["p", "f", "b", "n", "a", "e", "r", "w"] {
+        let key = Key::Character(letter.into());
+        assert!(!workbench_navigation::shortcut(
+            ElementState::Pressed,
+            &key,
+            ModifiersState::CONTROL,
+            letter
+        ));
+        let modes = TerminalModes::default();
+        let encoded = action(
+            &key,
+            None,
+            ModifiersState::CONTROL,
+            modes,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            bytes(&encoded, modes),
+            vec![letter.as_bytes()[0] - b'a' + 1]
+        );
     }
-    for letter in ["p","f"] {
-        let key=Key::Character(letter.into());
-        assert!(workbench_navigation::shortcut(ElementState::Pressed,&key,ModifiersState::CONTROL|ModifiersState::SHIFT,letter));
-        assert!(!workbench_navigation::shortcut(ElementState::Released,&key,ModifiersState::CONTROL|ModifiersState::SHIFT,letter));
-        assert!(!workbench_navigation::shortcut(ElementState::Pressed,&key,ModifiersState::CONTROL|ModifiersState::SHIFT|ModifiersState::ALT,letter));
+    for letter in ["p", "f"] {
+        let key = Key::Character(letter.into());
+        assert!(workbench_navigation::shortcut(
+            ElementState::Pressed,
+            &key,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            letter
+        ));
+        assert!(!workbench_navigation::shortcut(
+            ElementState::Released,
+            &key,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            letter
+        ));
+        assert!(!workbench_navigation::shortcut(
+            ElementState::Pressed,
+            &key,
+            ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT,
+            letter
+        ));
     }
 }

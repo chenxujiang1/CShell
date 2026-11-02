@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::super::tests::{click, draw, fixture};
 use super::*;
 use crate::ui_layout_gate::{check_window, context};
@@ -390,18 +397,29 @@ fn click_remote(
     let (tree, _) = draw(context, panel, view, size, vec![]);
     let bounds = crate::ui_layout_gate::bounds;
     let pos = bounds(
-        &tree.nodes.iter()
-            .filter(|(_, node)| node.role() == egui::accesskit::Role::Button && node.label() == Some(name))
+        &tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button && node.label() == Some(name)
+            })
             .max_by(|(_, a), (_, b)| bounds(a).min.x.total_cmp(&bounds(b).min.x))
             .unwrap_or_else(|| panic!("missing remote button {name}"))
             .1,
-    ).center();
+    )
+    .center();
     let pointer = |pressed| egui::Event::PointerButton {
         pos,
         button: egui::PointerButton::Primary,
         pressed,
         modifiers: Default::default(),
     };
-    draw(context, panel, view, size, vec![egui::Event::PointerMoved(pos), pointer(true)]);
+    draw(
+        context,
+        panel,
+        view,
+        size,
+        vec![egui::Event::PointerMoved(pos), pointer(true)],
+    );
     draw(context, panel, view, size, vec![pointer(false)]).1
 }

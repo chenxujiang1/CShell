@@ -5,8 +5,13 @@ use cshell_application::{SftpSyncApply, SftpSyncDifference as Diff, SftpSyncOpti
 #[derive(Default)]
 pub(super) struct Panel {
     open: bool,
-    presets:Vec<crate::sftp_settings::SyncPreset>,presets_loaded:bool,preset_id:Option<SessionId>,preset_name:String,
-    excludes_text:String,preserve_modified:bool,preset_navigation:Option<presets::Navigation>,
+    presets: Vec<crate::sftp_settings::SyncPreset>,
+    presets_loaded: bool,
+    preset_id: Option<SessionId>,
+    preset_name: String,
+    excludes_text: String,
+    preserve_modified: bool,
+    preset_navigation: Option<presets::Navigation>,
     session: Option<SessionId>,
     id: Option<SessionId>,
     direction: Option<SftpQueueDirection>,
@@ -63,7 +68,7 @@ impl Panel {
         if !self.open {
             return;
         }
-        self.advance_preset(session,view,command);
+        self.advance_preset(session, view, command);
         let ctx = ui.ctx().clone();
         let mut close = false;
         let response =
@@ -154,8 +159,7 @@ impl Panel {
                             }),
                         )
                         .clicked()
-                    {
-                        if let (Some(local), Some(remote)) =
+                        && let (Some(local), Some(remote)) =
                             (&view.local_directory, &view.remote_loaded_directory)
                         {
                             let id = SessionId::new();
@@ -177,7 +181,6 @@ impl Panel {
                                 .unwrap_or_default(),
                             ));
                         }
-                    }
                 });
                 if self.direction != Some(direction) {
                     self.direction = Some(direction);
@@ -369,10 +372,12 @@ impl Panel {
                 }
             });
         if close
-            || !egui::Popup::is_any_open(&ctx) && response.is_top_modal
+            || !egui::Popup::is_any_open(&ctx)
+                && response.is_top_modal
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            self.open = false;self.preset_navigation=None;
+            self.open = false;
+            self.preset_navigation = None;
             ctx.memory_mut(|m| {
                 if let Some(id) = m.focused() {
                     m.surrender_focus(id);
@@ -386,6 +391,11 @@ impl Panel {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     #[test]
     fn only_unsent_sync_requests_release_submit_and_keep_selected_paths() {
@@ -422,7 +432,9 @@ mod tests {
                     remote,
                     direction: SftpQueueDirection::Upload,
                     verification: Default::default(),
-                    compare_content: true,excludes:Vec::new(),preserve_modified:false,
+                    compare_content: true,
+                    excludes: Vec::new(),
+                    preserve_modified: false,
                 },
                 entries: vec![cshell_application::SftpSyncEntry {
                     relative: "nested/config.conf".into(),

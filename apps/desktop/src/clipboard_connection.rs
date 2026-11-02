@@ -197,7 +197,7 @@ impl DesktopClipboardConnection {
             ));
         }
         let mut command = None;
-        cshell_ui::form::dialog(&context, "远端请求写入剪贴板")
+        cshell_ui::form::dialog(context, "远端请求写入剪贴板")
             .collapsible(false)
             .resizable(false)
             .show(context, |ui| {

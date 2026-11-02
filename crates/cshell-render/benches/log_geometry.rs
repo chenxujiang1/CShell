@@ -30,7 +30,8 @@ fn main() -> ExitCode {
         })
         .collect::<Vec<_>>()
         .into();
-    let page = Arc::new(LogPage { first_line_id: 1,
+    let page = Arc::new(LogPage {
+        first_line_id: 1,
         source_id: LogSourceId(1),
         revision: 1,
         anchor_line_id: 1,

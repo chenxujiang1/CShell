@@ -21,11 +21,10 @@ pub use log_surface::{
     MAX_LOG_PAGE_TEXT_BYTES, MAX_LOG_REFLOW_ROWS,
 };
 pub use terminal_interaction::{
-    DEFAULT_WORD_DELIMITERS,
-    MAX_TERMINAL_SEARCH_MATCHES, MAX_TERMINAL_SEARCH_QUERY_BYTES, MAX_TERMINAL_SELECTION_BYTES,
-    TerminalCellPoint, TerminalDecorations, TerminalInteractionError, TerminalSearchMatch,
-    TerminalSearchOptions, TerminalSearchResult, TerminalSelection, TerminalSelectionMode,
-    search_terminal_snapshot, validate_terminal_search_query,
+    DEFAULT_WORD_DELIMITERS, MAX_TERMINAL_SEARCH_MATCHES, MAX_TERMINAL_SEARCH_QUERY_BYTES,
+    MAX_TERMINAL_SELECTION_BYTES, TerminalCellPoint, TerminalDecorations, TerminalInteractionError,
+    TerminalSearchMatch, TerminalSearchOptions, TerminalSearchResult, TerminalSelection,
+    TerminalSelectionMode, search_terminal_snapshot, validate_terminal_search_query,
 };
 pub use window::{
     AtlasPressureBenchmarkReport, BUNDLED_CJK_FONT_BYTES, EguiFrame, HeadlessRenderReport,
@@ -287,7 +286,7 @@ mod tests {
     fn terminal_surface_accepts_latest_arc_and_rejects_stale_generations() {
         let snapshot = |generation| {
             Arc::new(FrameSnapshot {
-            screen_start_line: 0,
+                screen_start_line: 0,
                 generation,
                 rows: 24,
                 cols: 80,

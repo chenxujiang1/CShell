@@ -175,7 +175,8 @@ async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocke
                 request_id: 7,
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
-                    cshell_ipc::SessionCreateRequest {connection_diagnostics:false,
+                    cshell_ipc::SessionCreateRequest {
+                        connection_diagnostics: false,
                         source_ssh_session_id: None,
                         local_launch: None,
                         rows: 24,
@@ -254,37 +255,80 @@ async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocke
     rotate.store(true, Ordering::SeqCst);
     preview_request.operation = ProfileOperation::PreviewHostKeyUpdate as i32;
     let preview = exchange(&service, preview_request.clone()).await?;
-    assert_eq!(preview.status, ProfileStatus::Ok as i32, "{}", preview.detail);
+    assert_eq!(
+        preview.status,
+        ProfileStatus::Ok as i32,
+        "{}",
+        preview.detail
+    );
     let preview = preview.host_key_preview.ok_or("missing update preview")?;
     assert_eq!(preview.public_key_line, rotated_public);
     assert_eq!(preview.previous_fingerprints.len(), 1);
-    assert_eq!(std::fs::read_to_string(&known_hosts)?, content, "preview must not write trust");
+    assert_eq!(
+        std::fs::read_to_string(&known_hosts)?,
+        content,
+        "preview must not write trust"
+    );
     let mut update = request(ProfileOperation::ConfirmHostKeyUpdate);
     update.expected_revision = created.revision;
     update.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
     update.host_key_token = preview.token.clone();
     update.host_key_fingerprint = preview.fingerprint.clone();
-    let mut wrong_operation = update.clone(); wrong_operation.operation = ProfileOperation::ConfirmHostKey as i32;
-    assert_eq!(exchange(&service, wrong_operation).await?.status, ProfileStatus::Invalid as i32);
+    let mut wrong_operation = update.clone();
+    wrong_operation.operation = ProfileOperation::ConfirmHostKey as i32;
+    assert_eq!(
+        exchange(&service, wrong_operation).await?.status,
+        ProfileStatus::Invalid as i32
+    );
     rotate.store(false, Ordering::SeqCst);
-    assert_eq!(exchange(&service, update.clone()).await?.status, ProfileStatus::Conflict as i32);
+    assert_eq!(
+        exchange(&service, update.clone()).await?.status,
+        ProfileStatus::Conflict as i32
+    );
     assert_eq!(std::fs::read_to_string(&known_hosts)?, content);
     rotate.store(true, Ordering::SeqCst);
-    let refreshed = exchange(&service, preview_request.clone()).await?.host_key_preview.ok_or("missing update preview")?;
+    let refreshed = exchange(&service, preview_request.clone())
+        .await?
+        .host_key_preview
+        .ok_or("missing update preview")?;
     update.host_key_token = refreshed.token.clone();
     std::fs::write(&known_hosts, format!("{content}# external edit\n"))?;
-    assert_eq!(exchange(&service, update.clone()).await?.status, ProfileStatus::Conflict as i32);
+    assert_eq!(
+        exchange(&service, update.clone()).await?.status,
+        ProfileStatus::Conflict as i32
+    );
     assert!(!std::fs::read_to_string(&known_hosts)?.contains("CShell host-key-update v1"));
-    let refreshed = exchange(&service, preview_request).await?.host_key_preview.ok_or("missing update preview")?;
+    let refreshed = exchange(&service, preview_request)
+        .await?
+        .host_key_preview
+        .ok_or("missing update preview")?;
     update.host_key_token = refreshed.token.clone();
     let updated = exchange(&service, update.clone()).await?;
-    assert_eq!(updated.status, ProfileStatus::Ok as i32, "{}", updated.detail);
+    assert_eq!(
+        updated.status,
+        ProfileStatus::Ok as i32,
+        "{}",
+        updated.detail
+    );
     let current = std::fs::read_to_string(&known_hosts)?;
     assert!(current.contains("CShell host-key-update v1") && current.contains("# external edit"));
     let verifier = cshell_ssh::KnownHostsVerifier::load(&known_hosts, "127.0.0.1", port)?;
-    assert_eq!(verifier.check(&russh::keys::PublicKeyOrCertificate::from(rotated_public.parse::<russh::keys::ssh_key::PublicKey>()?)), cshell_ssh::HostKeyCheck::Trusted);
-    assert_eq!(verifier.check(&russh::keys::PublicKeyOrCertificate::from(public.parse::<russh::keys::ssh_key::PublicKey>()?)), cshell_ssh::HostKeyCheck::Changed);
-    assert_eq!(exchange(&service, update).await?.status, ProfileStatus::Invalid as i32);
+    assert_eq!(
+        verifier.check(&russh::keys::PublicKeyOrCertificate::from(
+            rotated_public.parse::<russh::keys::ssh_key::PublicKey>()?
+        )),
+        cshell_ssh::HostKeyCheck::Trusted
+    );
+    assert_eq!(
+        verifier.check(&russh::keys::PublicKeyOrCertificate::from(
+            public.parse::<russh::keys::ssh_key::PublicKey>()?
+        )),
+        cshell_ssh::HostKeyCheck::Changed
+    );
+    assert_eq!(
+        exchange(&service, update).await?.status,
+        ProfileStatus::Invalid as i32
+    );
     server.abort();
     Ok(())
 }
@@ -475,7 +519,11 @@ async fn saved_ssh_profile_without_password_requires_frontend_after_host_verific
             self.probes.fetch_add(1, Ordering::SeqCst);
             Ok(russh::server::Auth::reject())
         }
-        async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<russh::server::Auth, Self::Error> {
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<russh::server::Auth, Self::Error> {
             self.passwords.fetch_add(1, Ordering::SeqCst);
             Ok(russh::server::Auth::reject())
         }
@@ -486,7 +534,10 @@ async fn saved_ssh_profile_without_password_requires_frontend_after_host_verific
     let port = listener.local_addr()?.port();
     let probes = Arc::new(AtomicUsize::new(0));
     let passwords = Arc::new(AtomicUsize::new(0));
-    let handler = PasswordServer { probes: probes.clone(), passwords: passwords.clone() };
+    let handler = PasswordServer {
+        probes: probes.clone(),
+        passwords: passwords.clone(),
+    };
     let config = russh::server::Config {
         keys: vec![key],
         methods: (&[russh::MethodKind::Password][..]).into(),
@@ -495,7 +546,9 @@ async fn saved_ssh_profile_without_password_requires_frontend_after_host_verific
     };
     let ssh_server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        russh::server::run_stream(Arc::new(config), stream, handler).await?.await
+        russh::server::run_stream(Arc::new(config), stream, handler)
+            .await?
+            .await
     });
     let temp = tempfile::tempdir()?;
     let repository = SqliteProfileRepository::open(temp.path().join("cshell.db")).await?;
@@ -549,7 +602,8 @@ async fn saved_ssh_profile_without_password_requires_frontend_after_host_verific
                 request_id: 91,
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
-                    cshell_ipc::SessionCreateRequest {connection_diagnostics:false,
+                    cshell_ipc::SessionCreateRequest {
+                        connection_diagnostics: false,
                         source_ssh_session_id: None,
                         local_launch: None,
                         rows: 24,
@@ -570,9 +624,22 @@ async fn saved_ssh_profile_without_password_requires_frontend_after_host_verific
         return Err("missing SSH create response".into());
     };
     assert!(created.session.is_none());
-    assert_eq!(created.failure_code, cshell_ipc::SessionFailureCode::CredentialUnavailable as i32, "{}", created.detail);
-    assert_eq!(probes.load(Ordering::SeqCst), 1, "must reach authentication on the verified SSH transport");
-    assert_eq!(passwords.load(Ordering::SeqCst), 0, "must not send an empty or invented password");
+    assert_eq!(
+        created.failure_code,
+        cshell_ipc::SessionFailureCode::CredentialUnavailable as i32,
+        "{}",
+        created.detail
+    );
+    assert_eq!(
+        probes.load(Ordering::SeqCst),
+        1,
+        "must reach authentication on the verified SSH transport"
+    );
+    assert_eq!(
+        passwords.load(Ordering::SeqCst),
+        0,
+        "must not send an empty or invented password"
+    );
     ssh_server.abort();
     Ok(())
 }

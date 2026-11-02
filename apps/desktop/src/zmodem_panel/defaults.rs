@@ -1,8 +1,14 @@
 use super::*;
 impl Panel {
-    pub(crate) fn take_keyboard_settings_request(&mut self)->bool {std::mem::take(&mut self.keyboard_settings_request)}
-    pub(crate) fn sync_layout(&mut self,layout:cshell_ui::workbench_layout::Layout){self.workbench_layout=layout;}
-    pub(crate) fn take_layout_request(&mut self)->Option<cshell_ui::workbench_layout::Layout>{self.layout_request.take()}
+    pub(crate) fn take_keyboard_settings_request(&mut self) -> bool {
+        std::mem::take(&mut self.keyboard_settings_request)
+    }
+    pub(crate) fn sync_layout(&mut self, layout: cshell_ui::workbench_layout::Layout) {
+        self.workbench_layout = layout;
+    }
+    pub(crate) fn take_layout_request(&mut self) -> Option<cshell_ui::workbench_layout::Layout> {
+        self.layout_request.take()
+    }
     pub(crate) fn open_defaults(&mut self, security: bool) {
         self.settings_open = true;
         self.settings_page = if security { 2 } else { 0 };
@@ -97,7 +103,9 @@ impl Panel {
                     _=>{if let Some(request)=self.security.draw_protection(ui){self.security_request=Some(request);}}
                 }
             });
-        if self.keyboard_settings_request {open=false;}
+        if self.keyboard_settings_request {
+            open = false;
+        }
         self.settings_open = open;
         if !open {
             self.security.clear();
@@ -107,6 +115,11 @@ impl Panel {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use crate::ui_layout_gate::{bounds, context};
@@ -178,18 +191,49 @@ mod tests {
             for frame in 0..5 {
                 let events = if frame == 3 || frame == 4 {
                     let tree: &egui::accesskit::TreeUpdate = tree.as_ref().unwrap();
-                    let node = &tree.nodes.iter().find(|(_,n)| n.label() == Some("鼠标与剪贴板")).unwrap().1;
+                    let node = &tree
+                        .nodes
+                        .iter()
+                        .find(|(_, n)| n.label() == Some("鼠标与剪贴板"))
+                        .unwrap()
+                        .1;
                     let pos = crate::ui_layout_gate::bounds(node).center();
-                    vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: frame == 3, modifiers: egui::Modifiers::NONE }]
-                } else { vec![] };
-                let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO,size)), events, ..Default::default() }, |ui| panel.draw_global_settings(ui.ctx(),None));
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: frame == 3,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]
+                } else {
+                    vec![]
+                };
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| panel.draw_global_settings(ui.ctx(), None),
+                );
                 out.textures_delta.clear();
                 tree = out.platform_output.accesskit_update;
             }
             let tree = tree.unwrap();
-            for label in ["选中后自动复制（松开左键时）", "中键粘贴", "右键直接粘贴"] {
-                let node = &tree.nodes.iter().find(|(_,n)| n.label() == Some(label)).unwrap_or_else(|| panic!("missing {label}")).1;
-                assert!(egui::Rect::from_min_size(egui::Pos2::ZERO,size).contains_rect(crate::ui_layout_gate::bounds(node)));
+            for label in ["选中后自动复制（松开左键时）", "中键粘贴", "右键直接粘贴"]
+            {
+                let node = &tree
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some(label))
+                    .unwrap_or_else(|| panic!("missing {label}"))
+                    .1;
+                assert!(
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, size)
+                        .contains_rect(crate::ui_layout_gate::bounds(node))
+                );
             }
         }
     }

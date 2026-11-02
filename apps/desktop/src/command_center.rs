@@ -24,7 +24,11 @@ const ACTIONS: [(Action, &str, &str); 12] = [
     (Action::NewSsh, "新建 SSH 配置", "连接 主机 new ssh"),
     (Action::Sessions, "会话管理", "服务器 profile sessions"),
     (Action::Search, "查找终端内容", "搜索 find search"),
-    (Action::ShellHistory,"命令历史与输出","命令 上一条 下一条 command history output shell integration"),
+    (
+        Action::ShellHistory,
+        "命令历史与输出",
+        "命令 上一条 下一条 command history output shell integration",
+    ),
     (Action::Sftp, "打开 SFTP", "上传 下载 文件 file transfer"),
     (Action::Reconnect, "重新连接当前 SSH", "重连 reconnect"),
     (Action::Disconnect, "断开当前 SSH", "disconnect"),
@@ -53,7 +57,7 @@ impl Default for Bindings {
                 (Action::NewSsh, "Ctrl+Shift+N"),
                 (Action::Sessions, "Ctrl+Shift+O"),
                 (Action::Search, "Ctrl+Shift+F"),
-                (Action::ShellHistory,"Ctrl+Shift+H"),
+                (Action::ShellHistory, "Ctrl+Shift+H"),
                 (Action::Sftp, "Ctrl+Shift+E"),
                 (Action::Reconnect, "Ctrl+Shift+R"),
                 (Action::QuickCommands, "Ctrl+Shift+G"),
@@ -92,7 +96,7 @@ fn shortcut(value: &str) -> Option<Shortcut> {
         .key
         .strip_prefix('F')
         .and_then(|v| v.parse::<u8>().ok())
-        .is_some_and(|n| (2..=24).contains(&n)&&result.key==format!("F{n}"));
+        .is_some_and(|n| (2..=24).contains(&n) && result.key == format!("F{n}"));
     let letter = result.key.len() == 1
         && result.key.as_bytes()[0].is_ascii_alphabetic()
         && result.ctrl
@@ -143,6 +147,7 @@ impl Bindings {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn action(&self, key: &str) -> Option<Action> {
         let mut chars = key.chars();
         let c = chars.next()?.to_ascii_uppercase();
@@ -257,7 +262,7 @@ fn palette_items(
             .split_whitespace()
             .all(|q| s.to_lowercase().contains(q))
     };
-    for (tab,title,target) in cshell_ui::searchable_window_tabs(model) {
+    for (tab, title, target) in cshell_ui::searchable_window_tabs(model) {
         if matches(&format!("标签 tab {title} {target}")) {
             items.push(Item {
                 label: title,
@@ -268,7 +273,9 @@ fn palette_items(
         }
     }
     for profile in &model.saved_ssh_profiles {
-        if items.len()>=200 {break;}
+        if items.len() >= 200 {
+            break;
+        }
         if matches(&format!("主机 host {} {}", profile.name, profile.target)) {
             items.push(Item {
                 label: format!("{} · {}", profile.name, profile.target),
@@ -279,7 +286,9 @@ fn palette_items(
         }
     }
     for (id, name) in quick {
-        if items.len()>=200 {break;}
+        if items.len() >= 200 {
+            break;
+        }
         if matches(&format!("快捷命令 command {name}")) {
             items.push(Item {
                 label: name.clone(),
@@ -316,7 +325,7 @@ fn command(
         return Err("请等待当前操作完成");
     }
     Ok(match action {
-        Action::ShellHistory if model.selected.is_some()=>C::ShellHistory,
+        Action::ShellHistory if model.selected.is_some() => C::ShellHistory,
         Action::NewSsh => C::NewSshProfile,
         Action::Sessions => C::SshConnections,
         Action::Settings => C::GlobalSettings,
@@ -408,10 +417,7 @@ impl State {
                             egui::ImeEvent::Preedit { text, .. } => {
                                 self.composing = !text.is_empty()
                             }
-                            egui::ImeEvent::Enabled => self.composing = true,
-                            egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => {
-                                self.composing = false
-                            }
+                            egui::ImeEvent::Commit(_) => self.composing = false,
                             _ => {}
                         }
                     }
@@ -462,11 +468,20 @@ impl State {
                                     .truncate()
                                     .right_text(&item.hint)
                                     .selected(index == self.index);
-                                let r = ui.push_id((format!("{:?}",item.command),format!("{:?}",item.action)),|ui|ui
-                                    .add_enabled_ui(available.is_ok(), |ui| {
-                                        ui.add_sized([ui.available_width(), 32.0], button)
-                                    })
-                                    .inner).inner;
+                                let r = ui
+                                    .push_id(
+                                        (
+                                            format!("{:?}", item.command),
+                                            format!("{:?}", item.action),
+                                        ),
+                                        |ui| {
+                                            ui.add_enabled_ui(available.is_ok(), |ui| {
+                                                ui.add_sized([ui.available_width(), 32.0], button)
+                                            })
+                                            .inner
+                                        },
+                                    )
+                                    .inner;
                                 if (down || up) && index == self.index {
                                     r.scroll_to_me(Some(egui::Align::Center));
                                 }
@@ -587,7 +602,9 @@ impl State {
 }
 impl DesktopApp {
     pub(super) fn route_workbench_shortcut(&mut self, event: &winit::event::KeyEvent) -> bool {
-        if event.state != ElementState::Pressed || self.modifiers.control_key()&&self.modifiers.super_key() {
+        if event.state != ElementState::Pressed
+            || self.modifiers.control_key() && self.modifiers.super_key()
+        {
             return false;
         }
         let key = match &event.logical_key {
@@ -632,6 +649,11 @@ impl DesktopApp {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
@@ -679,26 +701,102 @@ mod tests {
         assert!(command(Action::NewSsh, &model).is_err());
     }
     #[test]
-    fn function_bindings_and_profile_schemes_validate_without_mutating_global_defaults(){
-        let mut settings=Bindings::default();let original=settings.keys.clone();let profile=cshell_domain::ProfileId::new();let mut private=original.clone();private.insert(Action::Settings,"Ctrl+F8".into());settings.profiles.insert(profile,private);
-        assert!(settings.validate().is_ok());assert_eq!(settings.keys,original);assert_eq!(settings.effective(Some(profile)).get(&Action::Settings).map(String::as_str),Some("Ctrl+F8"));assert!(!settings.effective(Some(cshell_domain::ProfileId::new())).contains_key(&Action::Settings));
-        for reserved in ["Alt+F4","Shift+F10","F1","Ctrl+C"]{settings.profiles.get_mut(&profile).unwrap().insert(Action::Settings,reserved.into());assert!(settings.validate().is_err(),"{reserved}");}
-        settings.profiles.remove(&profile);assert!(settings.validate().is_ok());
+    fn function_bindings_and_profile_schemes_validate_without_mutating_global_defaults() {
+        let mut settings = Bindings::default();
+        let original = settings.keys.clone();
+        let profile = cshell_domain::ProfileId::new();
+        let mut private = original.clone();
+        private.insert(Action::Settings, "Ctrl+F8".into());
+        settings.profiles.insert(profile, private);
+        assert!(settings.validate().is_ok());
+        assert_eq!(settings.keys, original);
+        assert_eq!(
+            settings
+                .effective(Some(profile))
+                .get(&Action::Settings)
+                .map(String::as_str),
+            Some("Ctrl+F8")
+        );
+        assert!(
+            !settings
+                .effective(Some(cshell_domain::ProfileId::new()))
+                .contains_key(&Action::Settings)
+        );
+        for reserved in ["Alt+F4", "Shift+F10", "F1", "Ctrl+C"] {
+            settings
+                .profiles
+                .get_mut(&profile)
+                .unwrap()
+                .insert(Action::Settings, reserved.into());
+            assert!(settings.validate().is_err(), "{reserved}");
+        }
+        settings.profiles.remove(&profile);
+        assert!(settings.validate().is_ok());
     }
     #[test]
-    fn palette_search_finds_profiles_tabs_and_quick_commands_as_distinct_actions(){
-        let profile=cshell_domain::ProfileId::new();let tab=cshell_domain::TabId::new();let quick=cshell_domain::QuickCommandId::new();let mut model=cshell_ui::WorkbenchViewModel::default();
-        model.saved_ssh_profiles.push(cshell_ui::SavedSshProfileViewModel{id:profile,name:"sample-server".into(),target:"operator@sample.example:22".into(),favorite:false,folder_id:None,kind:cshell_domain::ProfileKind::Ssh});
-        model.tabs.push(cshell_ui::WorkspaceTabViewModel{id:tab,title:"sample-shell".into(),session_id:None});
-        let items=palette_items("sample",&model,&[(quick,"sample-check".into())]);
-        let actions=items.iter().filter_map(|i|i.resolve(&model).ok()).collect::<Vec<_>>();
-        assert!(actions.contains(&WorkbenchMenuCommand::OpenSavedProfile(profile)));assert!(actions.contains(&WorkbenchMenuCommand::OpenWorkspaceTab(tab)));assert!(actions.contains(&WorkbenchMenuCommand::LoadQuickCommand(quick)));
+    fn palette_search_finds_profiles_tabs_and_quick_commands_as_distinct_actions() {
+        let profile = cshell_domain::ProfileId::new();
+        let tab = cshell_domain::TabId::new();
+        let quick = cshell_domain::QuickCommandId::new();
+        let mut model = cshell_ui::WorkbenchViewModel::default();
+        model
+            .saved_ssh_profiles
+            .push(cshell_ui::SavedSshProfileViewModel {
+                id: profile,
+                name: "sample-server".into(),
+                target: "operator@sample.example:22".into(),
+                favorite: false,
+                folder_id: None,
+                kind: cshell_domain::ProfileKind::Ssh,
+            });
+        model.tabs.push(cshell_ui::WorkspaceTabViewModel {
+            id: tab,
+            title: "sample-shell".into(),
+            session_id: None,
+        });
+        let items = palette_items("sample", &model, &[(quick, "sample-check".into())]);
+        let actions = items
+            .iter()
+            .filter_map(|i| i.resolve(&model).ok())
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&WorkbenchMenuCommand::OpenSavedProfile(profile)));
+        assert!(actions.contains(&WorkbenchMenuCommand::OpenWorkspaceTab(tab)));
+        assert!(actions.contains(&WorkbenchMenuCommand::LoadQuickCommand(quick)));
     }
     #[test]
-    fn recording_function_key_changes_only_unsaved_shortcut_draft(){
-        let ctx=crate::ui_layout_gate::context();let mut state=State::default();state.show_settings();state.capture=Some(Action::Settings);let original=current().keys;
-        let mut model=cshell_ui::WorkbenchViewModel::default();let mut out=ctx.run_ui(egui::RawInput{events:vec![egui::Event::Key{key:egui::Key::F8,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers::NONE}],..Default::default()},|ui|state.draw(ui.ctx(),&mut model));out.textures_delta.clear();
-        assert_eq!(state.draft.as_ref().unwrap().keys.get(&Action::Settings).map(String::as_str),Some("F8"));assert_eq!(current().keys,original);assert!(model.menu_command.is_none());
+    fn recording_function_key_changes_only_unsaved_shortcut_draft() {
+        let ctx = crate::ui_layout_gate::context();
+        let mut state = State::default();
+        state.show_settings();
+        state.capture = Some(Action::Settings);
+        let original = current().keys;
+        let mut model = cshell_ui::WorkbenchViewModel::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F8,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| state.draw(ui.ctx(), &mut model),
+        );
+        out.textures_delta.clear();
+        assert_eq!(
+            state
+                .draft
+                .as_ref()
+                .unwrap()
+                .keys
+                .get(&Action::Settings)
+                .map(String::as_str),
+            Some("F8")
+        );
+        assert_eq!(current().keys, original);
+        assert!(model.menu_command.is_none());
     }
     #[test]
     fn atomic_binding_save_rejects_invalid_edits_without_replacing_previous_file() {

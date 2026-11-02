@@ -1,22 +1,15 @@
-mod command_workspace;
 mod app_icon;
-mod shell_history_panel;
 mod clipboard_connection;
 mod clipboard_policy;
+mod command_center;
+mod command_workspace;
+mod connection_cancel;
 mod credential_package;
-mod managed_keys_panel;
 mod cursor_blink;
 mod daemon_connection;
 mod daemon_input;
 mod diagnostics;
-mod interaction_regressions;
 mod display_settings;
-mod terminal_clipboard_settings;
-mod terminal_clipboard;
-mod terminal_mouse;
-mod command_center;
-mod workbench_settings;
-mod terminal_appearance;
 mod download_connection;
 mod download_panel;
 mod file_task_transport;
@@ -25,10 +18,16 @@ mod host_ca_panel;
 mod host_group_connection;
 mod host_group_panel;
 mod host_key_prompt;
-mod keyboard_auth;
-mod connection_cancel;
+mod interaction_regressions;
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod interactive_workbench_gate;
+mod keyboard_auth;
+mod managed_keys_panel;
 mod mixed_connection;
 mod mixed_panel;
 mod mixed_results_panel;
@@ -55,18 +54,11 @@ mod script_live_panel;
 mod secret_edit;
 mod sftp_connection;
 mod sftp_panel;
-mod sftp_window;
-mod zmodem_connection;
-mod zmodem_panel;
-mod zmodem_settings;
-mod terminal_upload;
-mod terminal_scrollback;
-mod terminal_reading;
-mod ssh_session_controls;
-#[cfg(test)]
-mod terminal_keyboard_tests;
 mod sftp_settings;
+mod sftp_window;
+mod shell_history_panel;
 mod ssh_provider_panel;
+mod ssh_session_controls;
 mod sync_input;
 mod tab_activity;
 mod task_connection;
@@ -74,25 +66,48 @@ mod task_definition_editor;
 mod task_panel;
 mod task_results_panel;
 mod terminal_accessibility;
+mod terminal_appearance;
+mod terminal_clipboard;
+mod terminal_clipboard_settings;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+mod terminal_keyboard_tests;
+mod terminal_mouse;
 mod terminal_policy_connection;
 mod terminal_policy_panel;
+mod terminal_reading;
+mod terminal_scrollback;
 mod terminal_search;
 mod terminal_tools_connection;
 mod terminal_tools_panel;
+mod terminal_upload;
 mod tunnel_connection;
 mod tunnel_panel;
 mod ui_fonts;
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod ui_layout_gate;
 mod upload_connection;
 mod upload_panel;
 mod vault_panel;
 mod visual_corpus;
 mod window_e2e;
+mod workbench_navigation;
+mod workbench_settings;
 mod workspace_connection;
 mod workspace_model;
-mod workbench_navigation;
 mod workspace_recovery_panel;
+mod zmodem_connection;
+mod zmodem_panel;
+mod zmodem_settings;
 
 use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers, SessionId};
 use cshell_ipc::{HistorySearchDirection, MAX_TERMINAL_INPUT_BYTES};
@@ -174,7 +189,7 @@ struct DesktopApp {
     task_panel: task_panel::TaskPanel,
     last_task_stamp: Option<(u64, bool)>,
     sftp: Option<DesktopSftpConnection>,
-    sftp_tabs:sftp_window::SftpTabs,
+    sftp_tabs: sftp_window::SftpTabs,
     sftp_panel: SftpPanel,
     sftp_window: Option<sftp_window::SftpWindow>,
     sftp_session: Option<SessionId>,
@@ -214,7 +229,11 @@ struct DesktopApp {
     workspace_layout_error: Option<String>,
     closing_workspace_tab: Option<cshell_domain::TabId>,
     ssh_control: Option<ssh_session_controls::PendingSshControl>,
-    ssh_tab_states: Arc<std::sync::Mutex<std::collections::BTreeMap<cshell_domain::TabId, cshell_ui::SshConnectionState>>>,
+    ssh_tab_states: Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<cshell_domain::TabId, cshell_ui::SshConnectionState>,
+        >,
+    >,
     current_workspace_tab: Option<cshell_domain::TabId>,
     cached_tab_views: std::collections::BTreeMap<cshell_domain::TabId, CachedTabView>,
     terminal_surface: TerminalSurfaceModel,
@@ -352,15 +371,23 @@ impl DesktopApp {
     fn terminal_selection_text(
         &self,
     ) -> Option<Result<String, cshell_render::TerminalInteractionError>> {
-        if let Some(text) = self.cross_selection_text() { return Some(text); }
-        if let (Some(frame), Some(snapshot), Some(selection)) = (&self.terminal_clipboard.history_frame,
-            &self.terminal_clipboard.snapshot, self.terminal_decorations.selection) {
+        if let Some(text) = self.cross_selection_text() {
+            return Some(text);
+        }
+        if let (Some(frame), Some(snapshot), Some(selection)) = (
+            &self.terminal_clipboard.history_frame,
+            &self.terminal_clipboard.snapshot,
+            self.terminal_decorations.selection,
+        ) {
             return Some(terminal_clipboard::history_text(frame, snapshot, selection));
         }
         Some(
-            self.terminal_decorations
-                .selection?
-                .text(self.terminal_clipboard.snapshot.as_ref().or_else(|| self.terminal_surface.latest_snapshot())?),
+            self.terminal_decorations.selection?.text(
+                self.terminal_clipboard
+                    .snapshot
+                    .as_ref()
+                    .or_else(|| self.terminal_surface.latest_snapshot())?,
+            ),
         )
     }
 
@@ -371,7 +398,10 @@ impl DesktopApp {
             .as_ref()
             .and_then(TerminalSearchWorker::take_latest);
         if let Some(response) = search_response {
-            let current_generation = self.terminal_clipboard.snapshot.as_ref()
+            let current_generation = self
+                .terminal_clipboard
+                .snapshot
+                .as_ref()
                 .or_else(|| self.terminal_surface.latest_snapshot())
                 .map(|snapshot| snapshot.generation);
             if response.revision == self.terminal_search_revision
@@ -407,8 +437,10 @@ impl DesktopApp {
 
     fn poll_primary_terminal(&mut self, now: std::time::Instant) -> bool {
         let mut redraw_needed = false;
-        if let Some(view)=self.daemon.as_ref().map(DesktopDaemonConnection::view) {
-            if self.finish_cancelled_launch(&view) {return true;}
+        if let Some(view) = self.daemon.as_ref().map(DesktopDaemonConnection::view)
+            && self.finish_cancelled_launch(&view)
+        {
+            return true;
         }
         if let Some(daemon) = &self.daemon
             && (self.current_workspace_tab.is_none()
@@ -418,9 +450,27 @@ impl DesktopApp {
                     .is_some_and(|id| daemon.view().session_id == Some(*id)))
         {
             let view = daemon.view();
-            if self.log_surface.is_some() && self.submitted_log_page.is_none() && view.session_id.is_some() {
-                let request = if self.terminal_scrollback { self.initial_terminal_history_request() } else { cshell_render::LogPageRequest{source_id:cshell_render::LogSourceId(0),follow_tail:true,anchor_line_id:0,cell_offset:0,rows_before:self.viewport_rows.saturating_add(128).min(4095),rows_after:0} };
-                if self.terminal_scrollback{daemon.request_terminal_history_page(request);}else{daemon.request_log_page(request);}
+            if self.log_surface.is_some()
+                && self.submitted_log_page.is_none()
+                && view.session_id.is_some()
+            {
+                let request = if self.terminal_scrollback {
+                    self.initial_terminal_history_request()
+                } else {
+                    cshell_render::LogPageRequest {
+                        source_id: cshell_render::LogSourceId(0),
+                        follow_tail: true,
+                        anchor_line_id: 0,
+                        cell_offset: 0,
+                        rows_before: self.viewport_rows.saturating_add(128).min(4095),
+                        rows_after: 0,
+                    }
+                };
+                if self.terminal_scrollback {
+                    daemon.request_terminal_history_page(request);
+                } else {
+                    daemon.request_log_page(request);
+                }
             }
             redraw_needed |= self
                 .profile_panel
@@ -432,8 +482,10 @@ impl DesktopApp {
                     .is_none_or(|submitted| !Arc::ptr_eq(submitted, response))
             {
                 self.submitted_history_search = Some(Arc::clone(response));
-                if response.revision == self.terminal_search_revision && self.log_surface.is_some()
-                    && self.terminal_search_open && self.history_search_direction.is_some()
+                if response.revision == self.terminal_search_revision
+                    && self.log_surface.is_some()
+                    && self.terminal_search_open
+                    && self.history_search_direction.is_some()
                 {
                     if let Some(matched) = response.result.matches.first() {
                         self.terminal_search_error = response.result.incomplete.then(|| {
@@ -491,7 +543,9 @@ impl DesktopApp {
                 );
                 redraw_needed |= self.terminal_surface.submit_snapshot(snapshot);
             }
-            if let Some(page) = view.log_page && view.log_page_terminal_history == self.terminal_scrollback {
+            if let Some(page) = view.log_page
+                && view.log_page_terminal_history == self.terminal_scrollback
+            {
                 let key = (page.source_id, page.revision);
                 if self.submitted_log_page != Some(key)
                     && let Some(log_surface) = &mut self.log_surface
@@ -574,30 +628,68 @@ impl DesktopApp {
     fn sync_opened_sessions(&mut self, view: &daemon_connection::DesktopDaemonView) -> bool {
         // Runtime-only scope shared by this GUI's windows. A daemon listing is
         // metadata, not evidence that this application run opened those sessions.
-        let mut opened = self.opened_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut opened = self
+            .opened_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         opened.extend(self.workspace.sessions.values().copied());
-        if let Some(id) = view.session_id { opened.insert(id); }
-        if let Some(id) = view.closed_session { opened.remove(&id); }
+        if let Some(id) = view.session_id {
+            opened.insert(id);
+        }
+        if let Some(id) = view.closed_session {
+            opened.remove(&id);
+        }
         let mut sessions: Vec<_> = if let Some(summaries) = &view.sessions {
-            summaries.iter().filter_map(|summary| {
-                let id = SessionId::from_bytes(summary.session_id.as_slice().try_into().ok()?);
-                opened.contains(&id).then(|| cshell_ui::SessionTabViewModel {
-                    id, title: summary.title.clone(), connected: view.connected && view.session_id == Some(id),
+            summaries
+                .iter()
+                .filter_map(|summary| {
+                    let id = SessionId::from_bytes(summary.session_id.as_slice().try_into().ok()?);
+                    opened
+                        .contains(&id)
+                        .then(|| cshell_ui::SessionTabViewModel {
+                            id,
+                            title: summary.title.clone(),
+                            connected: view.connected && view.session_id == Some(id),
+                        })
                 })
-            }).collect()
+                .collect()
         } else {
-            self.view_model.sessions.iter().filter(|entry| opened.contains(&entry.id)).cloned().collect()
+            self.view_model
+                .sessions
+                .iter()
+                .filter(|entry| opened.contains(&entry.id))
+                .cloned()
+                .collect()
         };
         if let Some(id) = view.session_id
             && opened.contains(&id)
             && !sessions.iter().any(|session| session.id == id)
         {
             sessions.push(cshell_ui::SessionTabViewModel {
-                id, title: view.session_title.clone().unwrap_or_else(|| "Terminal".into()), connected: view.connected,
+                id,
+                title: view
+                    .session_title
+                    .clone()
+                    .unwrap_or_else(|| "Terminal".into()),
+                connected: view.connected,
             });
         }
-        let reusable = view.sessions.as_ref().map(|all|all.iter().filter(|s|s.can_duplicate_ssh_channel && s.running).filter_map(|s|Some(SessionId::from_bytes(s.session_id.as_slice().try_into().ok()?))).collect::<Vec<_>>()).unwrap_or_default();
-        let changed = self.view_model.sessions != sessions || self.view_model.reusable_ssh_sessions != reusable;
+        let reusable = view
+            .sessions
+            .as_ref()
+            .map(|all| {
+                all.iter()
+                    .filter(|s| s.can_duplicate_ssh_channel && s.running)
+                    .filter_map(|s| {
+                        Some(SessionId::from_bytes(
+                            s.session_id.as_slice().try_into().ok()?,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let changed = self.view_model.sessions != sessions
+            || self.view_model.reusable_ssh_sessions != reusable;
         self.view_model.reusable_ssh_sessions = reusable;
         self.view_model.sessions = sessions;
         changed
@@ -705,11 +797,23 @@ impl DesktopApp {
             let cached = pane
                 .tab_id
                 .and_then(|tab| self.cached_tab_views.get_mut(&tab));
-            let frozen_snapshot = if focused { self.terminal_clipboard.snapshot.clone() }
-                else { cached.as_ref().and_then(|c| c.clipboard.snapshot.clone()) };
-            let frozen_history = if focused { self.terminal_clipboard.history_frame.clone() }
-                else { cached.as_ref().and_then(|c| c.clipboard.history_frame.clone()) };
-            let memory_history=if focused{self.terminal_scrollback}else{cached.as_ref().is_some_and(|c|c.terminal_scrollback)};
+            let frozen_snapshot = if focused {
+                self.terminal_clipboard.snapshot.clone()
+            } else {
+                cached.as_ref().and_then(|c| c.clipboard.snapshot.clone())
+            };
+            let frozen_history = if focused {
+                self.terminal_clipboard.history_frame.clone()
+            } else {
+                cached
+                    .as_ref()
+                    .and_then(|c| c.clipboard.history_frame.clone())
+            };
+            let memory_history = if focused {
+                self.terminal_scrollback
+            } else {
+                cached.as_ref().is_some_and(|c| c.terminal_scrollback)
+            };
             let (surface, log_surface, decorations, log_decorations) = if focused {
                 (
                     &mut self.terminal_surface,
@@ -757,7 +861,11 @@ impl DesktopApp {
                 if let Some(request) = log_surface.take_page_request(rows)
                     && let Some(connection) = connection
                 {
-                    if memory_history{connection.request_terminal_history_page(request);}else{connection.request_log_page(request);}
+                    if memory_history {
+                        connection.request_terminal_history_page(request);
+                    } else {
+                        connection.request_log_page(request);
+                    }
                 }
                 frame.log = frozen_history.or_else(|| log_surface.prepare_frame(rows));
             } else {
@@ -883,7 +991,10 @@ impl DesktopApp {
             if let Some(connection) = self.daemon.take() {
                 self.pane_daemons.insert(previous, connection);
             }
-            self.daemon = self.pane_daemons.remove(&tab).or_else(|| self.sync_daemons.remove(&tab));
+            self.daemon = self
+                .pane_daemons
+                .remove(&tab)
+                .or_else(|| self.sync_daemons.remove(&tab));
         } else if let Some(connection) = self.pane_daemons.remove(&tab) {
             if let Some(idle) = self.daemon.take() {
                 idle.retire();
@@ -991,7 +1102,12 @@ impl DesktopApp {
         }
         if let Some(tab) = self.current_workspace_tab
             && !self.workspace.sessions.contains_key(&tab)
-            && self.workspace.document.bindings.iter().any(|binding| binding.tab_id == tab && binding.profile_id == Some(id))
+            && self
+                .workspace
+                .document
+                .bindings
+                .iter()
+                .any(|binding| binding.tab_id == tab && binding.profile_id == Some(id))
             && self.daemon.as_ref().is_some_and(|daemon| {
                 let view = daemon.view();
                 view.session_profile_id == Some(id) && view.launch_error.is_some()
@@ -1052,7 +1168,10 @@ impl DesktopApp {
     }
 
     fn discard_closed_tab_view(&mut self, tab: cshell_domain::TabId) {
-        self.ssh_tab_states.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&tab);
+        self.ssh_tab_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&tab);
         self.cached_tab_views.remove(&tab);
         if let Some(connection) = self.pane_daemons.remove(&tab) {
             connection.retire();
@@ -1066,7 +1185,7 @@ impl DesktopApp {
             self.terminal_decorations = Default::default();
             self.terminal_clipboard = terminal_clipboard::State::default();
             self.log_surface = None;
-                    self.terminal_scrollback = false;
+            self.terminal_scrollback = false;
             self.log_decorations = Default::default();
             self.terminal_search_query.clear();
             self.terminal_search_open = false;
@@ -1079,7 +1198,9 @@ impl DesktopApp {
     }
 
     fn ensure_metadata_connection(&mut self) {
-        if self.daemon.is_none() && let Some(config) = &self.daemon_config {
+        if self.daemon.is_none()
+            && let Some(config) = &self.daemon_config
+        {
             match DesktopDaemonConnection::start_idle(config.clone()) {
                 Ok(connection) => self.daemon = Some(connection),
                 Err(error) => self.view_model.input_warning = Some(error.to_string()),
@@ -1089,15 +1210,26 @@ impl DesktopApp {
 
     fn request_termination(&mut self, id: SessionId) {
         self.ensure_metadata_connection();
-        let observed = self.view_model.sessions.iter().any(|session| session.id == id)
-            || self.workspace.sessions.values().any(|session| *session == id);
+        let observed = self
+            .view_model
+            .sessions
+            .iter()
+            .any(|session| session.id == id)
+            || self
+                .workspace
+                .sessions
+                .values()
+                .any(|session| *session == id);
         let error = if self.workspace.pending_launch.is_some() {
             Some("当前连接操作尚未完成，请等待后重试。".to_owned())
         } else if let Some(daemon) = &self.daemon {
             if observed && daemon.terminate_observed_session(id) {
                 None
             } else {
-                Some("未能提交终止请求：会话列表已变化或另一个关闭操作仍在进行，请核对后重试。".to_owned())
+                Some(
+                    "未能提交终止请求：会话列表已变化或另一个关闭操作仍在进行，请核对后重试。"
+                        .to_owned(),
+                )
             }
         } else {
             Some("后台服务尚未连接，未提交终止请求。".to_owned())
@@ -1105,27 +1237,40 @@ impl DesktopApp {
         self.view_model.terminate_pending = error.is_none();
         self.view_model.terminate_error = error;
         if self.view_model.terminate_pending {
-            self.closing_workspace_tab = self.workspace.sessions.iter()
-                .find(|(tab, session)| **session == id && self.workspace.window_of_tab(**tab) == Some(self.workspace.window_id))
+            self.closing_workspace_tab = self
+                .workspace
+                .sessions
+                .iter()
+                .find(|(tab, session)| {
+                    **session == id
+                        && self.workspace.window_of_tab(**tab) == Some(self.workspace.window_id)
+                })
                 .map(|(tab, _)| *tab);
             self.pending_paste = None;
         }
     }
 
     fn sync_termination(&mut self, view: &daemon_connection::DesktopDaemonView) -> bool {
-        if !self.view_model.terminate_pending { return false; }
-        if view.closed_session == self.view_model.terminate_target && view.closed_session.is_some() {
+        if !self.view_model.terminate_pending {
+            return false;
+        }
+        if view.closed_session == self.view_model.terminate_target && view.closed_session.is_some()
+        {
             self.view_model.terminate_pending = false;
             self.view_model.confirm_terminate = false;
             self.view_model.terminate_target = None;
             self.view_model.terminate_error = None;
             true
-        } else if view.close_pending.is_none() && let Some(error) = &view.close_error {
+        } else if view.close_pending.is_none()
+            && let Some(error) = &view.close_error
+        {
             self.view_model.terminate_pending = false;
             self.view_model.terminate_error = Some(error.clone());
             self.closing_workspace_tab = None;
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 
     fn close_workspace_tab(&mut self, tab: cshell_domain::TabId) {
@@ -1149,7 +1294,8 @@ impl DesktopApp {
                 self.closing_workspace_tab = Some(tab);
                 self.pending_paste = None;
             } else {
-                self.view_model.input_warning = Some("未能提交关闭请求，请等待当前操作完成后重试。".into());
+                self.view_model.input_warning =
+                    Some("未能提交关闭请求，请等待当前操作完成后重试。".into());
             }
         } else {
             self.workspace.remove(tab);
@@ -1189,7 +1335,10 @@ impl DesktopApp {
             .pane_daemons
             .keys()
             .copied()
-            .filter(|tab| !self.workspace.sessions.contains_key(tab) || self.workspace.window_of_tab(*tab) != Some(self.workspace.window_id))
+            .filter(|tab| {
+                !self.workspace.sessions.contains_key(tab)
+                    || self.workspace.window_of_tab(*tab) != Some(self.workspace.window_id)
+            })
             .collect();
         for tab in hidden {
             if let Some(connection) = self.pane_daemons.remove(&tab) {
@@ -1198,12 +1347,21 @@ impl DesktopApp {
         }
         // Keep one IPC attachment per open tab, including hidden recipients and
         // activity monitors. This attaches existing sessions, never starts SSH.
-        let opened: Vec<_> = self.workspace.sessions.keys().copied().filter(|tab| self.workspace.window_of_tab(*tab) == Some(self.workspace.window_id)).collect();
+        let opened: Vec<_> = self
+            .workspace
+            .sessions
+            .keys()
+            .copied()
+            .filter(|tab| self.workspace.window_of_tab(*tab) == Some(self.workspace.window_id))
+            .collect();
         for tab in &opened {
             if Some(*tab) == self.current_workspace_tab || self.pane_daemons.contains_key(tab) {
                 continue;
             }
-            if let Some(connection) = self.sync_daemons.remove(tab) { self.pane_daemons.insert(*tab, connection); continue; }
+            if let Some(connection) = self.sync_daemons.remove(tab) {
+                self.pane_daemons.insert(*tab, connection);
+                continue;
+            }
             if let (Some(session), Some(config)) = (
                 self.workspace.sessions.get(tab),
                 self.daemon_config.as_ref(),
@@ -1216,7 +1374,9 @@ impl DesktopApp {
         for (tab, connection) in &self.pane_daemons {
             // Hidden workers retain one latest snapshot for activity and fast
             // activation; only visible panes need surface updates and redraws.
-            if !visible.contains(tab) { continue; }
+            if !visible.contains(tab) {
+                continue;
+            }
             let view = connection.view();
             if view.session_id != self.workspace.sessions.get(tab).copied() {
                 continue;
@@ -1227,7 +1387,9 @@ impl DesktopApp {
             }
             if let (Some(page), Some(surface)) = (view.log_page, cached.log_surface.as_mut()) {
                 let key = (page.source_id, page.revision);
-                if cached.last_log_page != Some(key) && view.log_page_terminal_history == cached.terminal_scrollback {
+                if cached.last_log_page != Some(key)
+                    && view.log_page_terminal_history == cached.terminal_scrollback
+                {
                     if let Err(error) = surface.submit_page(page) {
                         tracing::warn!(%error, "background pane log page rejected");
                     }
@@ -1238,14 +1400,17 @@ impl DesktopApp {
         }
         let view = self.daemon.as_ref().map(DesktopDaemonConnection::view);
         if let Some(view) = view {
-            if self.finish_cancelled_launch(&view) {return true;}
+            if self.finish_cancelled_launch(&view) {
+                return true;
+            }
             if self.ssh_control.is_some() {
                 self.poll_ssh_control(&view);
                 return true;
             }
             changed |= self.sync_termination(&view);
             changed |= self.sync_opened_sessions(&view);
-            if self.closing_workspace_tab.is_some() && view.close_pending.is_none()
+            if self.closing_workspace_tab.is_some()
+                && view.close_pending.is_none()
                 && let Some(error) = &view.close_error
             {
                 self.closing_workspace_tab = None;
@@ -1259,7 +1424,11 @@ impl DesktopApp {
             if let Some(tab) = self.closing_workspace_tab
                 && view.closed_session == self.workspace.sessions.get(&tab).copied()
             {
-                let paused = !self.workspace.writable || self.workspace_connection.as_ref().is_some_and(|connection| connection.view().paused);
+                let paused = !self.workspace.writable
+                    || self
+                        .workspace_connection
+                        .as_ref()
+                        .is_some_and(|connection| connection.view().paused);
                 if paused {
                     // Terminating a process is independent of autosave. Preserve
                     // the saved placeholder until layout editing becomes writable.
@@ -1285,7 +1454,11 @@ impl DesktopApp {
             if let Some(closed) = view.closed_session
                 && self.closing_workspace_tab.is_none()
                 && let Some(tab) = self.current_workspace_tab
-                && self.workspace.sessions.get(&tab).is_some_and(|session| *session != closed)
+                && self
+                    .workspace
+                    .sessions
+                    .get(&tab)
+                    .is_some_and(|session| *session != closed)
             {
                 self.resume_workspace_tab_runtime(tab);
             }
@@ -1318,7 +1491,10 @@ impl DesktopApp {
                 && !view.session_opening
                 && view.close_pending.is_none()
                 && self.workspace.writable
-                && !self.workspace_connection.as_ref().is_some_and(|connection| connection.view().paused)
+                && !self
+                    .workspace_connection
+                    .as_ref()
+                    .is_some_and(|connection| connection.view().paused)
                 && let Some(id) = view.session_id
             {
                 let should_observe = self.workspace.pending_launch.is_some()
@@ -1353,11 +1529,10 @@ impl DesktopApp {
                         self.switch_tab_view(tab);
                         if let Some(report) = self.pending_terminal_context.take()
                             && profile == Some(report.context.profile_id)
+                            && !self.terminal_policy_panel.bind_launch(tab, id, report)
                         {
-                            if !self.terminal_policy_panel.bind_launch(tab, id, report) {
-                                self.view_model.input_warning =
-                                    Some("新会话已打开，但临时主题绑定预算已满".into());
-                            }
+                            self.view_model.input_warning =
+                                Some("新会话已打开，但临时主题绑定预算已满".into());
                         }
                         if before != self.workspace.document || previous_session != Some(id) {
                             self.refresh_workspace_tabs();
@@ -1432,16 +1607,32 @@ impl DesktopApp {
     }
 
     fn refresh_tab_activity(&mut self) -> bool {
-        let opened: std::collections::BTreeSet<_> = self.workspace.sessions.keys().copied()
-            .filter(|tab| self.workspace.window_of_tab(*tab) == Some(self.workspace.window_id)).collect();
-        let viewed = if self.window_active { self.workspace.visible_tabs().into_iter().collect() } else { std::collections::BTreeSet::new() };
+        let opened: std::collections::BTreeSet<_> = self
+            .workspace
+            .sessions
+            .keys()
+            .copied()
+            .filter(|tab| self.workspace.window_of_tab(*tab) == Some(self.workspace.window_id))
+            .collect();
+        let viewed = if self.window_active {
+            self.workspace.visible_tabs().into_iter().collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         for tab in &opened {
-            let connection = if Some(*tab) == self.current_workspace_tab { self.daemon.as_ref() }
-                else { self.pane_daemons.get(tab).or_else(|| self.sync_daemons.get(tab)) };
+            let connection = if Some(*tab) == self.current_workspace_tab {
+                self.daemon.as_ref()
+            } else {
+                self.pane_daemons
+                    .get(tab)
+                    .or_else(|| self.sync_daemons.get(tab))
+            };
             if let Some(view) = connection.map(DesktopDaemonConnection::view)
                 && view.session_id == self.workspace.sessions.get(tab).copied()
-                && let (Some(session), Some(snapshot)) = (view.session_id, view.snapshot) {
-                self.tab_activity.observe(*tab, session, &snapshot, viewed.contains(tab));
+                && let (Some(session), Some(snapshot)) = (view.session_id, view.snapshot)
+            {
+                self.tab_activity
+                    .observe(*tab, session, &snapshot, viewed.contains(tab));
             }
         }
         let unread = self.tab_activity.refresh(&opened, &viewed);
@@ -1551,7 +1742,15 @@ impl DesktopApp {
                     sender: connection.map(DesktopDaemonConnection::input_sender),
                     control_error: connection
                         .and_then(|connection| connection.view().control_error),
-                    configured_endpoint: binding.profile_id.and_then(|id| self.view_model.saved_ssh_profiles.iter().find(|profile| profile.id == id)).map(|profile| profile.target.clone()),
+                    configured_endpoint: binding
+                        .profile_id
+                        .and_then(|id| {
+                            self.view_model
+                                .saved_ssh_profiles
+                                .iter()
+                                .find(|profile| profile.id == id)
+                        })
+                        .map(|profile| profile.target.clone()),
                 })
             })
             .collect();
@@ -1708,7 +1907,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = std::time::Instant::now();
         let mut redraw_needed = self.sync_workspace();
-        redraw_needed |= self.zmodem.poll(self.daemon_config.as_ref().or(self.workspace_config.as_ref()));
+        redraw_needed |= self.zmodem.poll(
+            self.daemon_config
+                .as_ref()
+                .or(self.workspace_config.as_ref()),
+        );
         redraw_needed |= self.terminal_upload.poll();
         redraw_needed |= self.poll_egui_repaint(now);
         if let Some(policy) = &self.clipboard_policy {
@@ -1795,9 +1998,15 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 redraw_needed = true;
             }
         }
-        if self.keyboard_auth.sync(self.daemon_config.as_ref().or(self.workspace_config.as_ref())) {
-            redraw_needed=true;
-            if let Some(window)=&self.sftp_window {window.window.request_redraw();}
+        if self.keyboard_auth.sync(
+            self.daemon_config
+                .as_ref()
+                .or(self.workspace_config.as_ref()),
+        ) {
+            redraw_needed = true;
+            if let Some(window) = &self.sftp_window {
+                window.window.request_redraw();
+            }
         }
         self.keyboard_auth.refresh_profiles(self.profiles.as_ref());
         self.sync_sftp_lifecycle();
@@ -1806,9 +2015,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             let generation = self.sftp.as_ref().map(DesktopSftpConnection::generation);
             if self.last_sftp_generation != generation {
                 self.last_sftp_generation = generation;
-                if let Some(window) = &self.sftp_window { window.window.request_redraw(); }
+                if let Some(window) = &self.sftp_window {
+                    window.window.request_redraw();
+                }
             }
-            if let Some(window) = &mut self.sftp_window { window.poll(now); }
+            if let Some(window) = &mut self.sftp_window {
+                window.poll(now);
+            }
         }
         while let Some(completed) = self
             .log_reflow
@@ -1819,8 +2032,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         }
         redraw_needed |= self.poll_terminal_search();
         if let Some(view) = self.profiles.as_ref().map(DesktopProfileConnection::view) {
-            let status=view.vault.as_ref().map(|v| if v.manually_locked {"凭据：手动锁定"}else if !v.exists || v.system {"凭据：系统托管"}else if v.unlocked {"凭据：已解锁"}else{"凭据：需主密码"}.to_owned());
-            if self.view_model.vault_status!=status {self.view_model.vault_status=status;redraw_needed=true;}
+            let status = view.vault.as_ref().map(|v| {
+                if v.manually_locked {
+                    "凭据：手动锁定"
+                } else if !v.exists || v.system {
+                    "凭据：系统托管"
+                } else if v.unlocked {
+                    "凭据：已解锁"
+                } else {
+                    "凭据：需主密码"
+                }
+                .to_owned()
+            });
+            if self.view_model.vault_status != status {
+                self.view_model.vault_status = status;
+                redraw_needed = true;
+            }
 
             redraw_needed |= self.update_profile_themes(&view);
             redraw_needed |= self.profile_panel.sync(&view);
@@ -1865,9 +2092,19 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 });
                 redraw_needed |= self.view_model.saved_ssh_profiles != saved_ssh_profiles;
                 self.view_model.saved_ssh_profiles = saved_ssh_profiles;
-                let environments=view.catalog.as_ref().map_or_else(Default::default,|c|c.profiles.iter().filter_map(|p|cshell_ui::environment::Environment::from_tags(p.tags.iter().map(String::as_str)).map(|env|(p.id,env))).collect());
-                redraw_needed|=self.view_model.profile_environments!=environments;
-                self.view_model.profile_environments=environments;
+                let environments = view.catalog.as_ref().map_or_else(Default::default, |c| {
+                    c.profiles
+                        .iter()
+                        .filter_map(|p| {
+                            cshell_ui::environment::Environment::from_tags(
+                                p.tags.iter().map(String::as_str),
+                            )
+                            .map(|env| (p.id, env))
+                        })
+                        .collect()
+                });
+                redraw_needed |= self.view_model.profile_environments != environments;
+                self.view_model.profile_environments = environments;
                 if self.view_model.selected_profile.is_some_and(|id| {
                     !self
                         .view_model
@@ -1883,7 +2120,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if self.log_surface.is_some() {
             redraw_needed |= self.cursor_blink.synchronize(None, false, now);
         }
-        let current_generation = self.terminal_clipboard.snapshot.as_ref()
+        let current_generation = self
+            .terminal_clipboard
+            .snapshot
+            .as_ref()
             .or_else(|| self.terminal_surface.latest_snapshot())
             .map(|snapshot| snapshot.generation);
         if self.terminal_search_open
@@ -1965,7 +2205,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         {
             return;
         }
-        let modal_input_blocked = (self.profile_panel.is_dialog_open() || self.zmodem.blocks_input() || self.keyboard_auth.blocks_input())
+        let modal_input_blocked = (self.profile_panel.is_dialog_open()
+            || self.zmodem.blocks_input()
+            || self.keyboard_auth.blocks_input())
             || self.tunnel_panel.open
             || self.host_ca_panel.open
             || self.terminal_tools_panel.open
@@ -1979,34 +2221,82 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             || self.view_model.confirm_terminate
             || self.view_model.tab_navigator.open
             || self.command_center.blocks_input();
-        if let Some(sync) = &self.sync_input { sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_modal_blocked(modal_input_blocked); }
-        if !modal_input_blocked && self.pending_paste.is_none()
-            && let WindowEvent::KeyboardInput { event, is_synthetic: false, .. } = &event
-            && (matches!(&event.logical_key,Key::Character(key) if key.eq_ignore_ascii_case("k")) || (!self.terminal_search_open && !self.egui_context.egui_wants_keyboard_input() && !self.sync_blocks_input()))
-            && self.route_workbench_shortcut(event) {
-            if let Some(sync)=&self.sync_input {sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_modal_blocked(true);}
-            window.request_redraw();
-            return;
+        if let Some(sync) = &self.sync_input {
+            sync.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_modal_blocked(modal_input_blocked);
         }
-        if let WindowEvent::KeyboardInput {event,is_synthetic:false,..}=&event
-            && (self.view_model.tab_navigator.open || self.tab_navigation_available())
-            && workbench_navigation::shortcut(event.state,&event.logical_key,self.modifiers,"p") {
-            if !event.repeat && !self.view_model.tab_navigator.open {
-                self.view_model.tab_navigator.show(self.current_workspace_tab);
-                if let Some(sync)=&self.sync_input {sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .set_modal_blocked(true);}
+        if !modal_input_blocked
+            && self.pending_paste.is_none()
+            && let WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } = &event
+            && (matches!(&event.logical_key,Key::Character(key) if key.eq_ignore_ascii_case("k"))
+                || (!self.terminal_search_open
+                    && !self.egui_context.egui_wants_keyboard_input()
+                    && !self.sync_blocks_input()))
+            && self.route_workbench_shortcut(event)
+        {
+            if let Some(sync) = &self.sync_input {
+                sync.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_modal_blocked(true);
             }
             window.request_redraw();
             return;
         }
-        if !self.command_center.blocks_input() && matches!(&event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. })
-            && let Some(position) = self.cursor_position {
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } = &event
+            && (self.view_model.tab_navigator.open || self.tab_navigation_available())
+            && workbench_navigation::shortcut(event.state, &event.logical_key, self.modifiers, "p")
+        {
+            if !event.repeat && !self.view_model.tab_navigator.open {
+                self.view_model
+                    .tab_navigator
+                    .show(self.current_workspace_tab);
+                if let Some(sync) = &self.sync_input {
+                    sync.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .set_modal_blocked(true);
+                }
+            }
+            window.request_redraw();
+            return;
+        }
+        if !self.command_center.blocks_input()
+            && matches!(
+                &event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                }
+            )
+            && let Some(position) = self.cursor_position
+        {
             let scale = window.scale_factor() as f32;
             let point = egui::pos2(position.x as f32 / scale, position.y as f32 / scale);
-            if self.view_model.pane_views.iter().any(|pane| pane.rect.contains(point))
+            if self
+                .view_model
+                .pane_views
+                .iter()
+                .any(|pane| pane.rect.contains(point))
                 && let Some(sync) = &self.sync_input
-                && sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner).focus_terminal() {
-                self.egui_context.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
+                && sync
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .focus_terminal()
+            {
+                self.egui_context.memory_mut(|memory| {
+                    if let Some(id) = memory.focused() {
+                        memory.surrender_focus(id);
+                    }
+                });
             }
         }
         // egui-winit consumes Tab even without a focused widget. A terminal Tab
@@ -2016,18 +2306,23 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 self.terminal_keyboard_available(), self.egui_context.egui_wants_keyboard_input()));
         // The transparent CentralPanel is an egui area too. Its generic
         // `consumed` flag cannot decide whether the GPU terminal owns a wheel.
-        let terminal_wheel = !self.command_center.blocks_input() && matches!(&event, WindowEvent::MouseWheel { .. })
+        let terminal_wheel = !self.command_center.blocks_input()
+            && matches!(&event, WindowEvent::MouseWheel { .. })
             && self.terminal_wheel_available(window.scale_factor() as f32);
-        let terminal_mouse = !self.command_center.blocks_input() && matches!(&event, WindowEvent::MouseInput { .. })
+        let terminal_mouse = !self.command_center.blocks_input()
+            && matches!(&event, WindowEvent::MouseInput { .. })
             && self.clipboard_pointer_available(window.scale_factor() as f32);
         let terminal_history_key = matches!(&event, WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
             if self.terminal_keyboard_available() && !self.egui_context.egui_wants_keyboard_input()
                 && terminal_scrollback::history_shortcut(event, self.modifiers,
                     self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some()).is_some());
         let mut egui_consumed = false;
-        if !terminal_tab && !terminal_history_key && !terminal_wheel
+        if !terminal_tab
+            && !terminal_history_key
+            && !terminal_wheel
             && !interaction_regressions::intercepts_native_press(&event, terminal_mouse)
-            && let Some(state) = &mut self.egui_state {
+            && let Some(state) = &mut self.egui_state
+        {
             let response = state.on_window_event(&window, &event);
             egui_consumed = response.consumed;
             // RedrawRequested is already being serviced. Re-requesting it here
@@ -2037,22 +2332,33 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 window.request_redraw();
             }
         }
-        if self.terminal_clipboard.menu.is_some() && let WindowEvent::KeyboardInput { event, .. } = &event {
+        if self.terminal_clipboard.menu.is_some()
+            && let WindowEvent::KeyboardInput { event, .. } = &event
+        {
             if is_terminal_copy_shortcut(event, self.modifiers) {
                 self.dismiss_clipboard_menu();
                 self.copy_terminal_selection();
             } else if is_terminal_paste_shortcut(event, self.modifiers) {
                 self.dismiss_clipboard_menu();
                 self.paste_from_clipboard(&window, false);
-            } else if event.state == ElementState::Pressed && event.logical_key == Key::Named(NamedKey::Escape) {
+            } else if event.state == ElementState::Pressed
+                && event.logical_key == Key::Named(NamedKey::Escape)
+            {
                 self.dismiss_clipboard_menu();
             }
             window.request_redraw();
             return;
         }
-        if self.command_center.blocks_input() && matches!(&event,
-            WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_) | WindowEvent::MouseInput { .. }
-            | WindowEvent::MouseWheel { .. } | WindowEvent::CursorMoved { .. }) {
+        if self.command_center.blocks_input()
+            && matches!(
+                &event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::Ime(_)
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::CursorMoved { .. }
+            )
+        {
             window.request_redraw();
             return;
         }
@@ -2095,9 +2401,17 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
             }
         }
-        if let WindowEvent::CursorMoved { position, .. } = &event { self.cursor_position = Some(*position); }
-        if self.route_terminal_zoom(&event,&window) { window.request_redraw(); return; }
-        if self.route_remote_mouse(&event, &window) { window.request_redraw(); return; }
+        if let WindowEvent::CursorMoved { position, .. } = &event {
+            self.cursor_position = Some(*position);
+        }
+        if self.route_terminal_zoom(&event, &window) {
+            window.request_redraw();
+            return;
+        }
+        if self.route_remote_mouse(&event, &window) {
+            window.request_redraw();
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 if let Some(sync) = &self.sync_input {
@@ -2126,33 +2440,64 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
-                if self.terminal_selecting && let Some(point) = self.terminal_point_at(position) {
+                if self.terminal_selecting
+                    && let Some(point) = self.terminal_point_at(position)
+                {
                     self.update_clipboard_selection(point);
                     window.request_redraw();
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if state == ElementState::Released {
                     self.finish_clipboard_selection();
                     window.request_redraw();
-                } else if terminal_mouse && !egui_consumed && let Some(position) = self.cursor_position
-                    && let Some(point) = self.terminal_point_at(position) {
-                    self.egui_context.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
-                    if !self.ctrl_click_terminal_link() { self.begin_clipboard_selection(point); }
+                } else if terminal_mouse
+                    && !egui_consumed
+                    && let Some(position) = self.cursor_position
+                    && let Some(point) = self.terminal_point_at(position)
+                {
+                    self.egui_context.memory_mut(|m| {
+                        if let Some(id) = m.focused() {
+                            m.surrender_focus(id);
+                        }
+                    });
+                    if !self.ctrl_click_terminal_link() {
+                        self.begin_clipboard_selection(point);
+                    }
                     window.request_redraw();
                 }
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. }
-                if terminal_mouse && !egui_consumed && matches!(button, MouseButton::Right | MouseButton::Middle) => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } if terminal_mouse
+                && !egui_consumed
+                && matches!(button, MouseButton::Right | MouseButton::Middle) =>
+            {
                 let settings = terminal_clipboard_settings::get();
-                if button == MouseButton::Right && (!settings.right_click_paste || self.modifiers.shift_key()) {
+                if button == MouseButton::Right
+                    && (!settings.right_click_paste || self.modifiers.shift_key())
+                {
                     if let Some(position) = self.cursor_position {
                         let scale = window.scale_factor() as f32;
-                        self.open_clipboard_menu(egui::pos2(position.x as f32 / scale, position.y as f32 / scale));
+                        self.open_clipboard_menu(egui::pos2(
+                            position.x as f32 / scale,
+                            position.y as f32 / scale,
+                        ));
                     }
                 } else if (button == MouseButton::Right && settings.right_click_paste)
-                    || (button == MouseButton::Middle && settings.middle_click_paste) {
-                    self.egui_context.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
+                    || (button == MouseButton::Middle && settings.middle_click_paste)
+                {
+                    self.egui_context.memory_mut(|m| {
+                        if let Some(id) = m.focused() {
+                            m.surrender_focus(id);
+                        }
+                    });
                     self.paste_from_clipboard(&window, false);
                 }
                 window.request_redraw();
@@ -2162,7 +2507,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             }
             WindowEvent::Focused(active) => {
                 self.restore_window_focus(active);
-                if active { self.key_picker_focus_deferred = false; }
+                if active {
+                    self.key_picker_focus_deferred = false;
+                }
                 if !active {
                     self.release_remote_mouse();
                     self.terminal_selecting = false;
@@ -2213,7 +2560,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             } if !self.view_model.about_open
                 && !self.view_model.confirm_terminate
                 && !self.view_model.tab_navigator.open
-                && !(self.profile_panel.is_dialog_open() || self.zmodem.blocks_input() || self.keyboard_auth.blocks_input())
+                && !(self.profile_panel.is_dialog_open()
+                    || self.zmodem.blocks_input()
+                    || self.keyboard_auth.blocks_input())
                 && !self.tunnel_panel.open
                 && !self.host_ca_panel.open
                 && !self.terminal_tools_panel.open
@@ -2248,13 +2597,29 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 self.close_terminal_search();
                 window.request_redraw();
             }
-            WindowEvent::KeyboardInput { event, is_synthetic:false, .. }
-                if !egui_consumed && self.terminal_keyboard_available()
-                    && terminal_scrollback::history_shortcut(&event,self.modifiers,self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some()).is_some() => {
-                match terminal_scrollback::history_shortcut(&event,self.modifiers,self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some()) {
-                    Some(0)=>self.return_to_live_terminal(),
-                    Some(direction)=>self.scroll_terminal_history(direction*i32::from(self.viewport_rows.saturating_sub(1).max(1))),
-                    None=>{},
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if !egui_consumed
+                && self.terminal_keyboard_available()
+                && terminal_scrollback::history_shortcut(
+                    &event,
+                    self.modifiers,
+                    self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some(),
+                )
+                .is_some() =>
+            {
+                match terminal_scrollback::history_shortcut(
+                    &event,
+                    self.modifiers,
+                    self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some(),
+                ) {
+                    Some(0) => self.return_to_live_terminal(),
+                    Some(direction) => self.scroll_terminal_history(
+                        direction * i32::from(self.viewport_rows.saturating_sub(1).max(1)),
+                    ),
+                    None => {}
                 }
                 window.request_redraw();
             }
@@ -2271,7 +2636,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 && !self.terminal_policy_panel.open
                 && !self.workspace_recovery_panel.open
                 && !self.sync_blocks_input()
-                && !(self.profile_panel.is_dialog_open() || self.zmodem.blocks_input() || self.keyboard_auth.blocks_input())
+                && !(self.profile_panel.is_dialog_open()
+                    || self.zmodem.blocks_input()
+                    || self.keyboard_auth.blocks_input())
                 && !self.tunnel_panel.open
                 && !self.host_ca_panel.open
                 && !self.terminal_tools_panel.open
@@ -2283,8 +2650,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 && !self.view_model.confirm_terminate
                 && !self.view_model.tab_navigator.open =>
             {
-                if event.state == ElementState::Pressed && event.logical_key == Key::Named(NamedKey::Escape)
-                    && self.modifiers.is_empty() && self.terminal_decorations.selection.is_some() {
+                if event.state == ElementState::Pressed
+                    && event.logical_key == Key::Named(NamedKey::Escape)
+                    && self.modifiers.is_empty()
+                    && self.terminal_decorations.selection.is_some()
+                {
                     self.clear_clipboard_selection();
                     self.return_to_live_terminal();
                     window.request_redraw();
@@ -2324,7 +2694,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
             }
             WindowEvent::Ime(Ime::Commit(text))
-                if !egui_consumed && !self.terminal_search_open
+                if !egui_consumed
+                    && !self.terminal_search_open
                     && (self.log_surface.is_none() || self.terminal_scrollback)
                     && self.pending_paste.is_none()
                     && !self.terminal_tools_panel.open
@@ -2332,7 +2703,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     && !self.terminal_policy_panel.open
                     && !self.workspace_recovery_panel.open
                     && !self.sync_blocks_input()
-                    && !(self.profile_panel.is_dialog_open() || self.zmodem.blocks_input() || self.keyboard_auth.blocks_input())
+                    && !(self.profile_panel.is_dialog_open()
+                        || self.zmodem.blocks_input()
+                        || self.keyboard_auth.blocks_input())
                     && !self.tunnel_panel.open
                     && !self.host_ca_panel.open
                     && !self.terminal_tools_panel.open
@@ -2375,7 +2748,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     .as_ref()
                     .and_then(|surface| surface.scrollbar_state(self.viewport_rows.max(1)));
                 let mut scrollbar_action = None;
-                let mut return_to_live=false;
+                let mut return_to_live = false;
                 self.refresh_terminal_reading();
                 self.terminal_ui_regions.clear();
                 let context = self.egui_context.clone();
@@ -2393,20 +2766,25 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     .zip(self.profiles.as_ref().and_then(|p| p.catalog_revision()));
                 let selected_before_draw = self.view_model.selected;
                 let tab_before_draw = self.view_model.selected_tab;
-                let mut return_auxiliary_focus=false;
+                let mut return_auxiliary_focus = false;
                 self.refresh_ssh_controls();
                 let full_output = context.run_ui(raw_input, |ui| {
-                    terminal_appearance::set_font(ui.ctx(),self.view_model.terminal_font_pixels.unwrap_or(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS));
+                    terminal_appearance::set_font(
+                        ui.ctx(),
+                        self.view_model
+                            .terminal_font_pixels
+                            .unwrap_or(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS),
+                    );
                     self.view_model.task_view = self.task_panel.open;
                     self.view_model.layout_paused = self
                         .workspace_connection
                         .as_ref()
                         .is_some_and(|c| c.view().paused);
                     self.view_model.can_sftp = self.sftp_profile_for_open().is_some();
-                    self.view_model.terminal_zoom_pixels=self.terminal_mouse.zoom;
+                    self.view_model.terminal_zoom_pixels = self.terminal_mouse.zoom;
                     cshell_ui::draw_workbench_chrome(ui, &mut self.view_model);
                     self.draw_connection_diagnostics(ui);
-                    self.terminal_mouse.zoom=self.view_model.terminal_zoom_pixels;
+                    self.terminal_mouse.zoom = self.view_model.terminal_zoom_pixels;
                     if let Some(hosts) = &self.host_groups {
                         self.host_panel.draw(ui.ctx(), hosts, &hosts.view());
                     }
@@ -2414,25 +2792,37 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         let mut sync = sync
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        sync.set_modal_blocked((self.profile_panel.is_dialog_open() || self.zmodem.blocks_input() || self.keyboard_auth.blocks_input())
-                            || self.tunnel_panel.open
-                            || self.host_ca_panel.open
-                            || self.terminal_tools_panel.open
-                            || self.profile_batch_panel.open
-                            || self.terminal_policy_panel.open
-                            || self.workspace_recovery_panel.open
-                            || self.ssh_provider_panel.open
-                            || self.host_panel.open
-                            || self.task_panel.open
-                            || self.view_model.about_open
-                            || self.view_model.confirm_terminate
-                            || self.view_model.tab_navigator.open || self.command_center.blocks_input());
-                        let search_requested=sync.draw(
-                            ui,self.workspace.window_id,self.workspace.focused_group(),self.current_workspace_tab,self.terminal_search_open,
+                        sync.set_modal_blocked(
+                            (self.profile_panel.is_dialog_open()
+                                || self.zmodem.blocks_input()
+                                || self.keyboard_auth.blocks_input())
+                                || self.tunnel_panel.open
+                                || self.host_ca_panel.open
+                                || self.terminal_tools_panel.open
+                                || self.profile_batch_panel.open
+                                || self.terminal_policy_panel.open
+                                || self.workspace_recovery_panel.open
+                                || self.ssh_provider_panel.open
+                                || self.host_panel.open
+                                || self.task_panel.open
+                                || self.view_model.about_open
+                                || self.view_model.confirm_terminate
+                                || self.view_model.tab_navigator.open
+                                || self.command_center.blocks_input(),
+                        );
+                        let search_requested = sync.draw(
+                            ui,
+                            self.workspace.window_id,
+                            self.workspace.focused_group(),
+                            self.current_workspace_tab,
+                            self.terminal_search_open,
                         );
                         if search_requested {
-                            if self.terminal_search_open {self.close_terminal_search();}
-                            else {self.open_terminal_search();}
+                            if self.terminal_search_open {
+                                self.close_terminal_search();
+                            } else {
+                                self.open_terminal_search();
+                            }
                         }
                         return_auxiliary_focus |= sync.take_focus_return();
                         if let Some((definition, selection)) =
@@ -2460,12 +2850,16 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         && !self.view_model.confirm_terminate
                         && !self.view_model.tab_navigator.open
                     {
-                        egui::Panel::bottom("terminal-search-dock").exact_size(104.0)
-                            .frame(cshell_ui::form::utility_bar()).show(ui, |ui| {
+                        egui::Panel::bottom("terminal-search-dock")
+                            .exact_size(104.0)
+                            .frame(cshell_ui::form::utility_bar())
+                            .show(ui, |ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     let response = ui.add(
                                         egui::TextEdit::singleline(&mut self.terminal_search_query)
-                                            .desired_width((ui.available_width()-260.0).clamp(80.0,450.0))
+                                            .desired_width(
+                                                (ui.available_width() - 260.0).clamp(80.0, 450.0),
+                                            )
                                             .char_limit(MAX_TERMINAL_SEARCH_QUERY_BYTES)
                                             .hint_text("查找当前终端内容"),
                                     );
@@ -2486,7 +2880,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                                     if ui.button("下一个").clicked() {
                                         search_navigation = 1;
                                     }
-                                    if ui.button("收起查找").on_hover_text("Esc：返回终端").clicked() {
+                                    if ui
+                                        .button("收起查找")
+                                        .on_hover_text("Esc：返回终端")
+                                        .clicked()
+                                    {
                                         close_search = true;
                                     }
                                 });
@@ -2522,7 +2920,14 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                                     }
                                 });
                                 if let Some(error) = &self.terminal_search_error {
-                                    ui.add(egui::Label::new(egui::RichText::new(error).color(cshell_ui::theme::DANGER)).truncate()).on_hover_text(error);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(error)
+                                                .color(cshell_ui::theme::DANGER),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(error);
                                 }
                                 if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                                     search_navigation = if ui.input(|input| input.modifiers.shift) {
@@ -2533,7 +2938,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                                 }
                             });
                     }
-                    self.terminal_tools_panel.draw_command_dock(ui,sftp_session);
+                    self.terminal_tools_panel
+                        .draw_command_dock(ui, sftp_session);
                     if self.task_panel.open
                         && let Some(tasks) = &self.tasks
                     {
@@ -2546,7 +2952,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     } else {
                         terminal_rect = cshell_ui::draw_workbench_content(ui, &mut self.view_model);
                     }
-                    let pane=self.view_model.pane_views.iter().find(|p|p.tab_id==self.current_workspace_tab).map_or(terminal_rect,|p|p.rect);
+                    let pane = self
+                        .view_model
+                        .pane_views
+                        .iter()
+                        .find(|p| p.tab_id == self.current_workspace_tab)
+                        .map_or(terminal_rect, |p| p.rect);
                     return_to_live = self.draw_terminal_return_button(ui, pane);
                     if let Some(sync) = &self.sync_input {
                         let sync = sync
@@ -2564,29 +2975,91 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                     }
                     profile_command = self.profile_panel.draw(ui.ctx());
-                    let drop_rect=self.view_model.pane_views.iter().find(|p|p.tab_id==self.current_workspace_tab).map_or(terminal_rect,|p|p.rect);
-                    let drop_source=sftp_session.filter(|_|self.view_model.can_disconnect_ssh);
-                    let drop_blocked=self.profile_panel.is_dialog_open() || self.keyboard_auth.blocks_input() || self.zmodem.blocks_input() || self.task_panel.open || self.view_model.confirm_terminate
-                    || self.view_model.tab_navigator.open;
-                    let verification=drop_source.and_then(|s|self.daemon.as_ref()?.session_profile(s)).and_then(|id|self.profiles.as_ref()?.view().catalog?.ssh_connections.into_iter().find(|p|p.profile_id==id)?.options.sftp_verification);
-                    self.terminal_upload.drop_target(ui,drop_rect,drop_source,self.daemon_config.as_ref().or(self.workspace_config.as_ref()),drop_blocked,verification);
+                    let drop_rect = self
+                        .view_model
+                        .pane_views
+                        .iter()
+                        .find(|p| p.tab_id == self.current_workspace_tab)
+                        .map_or(terminal_rect, |p| p.rect);
+                    let drop_source = sftp_session.filter(|_| self.view_model.can_disconnect_ssh);
+                    let drop_blocked = self.profile_panel.is_dialog_open()
+                        || self.keyboard_auth.blocks_input()
+                        || self.zmodem.blocks_input()
+                        || self.task_panel.open
+                        || self.view_model.confirm_terminate
+                        || self.view_model.tab_navigator.open;
+                    let verification = drop_source
+                        .and_then(|s| self.daemon.as_ref()?.session_profile(s))
+                        .and_then(|id| {
+                            self.profiles
+                                .as_ref()?
+                                .view()
+                                .catalog?
+                                .ssh_connections
+                                .into_iter()
+                                .find(|p| p.profile_id == id)?
+                                .options
+                                .sftp_verification
+                        });
+                    self.terminal_upload.drop_target(
+                        ui,
+                        drop_rect,
+                        drop_source,
+                        self.daemon_config
+                            .as_ref()
+                            .or(self.workspace_config.as_ref()),
+                        drop_blocked,
+                        verification,
+                    );
                     self.terminal_upload.draw(ui.ctx());
-                    if self.key_picker_focus_deferred && (!self.profile_panel.owns_native_key_picker() || !managed_keys_panel::picker_is_foreground()) {
+                    if self.key_picker_focus_deferred
+                        && (!self.profile_panel.owns_native_key_picker()
+                            || !managed_keys_panel::picker_is_foreground())
+                    {
                         self.key_picker_focus_deferred = false;
                     }
-                    let owned:Vec<_>=self.workspace.sessions.iter()
-                        .filter(|(tab,_)| self.workspace.window_of_tab(**tab)==Some(self.workspace.window_id))
-                        .map(|(_,session)|session.as_uuid().as_bytes().to_vec())
-                        .chain(self.daemon.as_ref().and_then(|d|d.view().session_id).map(|s|s.as_uuid().as_bytes().to_vec())).collect();
-                    let catalog=self.profiles.as_ref().and_then(|p|p.view().catalog);
-                    if let Some(profiles)=&self.profiles {self.zmodem.sync_security(&profiles.view());}
-                    self.zmodem.sync_display(self.view_model.terminal_font_pixels.unwrap_or(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS));
-                    self.zmodem.sync_layout(cshell_ui::workbench_layout::Layout::capture(&self.view_model));
-                    self.zmodem.draw(ui.ctx(),catalog.as_ref(),&owned);
-                    if self.zmodem.take_keyboard_settings_request(){self.command_center.show_settings();}
-                    if let Some(pixels)=self.zmodem.take_display_request(){self.view_model.terminal_font_pixels=Some(pixels);}
-                    if let Some(layout)=self.zmodem.take_layout_request(){layout.apply(&mut self.view_model);}
-                    if let Some(request)=self.zmodem.take_security_request(){profile_command=Some(profile_connection::ProfileClientCommand::Vault(request));}
+                    let owned: Vec<_> = self
+                        .workspace
+                        .sessions
+                        .iter()
+                        .filter(|(tab, _)| {
+                            self.workspace.window_of_tab(**tab) == Some(self.workspace.window_id)
+                        })
+                        .map(|(_, session)| session.as_uuid().as_bytes().to_vec())
+                        .chain(
+                            self.daemon
+                                .as_ref()
+                                .and_then(|d| d.view().session_id)
+                                .map(|s| s.as_uuid().as_bytes().to_vec()),
+                        )
+                        .collect();
+                    let catalog = self.profiles.as_ref().and_then(|p| p.view().catalog);
+                    if let Some(profiles) = &self.profiles {
+                        self.zmodem.sync_security(&profiles.view());
+                    }
+                    self.zmodem.sync_display(
+                        self.view_model
+                            .terminal_font_pixels
+                            .unwrap_or(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS),
+                    );
+                    self.zmodem
+                        .sync_layout(cshell_ui::workbench_layout::Layout::capture(
+                            &self.view_model,
+                        ));
+                    self.zmodem.draw(ui.ctx(), catalog.as_ref(), &owned);
+                    if self.zmodem.take_keyboard_settings_request() {
+                        self.command_center.show_settings();
+                    }
+                    if let Some(pixels) = self.zmodem.take_display_request() {
+                        self.view_model.terminal_font_pixels = Some(pixels);
+                    }
+                    if let Some(layout) = self.zmodem.take_layout_request() {
+                        layout.apply(&mut self.view_model);
+                    }
+                    if let Some(request) = self.zmodem.take_security_request() {
+                        profile_command =
+                            Some(profile_connection::ProfileClientCommand::Vault(request));
+                    }
 
                     let recovery_profiles =
                         self.profiles.as_ref().map(DesktopProfileConnection::view);
@@ -2652,7 +3125,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     if !self.task_panel.open
                         && let Some(state) = scrollbar_state
                     {
-                        scrollbar_action = self.draw_terminal_history_scrollbar(ui, &mut terminal_rect, state);
+                        scrollbar_action =
+                            self.draw_terminal_history_scrollbar(ui, &mut terminal_rect, state);
                     }
                     if self.log_surface.is_none()
                         && !self.task_panel.open
@@ -2678,41 +3152,96 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         && !self.view_model.about_open
                         && !self.view_model.confirm_terminate
                         && !self.view_model.tab_navigator.open
+                        && let Some(tab) = self.current_workspace_tab
                     {
-                        if let Some(tab) = self.current_workspace_tab {
-                            let endpoint = self.workspace.document.bindings.iter().find(|b| b.tab_id == tab).and_then(|b| b.profile_id)
-                                .and_then(|id| self.view_model.saved_ssh_profiles.iter().find(|p| p.id == id)).map(|p| p.target.as_str());
-                            match self.terminal_clipboard.review.show(ui.ctx(), self.workspace.window_id, tab,
-                                pending.session_id, &pending.session_title, endpoint, self.view_model.ssh_tab_states.contains_key(&tab), &pending.text) {
-                                sync_input::compose::PasteReviewDecision::Cancel => cancel_paste = true,
-                                sync_input::compose::PasteReviewDecision::Send => confirm_paste = true,
-                                _ => {}
-                            }
+                        let endpoint = self
+                            .workspace
+                            .document
+                            .bindings
+                            .iter()
+                            .find(|b| b.tab_id == tab)
+                            .and_then(|b| b.profile_id)
+                            .and_then(|id| {
+                                self.view_model
+                                    .saved_ssh_profiles
+                                    .iter()
+                                    .find(|p| p.id == id)
+                            })
+                            .map(|p| p.target.as_str());
+                        match self.terminal_clipboard.review.show(
+                            ui.ctx(),
+                            self.workspace.window_id,
+                            tab,
+                            pending.session_id,
+                            &pending.session_title,
+                            endpoint,
+                            self.view_model.ssh_tab_states.contains_key(&tab),
+                            &pending.text,
+                        ) {
+                            sync_input::compose::PasteReviewDecision::Cancel => cancel_paste = true,
+                            sync_input::compose::PasteReviewDecision::Send => confirm_paste = true,
+                            _ => {}
                         }
                     }
                     clipboard_action = self.draw_clipboard_ui(ui.ctx());
                     self.keyboard_auth.draw(ui.ctx());
-                    if self.keyboard_auth.blocks_input() || self.profile_panel.is_dialog_open() || self.pending_paste.is_some(){self.command_center.suspend();}
-                    else {
-                        if self.command_center.open {self.command_center.quick=self.sync_input.as_ref().map(|s|s.lock().unwrap_or_else(std::sync::PoisonError::into_inner).palette_commands()).unwrap_or_default();}
+                    if self.keyboard_auth.blocks_input()
+                        || self.profile_panel.is_dialog_open()
+                        || self.pending_paste.is_some()
+                    {
+                        self.command_center.suspend();
+                    } else {
+                        if self.command_center.open {
+                            self.command_center.quick = self
+                                .sync_input
+                                .as_ref()
+                                .map(|s| {
+                                    s.lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .palette_commands()
+                                })
+                                .unwrap_or_default();
+                        }
                         self.command_center.draw(ui.ctx(), &mut self.view_model);
                     }
                 });
-                if let Some(text)=self.terminal_tools_panel.take_command_load() {
-                    let loaded=self.sync_input.as_ref().is_some_and(|sync|sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner).load_history_command(self.workspace.window_id,self.current_workspace_tab,text));
-                    if !loaded{self.view_model.input_warning=Some("命令栏已有草稿或当前会话不可用；请先处理草稿后再载入。".into());}
+                if let Some(text) = self.terminal_tools_panel.take_command_load() {
+                    let loaded = self.sync_input.as_ref().is_some_and(|sync| {
+                        sync.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .load_history_command(
+                                self.workspace.window_id,
+                                self.current_workspace_tab,
+                                text,
+                            )
+                    });
+                    if !loaded {
+                        self.view_model.input_warning =
+                            Some("命令栏已有草稿或当前会话不可用；请先处理草稿后再载入。".into());
+                    }
                 }
-                if let Some(line)=self.terminal_tools_panel.take_command_jump() {self.jump_to_command(line);}
+                if let Some(line) = self.terminal_tools_panel.take_command_jump() {
+                    self.jump_to_command(line);
+                }
                 self.return_focus_from_tab_navigation();
-                let layout=cshell_ui::workbench_layout::Layout::capture(&self.view_model);
-                if self.saved_workbench_layout.as_ref()!=Some(&layout) && !context.input(|i|i.pointer.any_down()) {
-                    self.saved_workbench_layout=Some(layout.clone());
-                    if let Some(path)=&self.workbench_settings_path {
-                        if let Err(error)=workbench_settings::save(path,&layout){self.view_model.input_warning=Some(format!("无法保存工作台布局：{error}"));}
+                let layout = cshell_ui::workbench_layout::Layout::capture(&self.view_model);
+                if self.saved_workbench_layout.as_ref() != Some(&layout)
+                    && !context.input(|i| i.pointer.any_down())
+                {
+                    self.saved_workbench_layout = Some(layout.clone());
+                    if let Some(path) = &self.workbench_settings_path
+                        && let Err(error) = workbench_settings::save(path, &layout)
+                    {
+                        self.view_model.input_warning =
+                            Some(format!("无法保存工作台布局：{error}"));
                     }
                 }
                 if return_auxiliary_focus && self.terminal_keyboard_available() {
-                    self.egui_context.memory_mut(|m|{if let Some(id)=m.focused(){m.surrender_focus(id);}});
+                    self.egui_context.memory_mut(|m| {
+                        if let Some(id) = m.focused() {
+                            m.surrender_focus(id);
+                        }
+                    });
                 }
                 if self
                     .workspace_connection
@@ -2775,7 +3304,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
                 if self.view_model.about_open {
                     self.terminal_selecting = false;
-        self.terminal_clipboard = terminal_clipboard::State::default();
+                    self.terminal_clipboard = terminal_clipboard::State::default();
                 }
                 let paused = self
                     .workspace_connection
@@ -2803,8 +3332,18 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         )
                 });
                 match menu {
-                    Some(WorkbenchMenuCommand::CommandCenter) => {self.release_remote_mouse();self.dismiss_clipboard_menu();self.command_center.show();window.request_redraw();},
-                    Some(WorkbenchMenuCommand::KeyboardSettings) => {self.release_remote_mouse();self.dismiss_clipboard_menu();self.command_center.show_settings();window.request_redraw();},
+                    Some(WorkbenchMenuCommand::CommandCenter) => {
+                        self.release_remote_mouse();
+                        self.dismiss_clipboard_menu();
+                        self.command_center.show();
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::KeyboardSettings) => {
+                        self.release_remote_mouse();
+                        self.dismiss_clipboard_menu();
+                        self.command_center.show_settings();
+                        window.request_redraw();
+                    }
                     Some(WorkbenchMenuCommand::TerminalView) => {
                         self.return_to_live_terminal();
                         self.task_panel.close();
@@ -2868,13 +3407,34 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                     Some(WorkbenchMenuCommand::QuickCommands) => {
                         self.close_terminal_search();
-                        if let Some(sync)=&self.sync_input {sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .open_quick_commands(self.workspace.window_id,self.current_workspace_tab);}
+                        if let Some(sync) = &self.sync_input {
+                            sync.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .open_quick_commands(
+                                    self.workspace.window_id,
+                                    self.current_workspace_tab,
+                                );
+                        }
                         window.request_redraw();
                     }
-                    Some(WorkbenchMenuCommand::LoadQuickCommand(id))=>{
-                        let loaded=self.sync_input.as_ref().is_some_and(|sync|sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner).load_palette_command(self.workspace.window_id,self.current_workspace_tab,id));
-                        if loaded {self.close_terminal_search();}else{self.view_model.input_warning=Some("快捷命令未载入：请先处理命令栏草稿，或刷新快捷命令列表。".into());}window.request_redraw();
+                    Some(WorkbenchMenuCommand::LoadQuickCommand(id)) => {
+                        let loaded = self.sync_input.as_ref().is_some_and(|sync| {
+                            sync.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .load_palette_command(
+                                    self.workspace.window_id,
+                                    self.current_workspace_tab,
+                                    id,
+                                )
+                        });
+                        if loaded {
+                            self.close_terminal_search();
+                        } else {
+                            self.view_model.input_warning = Some(
+                                "快捷命令未载入：请先处理命令栏草稿，或刷新快捷命令列表。".into(),
+                            );
+                        }
+                        window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::Compose) => {
                         self.close_terminal_search();
@@ -2886,7 +3446,10 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                         window.request_redraw();
                     }
-                    Some(WorkbenchMenuCommand::ShellHistory) => {self.terminal_tools_panel.open_commands();window.request_redraw();}
+                    Some(WorkbenchMenuCommand::ShellHistory) => {
+                        self.terminal_tools_panel.open_commands();
+                        window.request_redraw();
+                    }
                     Some(WorkbenchMenuCommand::SearchTerminal) => {
                         self.open_terminal_search();
                         window.request_redraw();
@@ -2899,23 +3462,49 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::SftpFiles) => {
-                        if let Some(profile)=self.sftp_profile_for_open() {self.open_sftp_profile(profile);}
+                        if let Some(profile) = self.sftp_profile_for_open() {
+                            self.open_sftp_profile(profile);
+                        }
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::OpenSavedSftp(profile)) => {
                         self.open_sftp_profile(profile);
                         window.request_redraw();
                     }
-                    Some(WorkbenchMenuCommand::GlobalSettings) => {self.zmodem.open_defaults(false);if let Some(profiles)=&self.profiles {profiles.request(profile_connection::ProfileClientCommand::Vault(cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::Status)));}window.request_redraw();}
-                    Some(WorkbenchMenuCommand::VaultSettings) => {self.zmodem.open_defaults(true);if let Some(profiles)=&self.profiles {profiles.request(profile_connection::ProfileClientCommand::Vault(cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::Status)));}window.request_redraw();}
+                    Some(WorkbenchMenuCommand::GlobalSettings) => {
+                        self.zmodem.open_defaults(false);
+                        if let Some(profiles) = &self.profiles {
+                            profiles.request(profile_connection::ProfileClientCommand::Vault(
+                                cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::Status),
+                            ));
+                        }
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::VaultSettings) => {
+                        self.zmodem.open_defaults(true);
+                        if let Some(profiles) = &self.profiles {
+                            profiles.request(profile_connection::ProfileClientCommand::Vault(
+                                cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::Status),
+                            ));
+                        }
+                        window.request_redraw();
+                    }
                     Some(WorkbenchMenuCommand::Credentials) => {
                         self.pending_paste = None;
                         let command = self.profile_panel.open_credentials();
-                        if let Some(profiles) = &self.profiles { profiles.request(command); }
+                        if let Some(profiles) = &self.profiles {
+                            profiles.request(command);
+                        }
                         window.request_redraw();
                     }
-                    Some(WorkbenchMenuCommand::TerminalUploads) => {self.terminal_upload.open=true;window.request_redraw();}
-                    Some(WorkbenchMenuCommand::ZmodemTransfers) => {self.zmodem.open=true;window.request_redraw();}
+                    Some(WorkbenchMenuCommand::TerminalUploads) => {
+                        self.terminal_upload.open = true;
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::ZmodemTransfers) => {
+                        self.zmodem.open = true;
+                        window.request_redraw();
+                    }
                     Some(WorkbenchMenuCommand::Tunnels) => {
                         self.pending_paste = None;
                         self.tunnel_panel.open = true;
@@ -3020,10 +3609,15 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                     Some(WorkbenchMenuCommand::ReconnectSshTab(tab)) => {
                         self.activate_workspace_tab(tab);
-                        if self.current_workspace_tab == Some(tab) { self.request_ssh_control(true); }
+                        if self.current_workspace_tab == Some(tab) {
+                            self.request_ssh_control(true);
+                        }
                         window.request_redraw();
                     }
-                    Some(WorkbenchMenuCommand::ReconnectSsh | WorkbenchMenuCommand::ReconnectNewShell) => {
+                    Some(
+                        WorkbenchMenuCommand::ReconnectSsh
+                        | WorkbenchMenuCommand::ReconnectNewShell,
+                    ) => {
                         self.request_ssh_control(true);
                         window.request_redraw();
                     }
@@ -3090,8 +3684,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             self.refresh_workspace_tabs();
                         }
                     }
-                    Some(WorkbenchMenuCommand::CloneWorkspaceSession(source)) => self.clone_terminal_tab(source,false),
-                    Some(WorkbenchMenuCommand::CloneSshChannel(source)) => self.clone_terminal_tab(source,true),
+                    Some(WorkbenchMenuCommand::CloneWorkspaceSession(source)) => {
+                        self.clone_terminal_tab(source, false)
+                    }
+                    Some(WorkbenchMenuCommand::CloneSshChannel(source)) => {
+                        self.clone_terminal_tab(source, true)
+                    }
                     Some(WorkbenchMenuCommand::OpenWorkspaceTab(tab)) => {
                         if self.workspace.pending_launch.is_none()
                             && let Some(binding) = self
@@ -3139,13 +3737,15 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             self.terminal_decorations = TerminalDecorations::default();
                             self.terminal_clipboard = terminal_clipboard::State::default();
                             self.log_surface = None;
-                    self.terminal_scrollback = false;
+                            self.terminal_scrollback = false;
                         } else {
                             self.workspace.pending_launch = None;
                         }
                     }
                 }
-                if let Some(profile)=self.profile_panel.take_cancelled_connection() {self.dismiss_failed_connection(profile);}
+                if let Some(profile) = self.profile_panel.take_cancelled_connection() {
+                    self.dismiss_failed_connection(profile);
+                }
                 if let Some(command) = profile_command {
                     match command {
                         profile_connection::ProfileClientCommand::OpenProfile(id) => {
@@ -3158,10 +3758,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                                     self.terminal_decorations = TerminalDecorations::default();
                                     self.terminal_clipboard = terminal_clipboard::State::default();
                                     self.log_surface = None;
-                    self.terminal_scrollback = false;
+                                    self.terminal_scrollback = false;
                                 } else {
                                     self.workspace.pending_launch = None;
-                                    self.view_model.input_warning = Some("连接请求未提交，请等待当前操作完成后重试。".into());
+                                    self.view_model.input_warning =
+                                        Some("连接请求未提交，请等待当前操作完成后重试。".into());
                                 }
                             }
                         }
@@ -3175,16 +3776,19 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                                     self.terminal_decorations = TerminalDecorations::default();
                                     self.terminal_clipboard = terminal_clipboard::State::default();
                                     self.log_surface = None;
-                    self.terminal_scrollback = false;
+                                    self.terminal_scrollback = false;
                                 } else {
                                     self.workspace.pending_launch = None;
-                                    self.view_model.input_warning = Some("连接请求未提交，请等待当前操作完成后重试。".into());
+                                    self.view_model.input_warning =
+                                        Some("连接请求未提交，请等待当前操作完成后重试。".into());
                                 }
                             }
                         }
                         other => {
-                            if let Some(profiles) = &self.profiles {
-                                if !profiles.request(other) { self.profile_panel.request_failed(); }
+                            if let Some(profiles) = &self.profiles
+                                && !profiles.request(other)
+                            {
+                                self.profile_panel.request_failed();
                             }
                         }
                     }
@@ -3239,23 +3843,41 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
                 if clipboard_action.is_some() {
                     window.request_redraw();
-                    self.egui_context.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
+                    self.egui_context.memory_mut(|m| {
+                        if let Some(id) = m.focused() {
+                            m.surrender_focus(id);
+                        }
+                    });
                 }
                 match clipboard_action {
                     Some(terminal_clipboard::Action::Copy) => self.copy_terminal_selection(),
-                    Some(terminal_clipboard::Action::Paste) => self.paste_from_clipboard(&window, false),
-                    Some(terminal_clipboard::Action::Edit) => self.paste_from_clipboard(&window, true),
+                    Some(terminal_clipboard::Action::Paste) => {
+                        self.paste_from_clipboard(&window, false)
+                    }
+                    Some(terminal_clipboard::Action::Edit) => {
+                        self.paste_from_clipboard(&window, true)
+                    }
                     Some(action) => self.handle_terminal_context_action(action),
                     None => {}
                 }
                 if cancel_paste || confirm_paste {
-                    self.egui_context.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
-                    if let Some(sync) = &self.sync_input { sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner).focus_terminal(); }
+                    self.egui_context.memory_mut(|m| {
+                        if let Some(id) = m.focused() {
+                            m.surrender_focus(id);
+                        }
+                    });
+                    if let Some(sync) = &self.sync_input {
+                        sync.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .focus_terminal();
+                    }
                 }
                 if cancel_paste {
                     self.pending_paste = None;
                 } else if confirm_paste && let Some(pending) = self.pending_paste.take() {
-                    if self.active_terminal_session_id() == Some(pending.session_id) && self.terminal_clipboard.review.is_valid() {
+                    if self.active_terminal_session_id() == Some(pending.session_id)
+                        && self.terminal_clipboard.review.is_valid()
+                    {
                         self.submit_paste(pending.text, &window);
                     } else {
                         self.view_model.input_warning =
@@ -3284,26 +3906,44 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                     }
                 }
-                let font_pixels = self.view_model.terminal_font_pixels.unwrap_or(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS)
-                    .clamp(cshell_domain::MIN_TERMINAL_FONT_PIXELS, cshell_domain::MAX_TERMINAL_FONT_PIXELS);
+                let font_pixels = self
+                    .view_model
+                    .terminal_font_pixels
+                    .unwrap_or(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS)
+                    .clamp(
+                        cshell_domain::MIN_TERMINAL_FONT_PIXELS,
+                        cshell_domain::MAX_TERMINAL_FONT_PIXELS,
+                    );
                 self.view_model.terminal_font_pixels = Some(font_pixels);
                 if let Some(renderer) = &mut self.renderer {
-                    if self.saved_font_pixels.is_some_and(|saved|saved!=font_pixels){self.terminal_mouse.zoom=None;self.view_model.terminal_zoom_pixels=None;}
-                    let display_pixels=self.terminal_mouse.zoom.unwrap_or(font_pixels);
+                    if self
+                        .saved_font_pixels
+                        .is_some_and(|saved| saved != font_pixels)
+                    {
+                        self.terminal_mouse.zoom = None;
+                        self.view_model.terminal_zoom_pixels = None;
+                    }
+                    let display_pixels = self.terminal_mouse.zoom.unwrap_or(font_pixels);
                     let font_result = renderer.set_font_size(display_pixels);
                     if let Err(error) = &font_result {
-                        self.terminal_mouse.zoom=None;self.view_model.terminal_zoom_pixels=None;
+                        self.terminal_mouse.zoom = None;
+                        self.view_model.terminal_zoom_pixels = None;
                         self.view_model.input_warning = Some(format!("字号未能更新：{error}"));
                     } else {
-                        if matches!(font_result, Ok(true)) { self.clear_clipboard_selection(); }
-                        if matches!(font_result, Ok(true)) && let Some(e2e) = &mut self.window_e2e {
+                        if matches!(font_result, Ok(true)) {
+                            self.clear_clipboard_selection();
+                        }
+                        if matches!(font_result, Ok(true))
+                            && let Some(e2e) = &mut self.window_e2e
+                        {
                             e2e.note_font_size_change();
                         }
                         if self.saved_font_pixels != Some(font_pixels) {
-                            if let Some(path) = &self.display_settings_path {
-                                if let Err(error) = display_settings::save(path, font_pixels) {
-                                    self.view_model.input_warning = Some(format!("字号已生效，但设置未能保存：{error}"));
-                                }
+                            if let Some(path) = &self.display_settings_path
+                                && let Err(error) = display_settings::save(path, font_pixels)
+                            {
+                                self.view_model.input_warning =
+                                    Some(format!("字号已生效，但设置未能保存：{error}"));
                             }
                             self.saved_font_pixels = Some(font_pixels);
                         }
@@ -3325,7 +3965,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     (session, revision, rules)
                 });
                 let show_terminal_cursor = self.cursor_blink.visible()
-                    && self.current_workspace_tab.and_then(|tab| self.view_model.ssh_tab_states.get(&tab))
+                    && self
+                        .current_workspace_tab
+                        .and_then(|tab| self.view_model.ssh_tab_states.get(&tab))
                         .is_none_or(|state| *state == cshell_ui::SshConnectionState::Connected);
                 let Some(renderer) = &mut self.renderer else {
                     return;
@@ -3407,7 +4049,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                     if let Some(request) = log_surface.take_page_request(viewport_rows) {
                         if let Some(daemon) = &self.daemon {
-                            if self.terminal_scrollback{daemon.request_terminal_history_page(request);}else{daemon.request_log_page(request);}
+                            if self.terminal_scrollback {
+                                daemon.request_terminal_history_page(request);
+                            } else {
+                                daemon.request_log_page(request);
+                            }
                         } else if let Some(e2e) = &mut self.window_e2e {
                             let page = e2e.page_for(request);
                             if let Err(error) = log_surface.submit_page(page) {
@@ -3415,7 +4061,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             }
                         }
                     }
-                    let frame = self.terminal_clipboard.history_frame.clone().or_else(|| log_surface.prepare_frame(viewport_rows));
+                    let frame = self
+                        .terminal_clipboard
+                        .history_frame
+                        .clone()
+                        .or_else(|| log_surface.prepare_frame(viewport_rows));
                     if let (Some((session, revision, rules)), Some(worker), Some(frame)) =
                         (&highlight_setup, &mut self.highlight_worker, &frame)
                     {
@@ -3435,7 +4085,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     )
                 } else {
                     let mut frame = self.terminal_surface.prepare_frame(0, viewport_rows);
-                    if let (Some(frame), Some(snapshot)) = (&mut frame, &self.terminal_clipboard.snapshot) {
+                    if let (Some(frame), Some(snapshot)) =
+                        (&mut frame, &self.terminal_clipboard.snapshot)
+                    {
                         frame.snapshot = snapshot.clone();
                         frame.plan.generation = snapshot.generation;
                     }
@@ -3582,8 +4234,13 @@ impl DesktopApp {
             self.terminal_decorations.active_search_match = None;
         }
         self.bump_terminal_decorations();
-        let Some(snapshot) = self.terminal_clipboard.snapshot.as_ref()
-            .or_else(|| self.terminal_surface.latest_snapshot()).cloned() else {
+        let Some(snapshot) = self
+            .terminal_clipboard
+            .snapshot
+            .as_ref()
+            .or_else(|| self.terminal_surface.latest_snapshot())
+            .cloned()
+        else {
             self.terminal_search_requested_generation = None;
             return;
         };
@@ -3700,7 +4357,11 @@ impl DesktopApp {
     fn close_terminal_search(&mut self) {
         self.terminal_search_open = false;
         self.terminal_search_focus_requested = false;
-        self.egui_context.memory_mut(|m|{if let Some(id)=m.focused(){m.surrender_focus(id);}});
+        self.egui_context.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
         self.terminal_search_revision = self.terminal_search_revision.wrapping_add(1);
         self.terminal_search_requested_generation = None;
         self.terminal_search_error = None;
@@ -3716,15 +4377,27 @@ impl DesktopApp {
         self.bump_terminal_decorations();
     }
 
-    fn terminal_point_at(&self, position:winit::dpi::PhysicalPosition<f64>) -> Option<TerminalCellPoint> {
-        let (rows,cols)=if let Some(snapshot)=&self.terminal_clipboard.snapshot {(snapshot.rows,snapshot.cols)}
-            else if let Some(frame)=self.log_surface.as_ref().and_then(|s|s.prepare_frame(self.viewport_rows)) {(self.viewport_rows,frame.layout_columns)}
-            else {let snapshot=self.terminal_surface.latest_snapshot()?;(snapshot.rows,snapshot.cols)};
-        self.terminal_point_for_grid(position,rows,cols,false)
-
+    fn terminal_point_at(
+        &self,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) -> Option<TerminalCellPoint> {
+        let (rows, cols) = if let Some(snapshot) = &self.terminal_clipboard.snapshot {
+            (snapshot.rows, snapshot.cols)
+        } else if let Some(frame) = self
+            .log_surface
+            .as_ref()
+            .and_then(|s| s.prepare_frame(self.viewport_rows))
+        {
+            (self.viewport_rows, frame.layout_columns)
+        } else {
+            let snapshot = self.terminal_surface.latest_snapshot()?;
+            (snapshot.rows, snapshot.cols)
+        };
+        self.terminal_point_for_grid(position, rows, cols, false)
     }
 }
 
+#[cfg(test)]
 fn terminal_point_at(
     position: winit::dpi::PhysicalPosition<f64>,
     viewport: TerminalViewport,
@@ -3751,12 +4424,21 @@ fn terminal_point_at(
 fn is_terminal_copy_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
     matches_terminal_copy_shortcut(event.state, event.repeat, &event.logical_key, modifiers)
 }
-fn matches_terminal_copy_shortcut(state: ElementState, repeat: bool, key: &Key, modifiers: ModifiersState) -> bool {
-    state == ElementState::Pressed && !repeat && !modifiers.alt_key()
+fn matches_terminal_copy_shortcut(
+    state: ElementState,
+    repeat: bool,
+    key: &Key,
+    modifiers: ModifiersState,
+) -> bool {
+    state == ElementState::Pressed
+        && !repeat
+        && !modifiers.alt_key()
         && ((matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
             && (modifiers.super_key() || (modifiers.control_key() && modifiers.shift_key())))
-            || (key == &Key::Named(NamedKey::Insert) && modifiers.control_key()
-                && !modifiers.shift_key() && !modifiers.super_key()))
+            || (key == &Key::Named(NamedKey::Insert)
+                && modifiers.control_key()
+                && !modifiers.shift_key()
+                && !modifiers.super_key()))
 }
 
 fn is_terminal_paste_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
@@ -3821,7 +4503,7 @@ fn paste_preview(text: &str) -> String {
 }
 
 fn is_terminal_search_shortcut(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> bool {
-    workbench_navigation::shortcut(event.state,&event.logical_key,modifiers,"f")
+    workbench_navigation::shortcut(event.state, &event.logical_key, modifiers, "f")
 }
 
 fn truncate_utf8_bytes(text: &mut String, maximum: usize) {
@@ -3875,13 +4557,16 @@ fn position_terminal_ime(
 
 impl DesktopApp {
     fn terminal_keyboard_available(&self) -> bool {
-        !self.command_center.blocks_input() && self.active_terminal_session_id().is_some()
+        !self.command_center.blocks_input()
+            && self.active_terminal_session_id().is_some()
             && (self.log_surface.is_none() || self.terminal_scrollback)
             && self.pending_paste.is_none()
             && !self.task_panel.open
             && !self.host_panel.open
             && !self.terminal_search_open
-            && !(self.profile_panel.is_dialog_open() || self.zmodem.blocks_input() || self.keyboard_auth.blocks_input())
+            && !(self.profile_panel.is_dialog_open()
+                || self.zmodem.blocks_input()
+                || self.keyboard_auth.blocks_input())
             && !self.tunnel_panel.open
             && !self.host_ca_panel.open
             && !self.terminal_tools_panel.open
@@ -3896,7 +4581,11 @@ impl DesktopApp {
     }
 }
 
-fn terminal_tab_bypasses_egui(key: &Key, terminal_available: bool, egui_wants_keyboard: bool) -> bool {
+fn terminal_tab_bypasses_egui(
+    key: &Key,
+    terminal_available: bool,
+    egui_wants_keyboard: bool,
+) -> bool {
     terminal_available && !egui_wants_keyboard && key == &Key::Named(NamedKey::Tab)
 }
 
@@ -4023,7 +4712,10 @@ const fn function_key_number(key: NamedKey) -> Option<u8> {
 }
 
 fn log_scrollbar_rect(rect: egui::Rect) -> egui::Rect {
-    egui::Rect::from_min_max(egui::pos2((rect.max.x - 12.0).max(rect.min.x), rect.min.y), rect.max)
+    egui::Rect::from_min_max(
+        egui::pos2((rect.max.x - 12.0).max(rect.min.x), rect.min.y),
+        rect.max,
+    )
 }
 
 fn draw_log_scrollbar(
@@ -4039,7 +4731,11 @@ fn draw_log_scrollbar(
     let track = log_scrollbar_rect(*terminal_rect);
     terminal_rect.max.x -= WIDTH;
     let first = state.first_line_id.max(1);
-    let total = state.total_line_count.saturating_sub(first).saturating_add(1).max(1);
+    let total = state
+        .total_line_count
+        .saturating_sub(first)
+        .saturating_add(1)
+        .max(1);
     let visible_fraction = (f64::from(state.viewport_rows) / total as f64).clamp(0.03, 1.0);
     let thumb_height = (track.height() * visible_fraction as f32)
         .max(MIN_THUMB)
@@ -4070,7 +4766,9 @@ fn draw_log_scrollbar(
     let pointer = response.interact_pointer_pos()?;
     let progress = ((pointer.y - track.top()) / track.height()).clamp(0.0, 1.0);
     Some(match log_scrollbar_action(progress, total) {
-        LogScrollbarAction::JumpTo(line) => LogScrollbarAction::JumpTo(first.saturating_add(line - 1)),
+        LogScrollbarAction::JumpTo(line) => {
+            LogScrollbarAction::JumpTo(first.saturating_add(line - 1))
+        }
         action => action,
     })
 }
@@ -4369,9 +5067,16 @@ impl DesktopWindows {
                 ..DesktopApp::default()
             };
             child.view_model.terminal_font_pixels = self.primary.view_model.terminal_font_pixels;
-            let preferred_layout=self.primary.workbench_settings_path.as_deref().map(workbench_settings::read).unwrap_or_else(||cshell_ui::workbench_layout::Layout::capture(&self.primary.view_model));
+            let preferred_layout = self
+                .primary
+                .workbench_settings_path
+                .as_deref()
+                .map(workbench_settings::read)
+                .unwrap_or_else(|| {
+                    cshell_ui::workbench_layout::Layout::capture(&self.primary.view_model)
+                });
             preferred_layout.apply(&mut child.view_model);
-            child.saved_workbench_layout=Some(preferred_layout);
+            child.saved_workbench_layout = Some(preferred_layout);
             if let Some(config) = &child.daemon_config {
                 child.daemon = DesktopDaemonConnection::start_idle(config.clone()).ok();
                 child.profiles = DesktopProfileConnection::start(config.clone()).ok();
@@ -4556,7 +5261,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopWindows {
         let DesktopEvent::AccessKit(ref access) = event;
         for app in std::iter::once(&mut self.primary).chain(self.others.values_mut()) {
             if let Some(window) = &mut app.sftp_window
-                && window.window.id() == access.window_id {
+                && window.window.id() == access.window_id
+            {
                 window.accesskit(event);
                 return;
             }
@@ -4574,14 +5280,27 @@ impl ApplicationHandler<DesktopEvent> for DesktopWindows {
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         for app in std::iter::once(&mut self.primary).chain(self.others.values_mut()) {
-            if app.sftp_window.as_ref().is_some_and(|window| window.window.id() == id) {
+            if app
+                .sftp_window
+                .as_ref()
+                .is_some_and(|window| window.window.id() == id)
+            {
                 app.sftp_window_event(event_loop, event);
                 return;
             }
         }
-        let font_before = if self.primary.window.as_ref().is_some_and(|window| window.id() == id) {
+        let font_before = if self
+            .primary
+            .window
+            .as_ref()
+            .is_some_and(|window| window.id() == id)
+        {
             self.primary.view_model.terminal_font_pixels
-        } else { self.others.get(&id).and_then(|app| app.view_model.terminal_font_pixels) };
+        } else {
+            self.others
+                .get(&id)
+                .and_then(|app| app.view_model.terminal_font_pixels)
+        };
         if matches!(event, WindowEvent::CloseRequested)
             && !self.primary.window.as_ref().is_some_and(|w| w.id() == id)
             && self
@@ -4641,22 +5360,34 @@ impl ApplicationHandler<DesktopEvent> for DesktopWindows {
                 self.absorb(document, sessions);
             }
         }
-        let font_after = if self.primary.window.as_ref().is_some_and(|window| window.id() == id) {
+        let font_after = if self
+            .primary
+            .window
+            .as_ref()
+            .is_some_and(|window| window.id() == id)
+        {
             self.primary.view_model.terminal_font_pixels
-        } else { self.others.get(&id).and_then(|app| app.view_model.terminal_font_pixels) };
+        } else {
+            self.others
+                .get(&id)
+                .and_then(|app| app.view_model.terminal_font_pixels)
+        };
         if font_after.is_some() && font_after != font_before {
             for app in std::iter::once(&mut self.primary).chain(self.others.values_mut()) {
                 if app.view_model.terminal_font_pixels != font_after {
                     app.view_model.terminal_font_pixels = font_after;
-                    if let Some(window) = &app.window { window.request_redraw(); }
+                    if let Some(window) = &app.window {
+                        window.request_redraw();
+                    }
                 }
             }
         }
         if std::iter::once(&mut self.primary)
             .chain(self.others.values_mut())
-            .fold(false, |requested, app| {
-                std::mem::take(&mut app.retry_workspace_windows) || requested
-            })
+            .map(|app| std::mem::take(&mut app.retry_workspace_windows))
+            .filter(|requested| *requested)
+            .count()
+            > 0
         {
             self.unavailable_windows.clear();
             self.primary.workspace_layout_error = None;
@@ -4733,8 +5464,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         DesktopConnectionConfig::from_env()?
     };
     // One lease per GUI process, independent of tabs and secondary windows.
-    let _desktop_lifetime = daemon_config.as_ref()
-        .map(daemon_connection::DesktopDaemonLifetime::start).transpose()?;
+    let _desktop_lifetime = daemon_config
+        .as_ref()
+        .map(daemon_connection::DesktopDaemonLifetime::start)
+        .transpose()?;
     let profiles = daemon_config
         .clone()
         .map(DesktopProfileConnection::start)
@@ -4792,10 +5525,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         app.display_settings_path = path;
         app.saved_font_pixels = Some(pixels);
         app.view_model.terminal_font_pixels = Some(pixels);
-        let (path,layout)=workbench_settings::load();
-        app.workbench_settings_path=path;
+        let (path, layout) = workbench_settings::load();
+        app.workbench_settings_path = path;
         layout.apply(&mut app.view_model);
-        app.saved_workbench_layout=Some(layout);
+        app.saved_workbench_layout = Some(layout);
     }
     if show_visual_corpus {
         let snapshot = Arc::new(visual_corpus::snapshot());
@@ -4841,6 +5574,11 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::{
         LogScrollbarAction, PasteDecision, TERMINAL_MULTI_CLICK_INTERVAL, TerminalCellPoint,
@@ -4914,18 +5652,26 @@ mod tests {
     #[test]
     fn startup_discards_old_tab_views_but_preserves_saved_layout_and_error_barrier() {
         let mut old = super::workspace_model::DesktopWorkspace::default();
-        old.add(Some(cshell_domain::ProfileId::new()), "Old SSH".into()).unwrap();
+        old.add(Some(cshell_domain::ProfileId::new()), "Old SSH".into())
+            .unwrap();
         old.split(cshell_domain::SplitAxis::Horizontal).unwrap();
         old.new_window().unwrap();
-        let saved = cshell_application::WorkspaceSnapshot { revision: 12, document: old.document };
+        let saved = cshell_application::WorkspaceSnapshot {
+            revision: 12,
+            document: old.document,
+        };
         for (snapshot, error) in [
             (Some(saved.clone()), None),
             (None, None),
             (None, Some("Storage unavailable".to_owned())),
         ] {
             let view = super::workspace_connection::WorkspaceView {
-                ready: true, snapshot: snapshot.clone(), error: error.clone(),
-                paused: error.is_some(), blocked: error.is_some(), ..Default::default()
+                ready: true,
+                snapshot: snapshot.clone(),
+                error: error.clone(),
+                paused: error.is_some(),
+                blocked: error.is_some(),
+                ..Default::default()
             };
             let mut app = super::DesktopApp::default();
             app.initialize_workspace(&view);
@@ -4951,10 +5697,18 @@ mod tests {
         let current = SessionId::new();
         let peer = SessionId::new();
         let mut view = super::daemon_connection::DesktopDaemonView {
-            sessions: Some([old, current, peer].into_iter().map(|id| cshell_ipc::SessionSummary {
-                reconnecting: false,
-                session_id: id.as_uuid().as_bytes().to_vec(), title: format!("{id:?}"), ..Default::default()
-            }).collect()), ..Default::default()
+            sessions: Some(
+                [old, current, peer]
+                    .into_iter()
+                    .map(|id| cshell_ipc::SessionSummary {
+                        reconnecting: false,
+                        session_id: id.as_uuid().as_bytes().to_vec(),
+                        title: format!("{id:?}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
         };
         let mut primary = super::DesktopApp::default();
         primary.sync_opened_sessions(&view);
@@ -4962,20 +5716,48 @@ mod tests {
         let tab = primary.workspace.add(None, "Current".into()).unwrap();
         primary.workspace.sessions.insert(tab, current);
         primary.sync_opened_sessions(&view);
-        assert_eq!(primary.view_model.sessions.iter().map(|entry| entry.id).collect::<Vec<_>>(), vec![current]);
-        let mut child = super::DesktopApp { opened_sessions: primary.opened_sessions.clone(), ..Default::default() };
+        assert_eq!(
+            primary
+                .view_model
+                .sessions
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![current]
+        );
+        let mut child = super::DesktopApp {
+            opened_sessions: primary.opened_sessions.clone(),
+            ..Default::default()
+        };
         view.session_id = Some(peer);
         child.sync_opened_sessions(&view);
         view.session_id = None;
         primary.sync_opened_sessions(&view);
         assert_eq!(primary.view_model.sessions.len(), 2);
-        assert!(!primary.view_model.sessions.iter().any(|entry| entry.id == old));
+        assert!(
+            !primary
+                .view_model
+                .sessions
+                .iter()
+                .any(|entry| entry.id == old)
+        );
         let mut restarted = super::DesktopApp::default();
         restarted.sync_opened_sessions(&view);
-        assert!(restarted.view_model.sessions.is_empty(), "the opened-session scope must never persist across GUI runs");
+        assert!(
+            restarted.view_model.sessions.is_empty(),
+            "the opened-session scope must never persist across GUI runs"
+        );
         view.closed_session = Some(current);
         primary.sync_opened_sessions(&view);
-        assert_eq!(primary.view_model.sessions.iter().map(|entry| entry.id).collect::<Vec<_>>(), vec![peer]);
+        assert_eq!(
+            primary
+                .view_model
+                .sessions
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![peer]
+        );
     }
 
     #[test]
@@ -5229,18 +6011,18 @@ mod tests {
 
     #[test]
     fn closing_terminal_search_releases_widget_focus_and_invalidates_pending_results() {
-        let mut app=super::DesktopApp::default();
-        app.terminal_search_open=true;
-        app.terminal_search_focus_requested=true;
-        app.terminal_search_error=Some("invalid expression".into());
-        let id=egui::Id::new("search-focus-regression");
-        app.egui_context.memory_mut(|m|m.request_focus(id));
-        let revision=app.terminal_search_revision;
+        let mut app = super::DesktopApp::default();
+        app.terminal_search_open = true;
+        app.terminal_search_focus_requested = true;
+        app.terminal_search_error = Some("invalid expression".into());
+        let id = egui::Id::new("search-focus-regression");
+        app.egui_context.memory_mut(|m| m.request_focus(id));
+        let revision = app.terminal_search_revision;
         app.close_terminal_search();
         assert!(!app.terminal_search_open && !app.terminal_search_focus_requested);
-        assert!(app.egui_context.memory(|m|m.focused()).is_none());
+        assert!(app.egui_context.memory(|m| m.focused()).is_none());
         assert!(app.terminal_search_error.is_none());
-        assert!(app.terminal_search_revision>revision);
+        assert!(app.terminal_search_revision > revision);
     }
 
     #[test]

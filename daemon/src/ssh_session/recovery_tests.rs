@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::*;
 use cshell_domain::{SshAuthMethod, SshConnectionOptions, SshConnectionRecord};
 use rand::rng;
@@ -21,7 +22,11 @@ async fn fixture(change_host_key: bool, auto_reconnect: bool) -> Fixture {
     fixture_in(change_host_key, auto_reconnect, directory).await
 }
 
-async fn fixture_in(change_host_key: bool, auto_reconnect: bool, directory: tempfile::TempDir) -> Fixture {
+async fn fixture_in(
+    change_host_key: bool,
+    auto_reconnect: bool,
+    directory: tempfile::TempDir,
+) -> Fixture {
     let key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
     let host_public = key.public_key().to_openssh().unwrap();
     let client_key = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
@@ -188,7 +193,11 @@ async fn unexpected_disconnect_recovers_same_session_without_replaying_input_and
     fixture
         .session
         .commands
-        .try_send(Command::Input(old_epoch, 0, b"stale queued input\n".to_vec()))
+        .try_send(Command::Input(
+            old_epoch,
+            0,
+            b"stale queued input\n".to_vec(),
+        ))
         .unwrap();
     fixture
         .session

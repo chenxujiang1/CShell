@@ -7,6 +7,9 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
+type HighlightStamp = (u64, u64, u64, u64);
+type HighlightCacheValue = (String, Vec<HighlightSpan>, u64);
+
 enum Source {
     Terminal(Arc<FrameSnapshot>),
     Log(Arc<LogPage>),
@@ -36,7 +39,7 @@ struct ResultSet {
 pub struct HighlightWorker {
     sender: Option<mpsc::SyncSender<Work>>,
     results: Arc<Mutex<BTreeMap<(SessionId, bool), ResultSet>>>,
-    requested: BTreeMap<(SessionId, bool), ((u64, u64, u64, u64), u64)>,
+    requested: BTreeMap<(SessionId, bool), (HighlightStamp, u64)>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl std::fmt::Debug for HighlightWorker {
@@ -56,7 +59,7 @@ impl HighlightWorker {
                     SessionId,
                     (u64, Vec<HighlightRule>, CompiledHighlights),
                 > = BTreeMap::new();
-                let mut cache: BTreeMap<(SessionId, bool, u64), (String, Vec<HighlightSpan>, u64)> =
+                let mut cache: BTreeMap<(SessionId, bool, u64), HighlightCacheValue> =
                     BTreeMap::new();
                 let mut order = VecDeque::new();
                 let mut serial = 0u64;
@@ -290,7 +293,8 @@ impl HighlightWorker {
             .take(512)
             .filter_map(|i| frame.page.rows.get(i).cloned())
             .collect::<Vec<_>>();
-        let page = Arc::new(LogPage { first_line_id: 1,
+        let page = Arc::new(LogPage {
+            first_line_id: 1,
             anchor_line_id: rows
                 .first()
                 .map_or(frame.page.anchor_line_id, |r| r.line_id),

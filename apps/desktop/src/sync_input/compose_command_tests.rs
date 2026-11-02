@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 
 #[test]
@@ -36,8 +43,12 @@ fn render_broadcast_preview() {
         model
             .ssh_tab_states
             .insert(tab, cshell_ui::SshConnectionState::Connected);
-        if f.sync.targeted(tab) { model.input_target_tabs.insert(tab, false); }
-        if index == 1 { model.unread_output_tabs.insert(tab); }
+        if f.sync.targeted(tab) {
+            model.input_target_tabs.insert(tab, false);
+        }
+        if index == 1 {
+            model.unread_output_tabs.insert(tab);
+        }
         doc.tab_groups[0].tabs.push(tab);
         doc.bindings.push(WorkspaceBinding {
             tab_id: tab,
@@ -51,13 +62,43 @@ fn render_broadcast_preview() {
     model.workspace_document = Some(doc);
     for (name, picker, reviewing, size) in [
         ("ssh-broadcast", false, false, egui::vec2(900.0, 600.0)),
-        ("ssh-broadcast-targets", true, false, egui::vec2(900.0, 600.0)),
+        (
+            "ssh-broadcast-targets",
+            true,
+            false,
+            egui::vec2(900.0, 600.0),
+        ),
         ("ssh-send-review", false, true, egui::vec2(900.0, 600.0)),
-        ("ssh-send-review-small", false, true, egui::vec2(720.0, 480.0)),
-        ("terminal-paste-review", false, true, egui::vec2(900.0, 600.0)),
-        ("terminal-paste-review-small", false, true, egui::vec2(720.0, 480.0)),
-        ("terminal-context-link", false, false, egui::vec2(900.0, 600.0)),
-        ("terminal-context-path", false, false, egui::vec2(720.0, 480.0)),
+        (
+            "ssh-send-review-small",
+            false,
+            true,
+            egui::vec2(720.0, 480.0),
+        ),
+        (
+            "terminal-paste-review",
+            false,
+            true,
+            egui::vec2(900.0, 600.0),
+        ),
+        (
+            "terminal-paste-review-small",
+            false,
+            true,
+            egui::vec2(720.0, 480.0),
+        ),
+        (
+            "terminal-context-link",
+            false,
+            false,
+            egui::vec2(900.0, 600.0),
+        ),
+        (
+            "terminal-context-path",
+            false,
+            false,
+            egui::vec2(720.0, 480.0),
+        ),
     ] {
         let ctx = crate::ui_layout_gate::context();
         f.sync.pending = None;
@@ -65,29 +106,59 @@ fn render_broadcast_preview() {
         let mut mouse_app = crate::DesktopApp::default();
         if name.starts_with("terminal-context") {
             use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
-            let text = if name.ends_with("link") { "https://example.org/docs" } else { "/var/log/nginx/error.log" };
+            let text = if name.ends_with("link") {
+                "https://example.org/docs"
+            } else {
+                "/var/log/nginx/error.log"
+            };
             let mut engine = AlacrittyTerminalEngine::new(TerminalSize::cells(8, 60));
             engine.feed(text.as_bytes());
             mouse_app.current_workspace_tab = Some(f.tabs[0]);
             mouse_app.egui_context = ctx.clone();
-            mouse_app.terminal_surface.submit_snapshot(Arc::new(engine.snapshot()));
-            mouse_app.begin_clipboard_selection(cshell_render::TerminalCellPoint { row: 0, column: 0 });
-            mouse_app.update_clipboard_selection(cshell_render::TerminalCellPoint { row: 0, column: text.len() as u16 - 1 });
+            mouse_app
+                .terminal_surface
+                .submit_snapshot(Arc::new(engine.snapshot()));
+            mouse_app
+                .begin_clipboard_selection(cshell_render::TerminalCellPoint { row: 0, column: 0 });
+            mouse_app.update_clipboard_selection(cshell_render::TerminalCellPoint {
+                row: 0,
+                column: text.len() as u16 - 1,
+            });
             mouse_app.open_clipboard_menu(egui::pos2(size.x - 10.0, size.y - 10.0));
         }
         f.sync.panel_open = false;
         f.sync.compose.focus_requested = !picker;
         if reviewing {
-            f.sync.pending = None; f.sync.pending_current = None;
+            f.sync.pending = None;
+            f.sync.pending_current = None;
             f.sync.compose.multiline = true;
             f.sync.compose.text.zeroize();
-            f.sync.compose.text.push_str(if size.x < 800.0 { "ls -lah /tmp\nrm -rf /tmp/cshell-demo\ndf -h" } else { "systemctl status nginx\ndf -h\njournalctl -u nginx -n 20" });
+            f.sync.compose.text.push_str(if size.x < 800.0 {
+                "ls -lah /tmp\nrm -rf /tmp/cshell-demo\ndf -h"
+            } else {
+                "systemctl status nginx\ndf -h\njournalctl -u nginx -n 20"
+            });
             f.sync.request_compose_send(f.tabs[0], false);
             if name.starts_with("terminal-paste") {
                 f.sync.pending = None;
-                let text = if size.x < 800.0 { "printf 'hello'\n\tcat /etc/os-release\n" } else { "hostname\npwd\nls -lah /var/log\n" };
-                f.sync.pending_current = Some(f.sync.controller.prepare_current_input(f.tabs[0],
-                    InputAction::Paste { text: text.into(), bracketed: true }, SyncInputContext::TerminalCommit).unwrap());
+                let text = if size.x < 800.0 {
+                    "printf 'hello'\n\tcat /etc/os-release\n"
+                } else {
+                    "hostname\npwd\nls -lah /var/log\n"
+                };
+                f.sync.pending_current = Some(
+                    f.sync
+                        .controller
+                        .prepare_current_input(
+                            f.tabs[0],
+                            InputAction::Paste {
+                                text: text.into(),
+                                bracketed: true,
+                            },
+                            SyncInputContext::TerminalCommit,
+                        )
+                        .unwrap(),
+                );
                 f.sync.compose.review_started = Some(std::time::Instant::now());
             }
         }
@@ -97,14 +168,21 @@ fn render_broadcast_preview() {
         for frame in 0..8 {
             let events = if picker && (frame == 4 || frame == 5) {
                 let pos = scope_pos.expect("scope button position");
-                vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: frame == 4, modifiers: egui::Modifiers::NONE }]
-            } else { vec![] };
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: frame == 4,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]
+            } else {
+                vec![]
+            };
             let mut out = ctx.run_ui(
                 egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        size,
-                    )),
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     time: Some(frame as f64 * 0.25),
                     events,
                     ..Default::default()
@@ -130,10 +208,13 @@ fn render_broadcast_preview() {
                     }
                 },
             );
-            if let Some(tree) = &out.platform_output.accesskit_update {
-                if let Some((_, node)) = tree.nodes.iter().find(|(_, n)| n.label() == Some("自定义 · 2 台")) {
-                    scope_pos = Some(crate::ui_layout_gate::bounds(node).center());
-                }
+            if let Some(tree) = &out.platform_output.accesskit_update
+                && let Some((_, node)) = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some("自定义 · 2 台"))
+            {
+                scope_pos = Some(crate::ui_layout_gate::bounds(node).center());
             }
             for (id, deltas) in out.textures_delta.set.drain() {
                 for delta in deltas {
@@ -157,7 +238,14 @@ fn render_broadcast_preview() {
             "{}/../../artifacts/ui-refresh-20261015/{name}.ppm",
             env!("CARGO_MANIFEST_DIR")
         );
-        super::dock_tests::raster::write(&path, size.x as usize, size.y as usize, primitives, &textures).unwrap();
+        super::dock_tests::raster::write(
+            &path,
+            size.x as usize,
+            size.y as usize,
+            primitives,
+            &textures,
+        )
+        .unwrap();
     }
 }
 use crate::daemon_connection::DesktopDaemonView;
@@ -308,7 +396,13 @@ impl Fixture {
     }
     fn key(&mut self, key: egui::Key) {
         for pressed in [true, false] {
-            self.frame(vec![egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE }]);
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
         }
     }
     fn assert_empty(&mut self) {
@@ -340,8 +434,10 @@ fn inline_scope_ten_commands_history_and_exclusion_need_no_enable_dialog() {
     assert!(f.sync.compose.armed && f.sync.arm_review.is_none() && !f.sync.panel_open);
     for i in 0..10 {
         let body = format!("echo {i}");
-        f.text(&body); f.enter(false);
-        f.take_body(1, &body); f.take_body(2, &body);
+        f.text(&body);
+        f.enter(false);
+        f.take_body(1, &body);
+        f.take_body(2, &body);
         assert!(f.queues[0].try_recv().is_err());
         assert!(f.sync.compose_open(f.window));
     }
@@ -350,88 +446,137 @@ fn inline_scope_ten_commands_history_and_exclusion_need_no_enable_dialog() {
     assert_eq!(f.sync.compose.text.as_str(), "echo 9");
     f.key(egui::Key::ArrowUp);
     assert_eq!(f.sync.compose.text.as_str(), "echo 8");
-    f.enter(false); f.take_body(1, "echo 8"); f.take_body(2, "echo 8");
+    f.enter(false);
+    f.take_body(1, "echo 8");
+    f.take_body(2, "echo 8");
     f.click("自定义 · 2 台");
     f.click("host-2 · 本地");
     f.click("应用 · 1 台");
-    f.text("hostname"); f.enter(false);
+    f.text("hostname");
+    f.enter(false);
     f.take_body(1, "hostname");
     assert!(f.queues[0].try_recv().is_err() && f.queues[2].try_recv().is_err());
 }
 
 #[test]
 fn history_navigation_restores_draft_and_popup_escape_keeps_editor() {
-    let mut f = Fixture::new(3); f.enable();
-    f.text("hostname"); f.enter(false); f.take_body(1, "hostname"); f.take_body(2, "hostname");
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.text("hostname");
+    f.enter(false);
+    f.take_body(1, "hostname");
+    f.take_body(2, "hostname");
     f.text("echo 草稿");
     f.key(egui::Key::ArrowUp);
     assert_eq!(f.sync.compose.text.as_str(), "hostname");
     f.key(egui::Key::ArrowDown);
     assert_eq!(f.sync.compose.text.as_str(), "echo 草稿");
     f.click("历史");
-    f.enter(false); f.assert_empty();
+    f.enter(false);
+    f.assert_empty();
     f.key(egui::Key::Escape);
     f.idle();
     assert!(f.sync.compose_open(f.window));
     assert_eq!(f.sync.compose.text.as_str(), "echo 草稿");
-    f.enter(false); f.take_body(1, "echo 草稿"); f.take_body(2, "echo 草稿");
+    f.enter(false);
+    f.take_body(1, "echo 草稿");
+    f.take_body(2, "echo 草稿");
 }
 
 #[test]
 fn history_search_edits_only_the_popup_and_recalled_command_appends_at_end() {
-    let mut f = Fixture::new(3); f.enable();
-    f.text("hostname"); f.enter(false); f.take_body(1, "hostname"); f.take_body(2, "hostname");
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.text("hostname");
+    f.enter(false);
+    f.take_body(1, "hostname");
+    f.take_body(2, "hostname");
     f.text("echo unfinished");
-    f.click("历史"); f.text("host");
+    f.click("历史");
+    f.text("host");
     assert_eq!(f.sync.compose.text.as_str(), "echo unfinished");
     f.assert_empty();
     f.click("hostname");
     assert_eq!(f.sync.compose.text.as_str(), "hostname");
-    f.text(" -f"); f.enter(false);
-    f.take_body(1, "hostname -f"); f.take_body(2, "hostname -f");
+    f.text(" -f");
+    f.enter(false);
+    f.take_body(1, "hostname -f");
+    f.take_body(2, "hostname -f");
 }
 
 #[test]
 fn pinned_bar_keeps_scope_across_sends_modals_and_terminal_focus() {
-    let mut f = Fixture::new(3); f.enable();
+    let mut f = Fixture::new(3);
+    f.enable();
     for body in ["hostname", "whoami"] {
-        f.text(body); f.enter(false); f.take_body(1, body); f.take_body(2, body);
+        f.text(body);
+        f.enter(false);
+        f.take_body(1, body);
+        f.take_body(2, body);
         f.sync.set_modal_blocked(true);
-        f.sync.request_compose_send(f.tabs[0], false); f.assert_empty();
-        f.sync.set_modal_blocked(false); f.idle();
+        f.sync.request_compose_send(f.tabs[0], false);
+        f.assert_empty();
+        f.sync.set_modal_blocked(false);
+        f.idle();
         assert!(f.sync.compose_open(f.window) && f.sync.compose.armed && f.sync.is_armed());
-        f.sync.compose.focus_requested = true; f.idle();
+        f.sync.compose.focus_requested = true;
+        f.idle();
     }
     assert!(f.sync.focus_terminal());
-    f.ctx.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
+    f.ctx.memory_mut(|m| {
+        if let Some(id) = m.focused() {
+            m.surrender_focus(id);
+        }
+    });
     f.idle();
     assert!(!f.sync.blocks_input());
     assert!(f.sync.compose_open(f.window) && f.sync.compose.armed);
-    f.key(egui::Key::Escape); assert!(f.sync.compose_open(f.window));
-    f.sync.hide_command_bar(); f.idle(); assert!(!f.sync.compose_open(f.window));
+    f.key(egui::Key::Escape);
+    assert!(f.sync.compose_open(f.window));
+    f.sync.hide_command_bar();
+    f.idle();
+    assert!(!f.sync.compose_open(f.window));
 }
 
 #[test]
 fn newly_ready_current_tab_can_join_and_failed_scope_never_falls_back_to_current() {
-    let mut f = Fixture::new(3); f.enable();
-    f.click("自定义 · 2 台"); f.click("加入当前会话");
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.click("自定义 · 2 台");
+    f.click("加入当前会话");
     assert!(f.tabs.iter().all(|tab| f.sync.targeted(*tab)));
-    f.text("hostname"); f.enter(false);
-    for i in 0..3 { f.take_body(i, "hostname"); }
+    f.text("hostname");
+    f.enter(false);
+    for i in 0..3 {
+        f.take_body(i, "hostname");
+    }
     f.sync.disarm(SyncInputDisarmReason::SourceUnavailable);
     f.idle();
     assert!(f.sync.compose_open(f.window) && f.sync.compose.armed);
     let tree = f.frame(vec![]);
-    assert!(tree.nodes.iter().any(|(_,n)| n.label() == Some("目标已暂停")));
-    f.text("whoami"); f.enter(false); f.assert_empty();
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("目标已暂停"))
+    );
+    f.text("whoami");
+    f.enter(false);
+    f.assert_empty();
 }
 
 #[test]
 fn ordinary_new_session_shows_one_bar_without_stealing_terminal_focus() {
-    let mut f = Fixture::new(3); f.sync.panel_open = false; f.idle();
+    let mut f = Fixture::new(3);
+    f.sync.panel_open = false;
+    f.idle();
     assert!(f.sync.compose_open(f.window) && !f.sync.blocks_input());
     let tree = f.frame(vec![]);
-    assert!(!tree.nodes.iter().any(|(_,n)| n.label() == Some("键盘同步…")));
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("键盘同步…"))
+    );
 }
 
 #[test]
@@ -448,9 +593,12 @@ fn application_focus_loss_preserves_draft_without_requesting_command_bar_focus()
 
 #[test]
 fn command_scope_and_draft_survive_focus_but_old_work_and_review_are_revoked() {
-    let mut f = Fixture::new(3); f.enable();
-    f.text("hostname"); f.enter(false);
-    let queued = f.take_body(1, "hostname"); f.take_body(2, "hostname");
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.text("hostname");
+    f.enter(false);
+    let queued = f.take_body(1, "hostname");
+    f.take_body(2, "hostname");
     f.text("echo unfinished");
     f.sync.focus_lost(Some(f.tabs[0]));
     assert!(f.sync.is_armed() && !f.sync.is_realtime());
@@ -458,8 +606,11 @@ fn command_scope_and_draft_survive_focus_but_old_work_and_review_are_revoked() {
     assert!(queued.validate(&f.views[1], f.sessions[1]).is_err());
     f.sync.source_changed(f.tabs[2]);
     assert_eq!(f.sync.compose.text.as_str(), "echo unfinished");
-    assert!(f.sync.targeted(f.tabs[1]) && f.sync.targeted(f.tabs[2]) && !f.sync.targeted(f.tabs[0]));
-    f.sync.compose.text.zeroize(); f.sync.compose.text.push_str("rm -rf /tmp/cshell-test");
+    assert!(
+        f.sync.targeted(f.tabs[1]) && f.sync.targeted(f.tabs[2]) && !f.sync.targeted(f.tabs[0])
+    );
+    f.sync.compose.text.zeroize();
+    f.sync.compose.text.push_str("rm -rf /tmp/cshell-test");
     f.sync.request_compose_send(f.tabs[2], false);
     assert!(f.sync.pending.is_some());
     f.sync.focus_lost(Some(f.tabs[2]));
@@ -468,24 +619,45 @@ fn command_scope_and_draft_survive_focus_but_old_work_and_review_are_revoked() {
 }
 
 #[test]
-fn keyboard_send_respects_the_same_utf8_byte_limit_as_the_button(){
-    let mut f=Fixture::new(3);f.enable();
-    f.sync.compose.text.push_str(&"你".repeat(MAX_QUICK_COMMAND_BODY_BYTES/3+1));
-    f.sync.request_compose_send(f.tabs[0],false);f.assert_empty();
+fn keyboard_send_respects_the_same_utf8_byte_limit_as_the_button() {
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.sync
+        .compose
+        .text
+        .push_str(&"你".repeat(MAX_QUICK_COMMAND_BODY_BYTES / 3 + 1));
+    f.sync.request_compose_send(f.tabs[0], false);
+    f.assert_empty();
     assert!(f.sync.pending.is_none() && f.sync.pending_current.is_none());
-    assert!(f.sync.compose.text.len()>MAX_QUICK_COMMAND_BODY_BYTES);
-    f.sync.compose.text.zeroize();f.sync.compose.text.push_str("whoami");
-    f.sync.request_compose_send(f.tabs[0],false);f.take_body(1,"whoami");f.take_body(2,"whoami");
+    assert!(f.sync.compose.text.len() > MAX_QUICK_COMMAND_BODY_BYTES);
+    f.sync.compose.text.zeroize();
+    f.sync.compose.text.push_str("whoami");
+    f.sync.request_compose_send(f.tabs[0], false);
+    f.take_body(1, "whoami");
+    f.take_body(2, "whoami");
 }
 
 #[test]
-fn target_picker_blocks_background_enter_and_escape_preserves_draft(){
-    let mut f=Fixture::new(3);f.enable();f.text("hostname");
-    f.sync.panel_open=true;f.enter(false);f.assert_empty();
-    assert_eq!(f.sync.compose.text.as_str(),"hostname");
-    f.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers::NONE}]);
+fn target_picker_blocks_background_enter_and_escape_preserves_draft() {
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.text("hostname");
+    f.sync.panel_open = true;
+    f.enter(false);
+    f.assert_empty();
+    assert_eq!(f.sync.compose.text.as_str(), "hostname");
+    f.frame(vec![egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
     assert!(!f.sync.panel_open && f.sync.compose_open(f.window));
-    f.idle();f.enter(false);f.take_body(1,"hostname");f.take_body(2,"hostname");
+    f.idle();
+    f.enter(false);
+    f.take_body(1, "hostname");
+    f.take_body(2, "hostname");
 }
 
 #[test]
@@ -494,7 +666,10 @@ fn current_only_command_does_not_steal_or_expand_the_saved_target_set() {
     f.enable();
     f.click("自定义 · 2 台");
     f.click("当前会话");
-    assert_eq!(f.sync.target_badges(), [(f.tabs[0], false)].into_iter().collect());
+    assert_eq!(
+        f.sync.target_badges(),
+        [(f.tabs[0], false)].into_iter().collect()
+    );
     f.sync.compose.focus_requested = true;
     f.idle();
     f.text("hostname");
@@ -504,7 +679,12 @@ fn current_only_command_does_not_steal_or_expand_the_saved_target_set() {
     assert!(f.sync.is_armed() && f.sync.targeted(f.sync.source.unwrap()));
     f.click("当前会话");
     f.click("使用已选择的目标");
-    assert_eq!(f.sync.target_badges(), [(f.tabs[1], false), (f.tabs[2], false)].into_iter().collect());
+    assert_eq!(
+        f.sync.target_badges(),
+        [(f.tabs[1], false), (f.tabs[2], false)]
+            .into_iter()
+            .collect()
+    );
     f.sync.compose.focus_requested = true;
     f.idle();
     f.text("whoami");
@@ -586,7 +766,12 @@ fn multiline_control_enter_opens_clear_review_and_explicit_send_keeps_editor() {
     f.enter(true);
     assert!(f.sync.pending.as_ref().unwrap().risk().multiline);
     f.assert_empty();
-    assert!(!f.frame(vec![]).nodes.iter().any(|(_,n)| n.label() == Some("我已核对风险，并确认发送")));
+    assert!(
+        !f.frame(vec![])
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("我已核对风险，并确认发送"))
+    );
     f.click("发送到 2 个会话");
     f.take_body(1, "echo one\necho two");
     f.take_body(2, "echo one\necho two");
@@ -595,16 +780,27 @@ fn multiline_control_enter_opens_clear_review_and_explicit_send_keeps_editor() {
 
 #[test]
 fn risky_review_requires_ack_and_back_escape_close_preserve_draft_and_scope() {
-    let mut f = Fixture::new(3); f.enable();
+    let mut f = Fixture::new(3);
+    f.enable();
     let body = "echo check\nrm -rf /tmp/cshell-test";
-    f.sync.compose.multiline = true; f.text(body); f.enter(true); f.assert_empty();
-    f.click("发送到 2 个会话"); f.assert_empty();
+    f.sync.compose.multiline = true;
+    f.text(body);
+    f.enter(true);
+    f.assert_empty();
+    f.click("发送到 2 个会话");
+    f.assert_empty();
     f.click("返回编辑");
     assert_eq!(f.sync.compose.text.as_str(), body);
     assert!(f.sync.compose.armed && f.sync.is_armed() && f.sync.compose_open(f.window));
     for close in [false, true] {
-        f.enter(true); f.assert_empty();
-        if close { f.click("×"); } else { f.key(egui::Key::Escape); f.idle(); }
+        f.enter(true);
+        f.assert_empty();
+        if close {
+            f.click("×");
+        } else {
+            f.key(egui::Key::Escape);
+            f.idle();
+        }
         assert!(f.sync.pending.is_none() && f.sync.pending_current.is_none());
         assert_eq!(f.sync.compose.text.as_str(), body);
         assert!(f.sync.compose.armed && f.sync.is_armed() && f.sync.compose_open(f.window));
@@ -612,31 +808,45 @@ fn risky_review_requires_ack_and_back_escape_close_preserve_draft_and_scope() {
     f.enter(true);
     f.click("我已核对风险，并确认发送");
     f.click("发送到 2 个会话");
-    f.take_body(1, body); f.take_body(2, body); assert!(f.queues[0].try_recv().is_err());
+    f.take_body(1, body);
+    f.take_body(2, body);
+    assert!(f.queues[0].try_recv().is_err());
     assert!(f.sync.compose_open(f.window) && f.sync.compose.text.is_empty());
 }
 
 #[test]
 fn expired_review_disables_send_and_returns_to_the_unmodified_draft() {
-    let mut f = Fixture::new(3); f.enable();
-    f.sync.compose.multiline = true; f.text("echo one\necho two"); f.enter(true);
-    f.sync.compose.review_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
-    f.idle(); f.click("发送到 2 个会话"); f.assert_empty();
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.sync.compose.multiline = true;
+    f.text("echo one\necho two");
+    f.enter(true);
+    f.sync.compose.review_started =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+    f.idle();
+    f.click("发送到 2 个会话");
+    f.assert_empty();
     f.click("返回编辑");
     assert_eq!(f.sync.compose.text.as_str(), "echo one\necho two");
     assert!(f.sync.is_armed() && f.sync.compose.armed);
-    f.enter(true); f.click("发送到 2 个会话");
-    f.take_body(1, "echo one\necho two"); f.take_body(2, "echo one\necho two");
+    f.enter(true);
+    f.click("发送到 2 个会话");
+    f.take_body(1, "echo one\necho two");
+    f.take_body(2, "echo one\necho two");
 }
 
 #[test]
 fn connection_change_during_review_preserves_the_unsent_body() {
-    let mut f = Fixture::new(3); f.enable();
-    f.sync.compose.multiline = true; f.text("echo one\necho two"); f.enter(true);
+    let mut f = Fixture::new(3);
+    f.enable();
+    f.sync.compose.multiline = true;
+    f.text("echo one\necho two");
+    f.enter(true);
     let source = f.sync.source.unwrap();
     let index = f.tabs.iter().position(|tab| *tab == source).unwrap();
     f.views[index].lock().unwrap().session_id = Some(cshell_domain::SessionId::new());
-    f.click("发送到 2 个会话"); f.assert_empty();
+    f.click("发送到 2 个会话");
+    f.assert_empty();
     assert!(f.sync.compose_open(f.window));
     assert_eq!(f.sync.compose.text.as_str(), "echo one\necho two");
     assert!(f.sync.compose.armed && !f.sync.is_armed());

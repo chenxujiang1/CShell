@@ -1,11 +1,26 @@
 use super::*;
 
 impl DesktopApp {
-    pub(super) fn jump_to_command(&mut self,line:u64) {
+    pub(super) fn jump_to_command(&mut self, line: u64) {
         self.scroll_terminal_history(-1);
-        if let Some(surface)=&mut self.log_surface {surface.anchor(line,0);}
-        if let Some(daemon)=&self.daemon {daemon.request_terminal_history_page(cshell_render::LogPageRequest{source_id:cshell_render::LogSourceId(0),follow_tail:false,anchor_line_id:line,cell_offset:0,rows_before:0,rows_after:self.viewport_rows.saturating_add(64)});}
-        self.egui_context.memory_mut(|m|{if let Some(id)=m.focused(){m.surrender_focus(id);}});
+        if let Some(surface) = &mut self.log_surface {
+            surface.anchor(line, 0);
+        }
+        if let Some(daemon) = &self.daemon {
+            daemon.request_terminal_history_page(cshell_render::LogPageRequest {
+                source_id: cshell_render::LogSourceId(0),
+                follow_tail: false,
+                anchor_line_id: line,
+                cell_offset: 0,
+                rows_before: 0,
+                rows_after: self.viewport_rows.saturating_add(64),
+            });
+        }
+        self.egui_context.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
     }
 
     pub(super) fn terminal_wheel_available(&self, scale: f32) -> bool {
@@ -91,13 +106,19 @@ impl DesktopApp {
             daemon.cancel_log_page();
         }
     }
-    pub(super) fn apply_terminal_scroll_navigation(&mut self, live: bool, action: Option<LogScrollbarAction>) {
+    pub(super) fn apply_terminal_scroll_navigation(
+        &mut self,
+        live: bool,
+        action: Option<LogScrollbarAction>,
+    ) {
         if live || action.is_some() {
             self.cancel_history_search_jump();
             // A UI navigation gesture breaks the terminal's multi-click chain.
             self.terminal_click = TerminalClickState::default();
         }
-        if live || (self.terminal_scrollback && matches!(action, Some(LogScrollbarAction::FollowTail))) {
+        if live
+            || (self.terminal_scrollback && matches!(action, Some(LogScrollbarAction::FollowTail)))
+        {
             self.return_to_live_terminal();
         } else if let Some(action) = action {
             // Explicit navigation releases the frozen selection image too.
@@ -105,22 +126,31 @@ impl DesktopApp {
             if let Some(surface) = &mut self.log_surface {
                 match action {
                     LogScrollbarAction::FollowTail => surface.follow_tail(),
-                    LogScrollbarAction::JumpTo(line) => { surface.jump_to_line(line, 0); }
+                    LogScrollbarAction::JumpTo(line) => {
+                        surface.jump_to_line(line, 0);
+                    }
                 }
             }
         }
     }
     pub(super) fn scroll_terminal_history(&mut self, rows: i32) {
-        if rows != 0 { self.cancel_history_search_jump(); self.pause_terminal_reading(); }
-        if rows != 0 { self.terminal_click = TerminalClickState::default(); }
+        if rows != 0 {
+            self.cancel_history_search_jump();
+            self.pause_terminal_reading();
+        }
+        if rows != 0 {
+            self.terminal_click = TerminalClickState::default();
+        }
         let keep = self.terminal_decorations.selection.is_some() && self.start_history_drag();
-        self.scroll_terminal_history_kept(rows,keep);
+        self.scroll_terminal_history_kept(rows, keep);
     }
-    pub(super) fn scroll_terminal_history_kept(&mut self, rows: i32, keep:bool) {
+    pub(super) fn scroll_terminal_history_kept(&mut self, rows: i32, keep: bool) {
         if rows == 0 {
             return;
         }
-        if !keep { self.clear_clipboard_selection(); }
+        if !keep {
+            self.clear_clipboard_selection();
+        }
         if self.log_surface.is_none() {
             let bound = self
                 .current_workspace_tab
@@ -159,8 +189,9 @@ impl DesktopApp {
             if rows > 0
                 && self.terminal_scrollback
                 && matches!(surface.mode(), cshell_render::ScrollMode::FollowTail)
+                && !keep
             {
-                if !keep { self.return_to_live_terminal(); }
+                self.return_to_live_terminal();
             }
         }
     }
@@ -174,25 +205,46 @@ pub(super) fn history_shortcut(
     if event.state != ElementState::Pressed {
         return None;
     }
-    match event.logical_key {
-        ref key => history_key(key, modifiers, active, terminal_clipboard_settings::get().mac_history_shortcuts),
-    }
+    history_key(
+        &event.logical_key,
+        modifiers,
+        active,
+        terminal_clipboard_settings::get().mac_history_shortcuts,
+    )
 }
 
-pub(super) fn history_key(key: &Key, modifiers: ModifiersState, active: bool, mac: bool) -> Option<i32> {
-    if modifiers.alt_key() || modifiers.control_key() { return None; }
+pub(super) fn history_key(
+    key: &Key,
+    modifiers: ModifiersState,
+    active: bool,
+    mac: bool,
+) -> Option<i32> {
+    if modifiers.alt_key() || modifiers.control_key() {
+        return None;
+    }
     match key {
         Key::Named(NamedKey::PageUp) if modifiers.shift_key() && !modifiers.super_key() => Some(-1),
-        Key::Named(NamedKey::PageDown) if modifiers.shift_key() && !modifiers.super_key() => Some(1),
+        Key::Named(NamedKey::PageDown) if modifiers.shift_key() && !modifiers.super_key() => {
+            Some(1)
+        }
         Key::Named(NamedKey::End) if active && modifiers.is_empty() => Some(0),
         Key::Named(NamedKey::ArrowUp) if mac && modifiers == ModifiersState::SUPER => Some(-1),
         Key::Named(NamedKey::ArrowDown) if mac && modifiers == ModifiersState::SUPER => Some(1),
-        Key::Named(NamedKey::ArrowDown) if mac && active && modifiers == (ModifiersState::SUPER | ModifiersState::SHIFT) => Some(0),
+        Key::Named(NamedKey::ArrowDown)
+            if mac && active && modifiers == (ModifiersState::SUPER | ModifiersState::SHIFT) =>
+        {
+            Some(0)
+        }
         _ => None,
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]

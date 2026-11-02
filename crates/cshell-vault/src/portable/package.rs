@@ -69,8 +69,12 @@ impl CredentialPackage {
         let mut seen = std::collections::BTreeSet::new();
         for record in records {
             validate_binding(record.reference, record.binding())?;
-            if matches!(record.reference.kind, VaultCredentialKind::ProfileMode | VaultCredentialKind::ManagedKey | VaultCredentialKind::VaultSettings)
-                || !seen.insert(record.reference)
+            if matches!(
+                record.reference.kind,
+                VaultCredentialKind::ProfileMode
+                    | VaultCredentialKind::ManagedKey
+                    | VaultCredentialKind::VaultSettings
+            ) || !seen.insert(record.reference)
                 || record.secret.expose().is_empty()
                 || record.secret.expose().len() > record.reference.kind.maximum_bytes()
             {

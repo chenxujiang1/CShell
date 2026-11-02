@@ -60,7 +60,10 @@ pub(crate) fn draw(ui: &mut egui::Ui) {
     ui.checkbox(&mut settings.copy_on_select, "选中后自动复制（松开左键时）");
     ui.checkbox(&mut settings.middle_click_paste, "中键粘贴");
     ui.checkbox(&mut settings.right_click_paste, "右键直接粘贴");
-    ui.checkbox(&mut settings.mac_history_shortcuts, "Mac 历史快捷键：⌘↑/↓ 翻页，⌘⇧↓ 返回最新");
+    ui.checkbox(
+        &mut settings.mac_history_shortcuts,
+        "Mac 历史快捷键：⌘↑/↓ 翻页，⌘⇧↓ 返回最新",
+    );
     ui.weak("右键默认打开菜单；启用直接粘贴后，Shift＋右键仍可打开菜单。");
     ui.collapsing("高级选择设置", |ui| {
         ui.checkbox(&mut settings.smart_selection, "双击智能选择完整路径、URL 和 IP 地址");
@@ -116,17 +119,35 @@ fn migrate_word_delimiters(settings: &mut Settings) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
     fn legacy_default_is_migrated_but_custom_boundaries_are_preserved() {
-        let mut legacy = Settings { word_delimiters: "\"'`[]{}()<>|;,=".into(), ..Default::default() };
+        let mut legacy = Settings {
+            word_delimiters: "\"'`[]{}()<>|;,=".into(),
+            ..Default::default()
+        };
         migrate_word_delimiters(&mut legacy);
-        assert_eq!(legacy.word_delimiters, cshell_render::DEFAULT_WORD_DELIMITERS);
-        let mut custom = Settings { word_delimiters: "/:".into(), ..Default::default() };
+        assert_eq!(
+            legacy.word_delimiters,
+            cshell_render::DEFAULT_WORD_DELIMITERS
+        );
+        let mut custom = Settings {
+            word_delimiters: "/:".into(),
+            ..Default::default()
+        };
         migrate_word_delimiters(&mut custom);
         assert_eq!(custom.word_delimiters, "/:");
-        assert!(!serde_json::from_str::<Settings>("{}").unwrap().smart_selection);
+        assert!(
+            !serde_json::from_str::<Settings>("{}")
+                .unwrap()
+                .smart_selection
+        );
     }
     #[test]
     fn missing_preferences_keep_linux_defaults_and_roundtrip() {

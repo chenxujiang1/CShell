@@ -105,7 +105,7 @@ impl Drop for ScriptGrant {
         self.cancel.cancel();
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ScriptRevocation {
     revoked: Arc<AtomicBool>,
     cancel: ScriptCancellation,
@@ -125,6 +125,7 @@ impl std::fmt::Debug for LiveAuthority {
         f.write_str("LiveAuthority(..)")
     }
 }
+#[derive(Debug)]
 pub struct LiveScriptRun(pub(crate) crate::OfflineScriptRun);
 impl LiveScriptRun {
     pub fn authorized(&self) -> bool {

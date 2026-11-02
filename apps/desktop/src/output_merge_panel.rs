@@ -67,9 +67,8 @@ impl OutputMergePanel {
                 ui.label(format!("合流显示 stdout + stderr · 共 {} 条 · 封口 {} / 日志限额截断 {} / 不完整尾部 {} 字节",metadata.total_events,metadata.sealed,metadata.truncated,metadata.partial_tail_bytes));
                 ui.label(format!("stdout 记录覆盖 {} / {} 字节 · stderr {} / {} 字节",metadata.indexed_stdout_bytes,metadata.stdout_bytes,metadata.indexed_stderr_bytes,metadata.stderr_bytes));
                 ui.label("未封口或未覆盖的字节没有时序证据；旧运行没有日志时无法合流。Unknown 仍不明。");
-                if ui.add_enabled(!view.busy&&metadata.next.is_some(),egui::Button::new("下一合流页")).clicked(){
-                    if let Ok(Some(next))=expected.next(metadata)&&connection.read(next.clone(),hash,child){self.expected=Some(next);self.surface=None;self.metadata=None;self.stamp=None;}
-                }
+                if ui.add_enabled(!view.busy&&metadata.next.is_some(),egui::Button::new("下一合流页")).clicked()
+                    && let Ok(Some(next))=expected.next(metadata)&&connection.read(next.clone(),hash,child){self.expected=Some(next);self.surface=None;self.metadata=None;self.stamp=None;}
                 egui::ScrollArea::vertical().id_salt("merge-events").max_height(100.0).show_rows(ui,ui.text_style_height(&egui::TextStyle::Body)+6.0,metadata.events.len(),|ui,range|{
  ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     for event in &metadata.events[range]{if ui.button(format!("#{} {} · {} 字节 · 打开原流",event.sequence,if event.stderr{"stderr"}else{"stdout"},event.bytes)).clicked(){jump=Some((event.stderr,event.stream_offset/65536*65536));}}

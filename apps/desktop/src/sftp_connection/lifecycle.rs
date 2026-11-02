@@ -33,8 +33,17 @@ pub fn connect(
         source_ssh_session: None,
     }
 }
-pub fn connect_shared(profile:cshell_domain::ProfileId,previous:Option<SessionId>,source_ssh_session:Option<SessionId>)->SftpClientCommand {
-    SftpClientCommand::ConnectProfile{session:SessionId::new(),profile,previous,source_ssh_session}
+pub fn connect_shared(
+    profile: cshell_domain::ProfileId,
+    previous: Option<SessionId>,
+    source_ssh_session: Option<SessionId>,
+) -> SftpClientCommand {
+    SftpClientCommand::ConnectProfile {
+        session: SessionId::new(),
+        profile,
+        previous,
+        source_ssh_session,
+    }
 }
 async fn disconnect(config: &DesktopConnectionConfig, session: SessionId) -> Result<(), String> {
     let reply = send(
@@ -141,20 +150,49 @@ pub(super) async fn run(
         Vec::new(),
     );
     query.document_json = serde_json::to_vec(&cshell_application::SftpConnectRequest {
-        profile,source_ssh_session,discover_directory:true,
-    }).unwrap_or_default();
-    let mut cancelled=false;
-    let capture=shared.clone();
-    let result = crate::connection_diagnostics::observe(true,move|trace|{let mut view=capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner);if view.session_id==Some(session){view.connection_trace=Some(trace);view.generation=view.generation.wrapping_add(1);}},send(config, query)).await;
-    if result.is_err(){let mut view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);if view.session_id==Some(session){crate::connection_diagnostics::uncertain(&mut view.connection_trace);}}
-    let result=result.and_then(|reply| {
-        cancelled=reply.status==SftpStatus::Cancelled as i32 || reply.status==SftpStatus::Failed as i32 && reply.detail=="AuthenticationRejected: SSH 验证已取消，连接未建立。";
+        profile,
+        source_ssh_session,
+        discover_directory: true,
+    })
+    .unwrap_or_default();
+    let mut cancelled = false;
+    let capture = shared.clone();
+    let result = crate::connection_diagnostics::observe(
+        true,
+        move |trace| {
+            let mut view = capture
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if view.session_id == Some(session) {
+                view.connection_trace = Some(trace);
+                view.generation = view.generation.wrapping_add(1);
+            }
+        },
+        send(config, query),
+    )
+    .await;
+    if result.is_err() {
+        let mut view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if view.session_id == Some(session) {
+            crate::connection_diagnostics::uncertain(&mut view.connection_trace);
+        }
+    }
+    let result = result.and_then(|reply| {
+        cancelled = reply.status == SftpStatus::Cancelled as i32
+            || reply.status == SftpStatus::Failed as i32
+                && reply.detail == "AuthenticationRejected: SSH 验证已取消，连接未建立。";
         if reply.status != SftpStatus::Ok as i32 {
             return Err(reply.detail);
         }
         let info: cshell_application::SftpConnectionInfo =
             serde_json::from_slice(&reply.document_json).map_err(|_| "SFTP 连接回复无效")?;
-        if info.session != session || info.profile != profile || !info.running || info.shared_from != source_ssh_session {
+        if info.session != session
+            || info.profile != profile
+            || !info.running
+            || info.shared_from != source_ssh_session
+        {
             return Err("SFTP 连接回复与请求不匹配".into());
         }
         Ok(info)
@@ -171,7 +209,16 @@ pub(super) async fn run(
                 view.peer = Some(info.peer.clone());
                 view.connection_info = Some(info);
                 view.error = None;
-                view.status = if view.connection_info.as_ref().is_some_and(|i|i.shared_from.is_some()) {"SFTP 已连接 · 复用 SSH，无需再次认证"} else {"SFTP 已连接 · 独立连接"}.into();
+                view.status = if view
+                    .connection_info
+                    .as_ref()
+                    .is_some_and(|i| i.shared_from.is_some())
+                {
+                    "SFTP 已连接 · 复用 SSH，无需再次认证"
+                } else {
+                    "SFTP 已连接 · 独立连接"
+                }
+                .into();
                 view.generation = view.generation.wrapping_add(1);
                 view.close_requested
             };
@@ -187,7 +234,16 @@ pub(super) async fn run(
                     let close = view.close_requested;
                     if !close {
                         view.connection_phase = ConnectionPhase::Connected;
-                        view.status = if view.connection_info.as_ref().is_some_and(|i|i.shared_from.is_some()) {"SFTP 已连接 · 复用 SSH，无需再次认证"} else {"SFTP 已连接 · 独立连接"}.into();
+                        view.status = if view
+                            .connection_info
+                            .as_ref()
+                            .is_some_and(|i| i.shared_from.is_some())
+                        {
+                            "SFTP 已连接 · 复用 SSH，无需再次认证"
+                        } else {
+                            "SFTP 已连接 · 独立连接"
+                        }
+                        .into();
                         view.generation = view.generation.wrapping_add(1);
                     }
                     close
@@ -198,14 +254,17 @@ pub(super) async fn run(
                 }
             }
         }
-        Err(_) if cancelled=>{
-            closed(shared,session,None);
-            let mut view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if view.session_id==Some(session) {
-                view.connection_cancelled=true;view.status="已取消 SFTP 连接".into();
-                view.generation=view.generation.wrapping_add(1);
+        Err(_) if cancelled => {
+            closed(shared, session, None);
+            let mut view = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if view.session_id == Some(session) {
+                view.connection_cancelled = true;
+                view.status = "已取消 SFTP 连接".into();
+                view.generation = view.generation.wrapping_add(1);
             }
-        },
+        }
         Err(error) => closed(shared, session, Some(error)),
     }
 }
@@ -225,10 +284,18 @@ pub(super) async fn load_browser(
     // Reopening an existing browser must not clear an uncertain mutation; that
     // still requires the user's explicit QueueGet refresh.
     let initial_load = {
-        let view = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         view.session_id == Some(session) && view.queue.is_none() && !view.queue_busy
     };
-    publish_queue(shared, session, send(config, query).await, initial_load, None);
+    publish_queue(
+        shared,
+        session,
+        send(config, query).await,
+        initial_load,
+        None,
+    );
     let epoch = shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -247,17 +314,29 @@ pub(super) async fn load_browser(
         },
     )
     .await;
-    let (shared_local,remote_directory)={
-        let view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        (view.shared_local_browser,view.remote_loaded_directory.clone()
-            .or_else(||view.connection_info.as_ref().and_then(|i|i.initial_directory.clone()))
-            .unwrap_or_else(||"/".into()))
+    let (shared_local, remote_directory) = {
+        let view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            view.shared_local_browser,
+            view.remote_loaded_directory
+                .clone()
+                .or_else(|| {
+                    view.connection_info
+                        .as_ref()
+                        .and_then(|i| i.initial_directory.clone())
+                })
+                .unwrap_or_else(|| "/".into()),
+        )
     };
     for (local, path) in [
         (true, crate::sftp_settings::local_directory()),
         (false, remote_directory),
     ] {
-        if local && shared_local {continue;}
+        if local && shared_local {
+            continue;
+        }
         if let Err(error) = browse_command(
             config,
             shared,
@@ -347,10 +426,29 @@ pub(super) async fn shutdown(config: &DesktopConnectionConfig, shared: &Arc<Mute
             view.connection_previous,
         )
     };
-    let local={let view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);if view.connection_profile.is_none(){view.session_id.zip(view.local_cursor.clone())}else{None}};
+    let local = {
+        let view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if view.connection_profile.is_none() {
+            view.session_id.zip(view.local_cursor.clone())
+        } else {
+            None
+        }
+    };
     let cleanup = async {
-        if let Some((session,cursor))=local {
-            let _=send(config,SftpRequest{operation:SftpOperation::BrowseClose as i32,session_id:session.as_uuid().as_bytes().to_vec(),transfer_id:cursor.id,expected_revision:cursor.revision,..Default::default()}).await;
+        if let Some((session, cursor)) = local {
+            let _ = send(
+                config,
+                SftpRequest {
+                    operation: SftpOperation::BrowseClose as i32,
+                    session_id: session.as_uuid().as_bytes().to_vec(),
+                    transfer_id: cursor.id,
+                    expected_revision: cursor.revision,
+                    ..Default::default()
+                },
+            )
+            .await;
         }
         if let Some(previous) = previous {
             let _ = disconnect(config, previous).await;

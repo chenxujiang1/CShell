@@ -56,8 +56,8 @@ impl std::fmt::Debug for ResolvedDesktopEndpoint {
 
 #[derive(Clone, Debug, Default)]
 pub struct DesktopDaemonView {
-    pub(crate) connection_trace:Option<crate::connection_diagnostics::View>,
-    pub(crate) connection_attempt:u64,
+    pub(crate) connection_trace: Option<crate::connection_diagnostics::View>,
+    pub(crate) connection_attempt: u64,
     pub(crate) input_epoch: ConnectionId,
     pub(crate) input_security: DesktopInputSecurity,
     pub(crate) compose_supported: bool,
@@ -103,7 +103,6 @@ pub(crate) enum DesktopSessionAction {
     OpenLocal(ProfileId, Arc<cshell_ipc::LocalLaunchOptions>),
     OpenContext(ProfileId, Arc<cshell_application::TerminalResolutionReport>),
     CloseView(SessionId, bool),
-    NewShell(ProfileId),
     Attach(SessionId),
     Idle,
     NewDefault,
@@ -116,7 +115,6 @@ impl std::fmt::Debug for DesktopSessionAction {
             Self::DuplicateSshChannel(..) => "DuplicateSshChannel",
             Self::OpenLocal(..) => "OpenLocal([REDACTED])",
             Self::OpenContext(..) => "OpenContext([REDACTED])",
-            Self::NewShell(_) => "NewShell",
             Self::Attach(_) => "Attach",
             Self::CloseView(..) => "CloseView",
             Self::Idle => "Idle",
@@ -345,13 +343,20 @@ impl DesktopConnectionConfig {
 
 impl DesktopDaemonConnection {
     #[cfg(test)]
-    pub(crate) fn for_view_test(view:DesktopDaemonView)->Self {
-        let shared=Arc::new(Mutex::new(view));
-        Self{input:DesktopInputSender::new(shared.clone(),tokio::sync::mpsc::channel(1).0),shared,
-            shutdown:tokio::sync::watch::channel(false).0,log_requests:tokio::sync::watch::channel(None).0,
-            history_search_requests:tokio::sync::watch::channel(None).0,resize_requests:tokio::sync::watch::channel(None).0,
-            open_requests:tokio::sync::watch::channel(None).0,worker:None}
+    pub(crate) fn for_view_test(view: DesktopDaemonView) -> Self {
+        let shared = Arc::new(Mutex::new(view));
+        Self {
+            input: DesktopInputSender::new(shared.clone(), tokio::sync::mpsc::channel(1).0),
+            shared,
+            shutdown: tokio::sync::watch::channel(false).0,
+            log_requests: tokio::sync::watch::channel(None).0,
+            history_search_requests: tokio::sync::watch::channel(None).0,
+            resize_requests: tokio::sync::watch::channel(None).0,
+            open_requests: tokio::sync::watch::channel(None).0,
+            worker: None,
+        }
     }
+    #[cfg(test)]
     pub fn start(config: DesktopConnectionConfig) -> Result<Self, DesktopConnectionError> {
         Self::start_mode(config, false)
     }
@@ -445,13 +450,33 @@ impl DesktopDaemonConnection {
         }
     }
 
-    pub(crate) fn duplicate_ssh_channel(&self, source:SessionId, profile:Option<ProfileId>) -> bool {
-        let mut view=self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() || view.session_opening {return false;}
-        let sent=self.open_requests.send(Some(DesktopSessionAction::DuplicateSshChannel(source,profile))).is_ok();
+    pub(crate) fn duplicate_ssh_channel(
+        &self,
+        source: SessionId,
+        profile: Option<ProfileId>,
+    ) -> bool {
+        let mut view = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if view.close_pending.is_some() || view.session_opening {
+            return false;
+        }
+        let sent = self
+            .open_requests
+            .send(Some(DesktopSessionAction::DuplicateSshChannel(
+                source, profile,
+            )))
+            .is_ok();
         if sent {
-            view.invalidate_input(); view.session_opening=true; view.session_reconnecting=false;
-            view.session_profile_id=profile; view.closed_session=None; view.launch_error=None; view.launch_cancelled=false; view.snapshot=None;
+            view.invalidate_input();
+            view.session_opening = true;
+            view.session_reconnecting = false;
+            view.session_profile_id = profile;
+            view.closed_session = None;
+            view.launch_error = None;
+            view.launch_cancelled = false;
+            view.snapshot = None;
         }
         sent
     }
@@ -478,12 +503,15 @@ impl DesktopDaemonConnection {
         self.open_profile_action(id, DesktopSessionAction::OpenLocal(id, Arc::new(options)))
     }
 
+    #[cfg(test)]
     pub fn close_session_view(&self, id: SessionId) -> bool {
         let mut view = self
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
+        if view.close_pending.is_some() {
+            return false;
+        }
         let sent = self
             .open_requests
             .send(Some(DesktopSessionAction::CloseView(id, false)))
@@ -492,7 +520,9 @@ impl DesktopDaemonConnection {
             view.close_pending = Some(id);
             view.close_error = None;
             view.closed_session = None;
-            if view.session_id == Some(id) { view.invalidate_input(); }
+            if view.session_id == Some(id) {
+                view.invalidate_input();
+            }
         }
         sent
     }
@@ -502,7 +532,9 @@ impl DesktopDaemonConnection {
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
+        if view.close_pending.is_some() {
+            return false;
+        }
         let sent = self
             .open_requests
             .send(Some(DesktopSessionAction::NewDefault))
@@ -510,7 +542,8 @@ impl DesktopDaemonConnection {
         if sent {
             view.invalidate_input();
             view.session_opening = true;
-            view.connection_attempt=view.connection_attempt.wrapping_add(1);view.connection_trace=None;
+            view.connection_attempt = view.connection_attempt.wrapping_add(1);
+            view.connection_trace = None;
             view.session_reconnecting = false;
             view.session_profile_id = None;
             view.closed_session = None;
@@ -525,7 +558,9 @@ impl DesktopDaemonConnection {
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
+        if view.close_pending.is_some() {
+            return false;
+        }
         let sent = self
             .open_requests
             .send(Some(DesktopSessionAction::Idle))
@@ -543,21 +578,30 @@ impl DesktopDaemonConnection {
         if !view.connected {
             return false;
         }
-        view.session_id.is_some_and(|id| if terminate {
-            self.terminate_confirmed_session(id)
-        } else {
-            self.close_session_view(id)
+        view.session_id.is_some_and(|id| {
+            if terminate {
+                self.terminate_confirmed_session(id)
+            } else {
+                self.close_session_view(id)
+            }
         })
     }
 
+    #[cfg(test)]
     pub fn terminate_confirmed_session(&self, id: SessionId) -> bool {
         let view = self
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
+        if view.close_pending.is_some() {
+            return false;
+        }
         if view.session_id != Some(id)
-            && !view.sessions.as_ref().is_some_and(|sessions| sessions.iter().any(|session| session.session_id == id.as_uuid().as_bytes()))
+            && !view.sessions.as_ref().is_some_and(|sessions| {
+                sessions
+                    .iter()
+                    .any(|session| session.session_id == id.as_uuid().as_bytes())
+            })
         {
             return false;
         }
@@ -568,8 +612,13 @@ impl DesktopDaemonConnection {
     /// The caller captured this exact ID from its workspace or session list.
     /// This also works before a replacement metadata connection's first list.
     pub(crate) fn terminate_observed_session(&self, id: SessionId) -> bool {
-        let mut view = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
+        let mut view = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if view.close_pending.is_some() {
+            return false;
+        }
         let sent = self
             .open_requests
             .send(Some(DesktopSessionAction::CloseView(id, true)))
@@ -578,7 +627,9 @@ impl DesktopDaemonConnection {
             view.close_pending = Some(id);
             view.close_error = None;
             view.closed_session = None;
-            if view.session_id == Some(id) { view.invalidate_input(); }
+            if view.session_id == Some(id) {
+                view.invalidate_input();
+            }
         }
         sent
     }
@@ -588,7 +639,9 @@ impl DesktopDaemonConnection {
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
+        if view.close_pending.is_some() {
+            return false;
+        }
         let sent = self.open_requests.send(Some(action)).is_ok();
         if sent {
             view.launch_error = None;
@@ -596,7 +649,8 @@ impl DesktopDaemonConnection {
             view.closed_session = None;
             view.session_profile_id = Some(id);
             view.session_opening = true;
-            view.connection_attempt=view.connection_attempt.wrapping_add(1);view.connection_trace=None;
+            view.connection_attempt = view.connection_attempt.wrapping_add(1);
+            view.connection_trace = None;
             view.session_reconnecting = false;
             view.terminal_detail.clear();
             view.invalidate_input();
@@ -606,42 +660,14 @@ impl DesktopDaemonConnection {
         sent
     }
 
-    pub fn reconnect_new_shell(&self) -> bool {
-        let mut view = self
-            .shared
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
-        let Some(id) = view
-            .session_profile_id
-            .filter(|_| !view.connected && !view.session_opening)
-        else {
-            return false;
-        };
-        let sent = self
-            .open_requests
-            .send(Some(DesktopSessionAction::NewShell(id)))
-            .is_ok();
-        if sent {
-            view.invalidate_input();
-            view.launch_error = None;
-            view.launch_cancelled = false;
-            view.closed_session = None;
-            view.detail = "Opening a New Shell; the previous process is not restored".into();
-            view.session_opening = true;
-            view.connection_attempt=view.connection_attempt.wrapping_add(1);view.connection_trace=None;
-            view.session_reconnecting = false;
-            view.terminal_detail.clear();
-        }
-        sent
-    }
-
     pub fn attach_session(&self, id: SessionId) -> bool {
         let mut view = self
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.close_pending.is_some() { return false; }
+        if view.close_pending.is_some() {
+            return false;
+        }
         let sent = self
             .open_requests
             .send(Some(DesktopSessionAction::Attach(id)))
@@ -654,24 +680,36 @@ impl DesktopDaemonConnection {
             view.snapshot = None;
             view.detail = "switching terminal session".into();
             view.session_opening = true;
-            view.connection_attempt=view.connection_attempt.wrapping_add(1);view.connection_trace=None;
+            view.connection_attempt = view.connection_attempt.wrapping_add(1);
+            view.connection_trace = None;
             view.session_reconnecting = false;
         }
         sent
     }
 
-    pub fn request_log_page(&self, request: RenderLogPageRequest) -> bool {self.request_page(request,false)}
-    pub fn request_terminal_history_page(&self, request:RenderLogPageRequest)->bool {self.request_page(request,true)}
+    pub fn request_log_page(&self, request: RenderLogPageRequest) -> bool {
+        self.request_page(request, false)
+    }
+    pub fn request_terminal_history_page(&self, request: RenderLogPageRequest) -> bool {
+        self.request_page(request, true)
+    }
     pub fn cancel_log_page(&self) {
-        let mut view = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut view = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         view.log_page_epoch = view.log_page_epoch.wrapping_add(1);
         view.log_page = None;
         view.log_page_terminal_history = false;
         drop(view);
         self.log_requests.send_replace(None);
     }
-    fn request_page(&self, request:RenderLogPageRequest, terminal_history:bool)->bool {
-        let epoch = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).log_page_epoch;
+    fn request_page(&self, request: RenderLogPageRequest, terminal_history: bool) -> bool {
+        let epoch = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .log_page_epoch;
         let request = DesktopLogPageRequest {
             epoch,
             terminal_history,
@@ -739,7 +777,8 @@ impl DesktopDaemonConnection {
             return false;
         }
         let cols = cols.min(cshell_terminal::MAX_TERMINAL_COLUMNS);
-        let rows = rows.min(cshell_terminal::MAX_TERMINAL_ROWS)
+        let rows = rows
+            .min(cshell_terminal::MAX_TERMINAL_ROWS)
             .min((cshell_terminal::MAX_TERMINAL_CELLS / usize::from(cols)) as u16);
         self.resize_requests.send_if_modified(|current| {
             if current.is_some_and(|size| {
@@ -822,17 +861,25 @@ async fn reconnect_loop(
         if matches!(requested_action, Some(DesktopSessionAction::CloseView(..)))
             && !matches!(result, Err(DesktopConnectionError::ViewClosed))
         {
-            let mut view = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut view = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             view.close_pending = None;
-            view.close_error = Some(format!("未能确认会话已关闭：{}。请核对会话列表后重试。",
-                result.as_ref().err().map_or_else(|| "后台连接已结束".into(), ToString::to_string)));
+            view.close_error = Some(format!(
+                "未能确认会话已关闭：{}。请核对会话列表后重试。",
+                result
+                    .as_ref()
+                    .err()
+                    .map_or_else(|| "后台连接已结束".into(), ToString::to_string)
+            ));
             let resume = view.session_id.filter(|current| !matches!(
                 requested_action, Some(DesktopSessionAction::CloseView(target, _)) if *current == target
             ));
             drop(view);
             // Restore an unrelated terminal, never replay an uncertain close.
             // Attaching verifies that the process still exists without creating one.
-            pending_action = Some(resume.map_or(DesktopSessionAction::Idle, DesktopSessionAction::Attach));
+            pending_action =
+                Some(resume.map_or(DesktopSessionAction::Idle, DesktopSessionAction::Attach));
             continue;
         }
         if let Err(DesktopConnectionError::SwitchSession(action)) = &result {
@@ -845,10 +892,12 @@ async fn reconnect_loop(
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .launch_error = Some(message.clone());
         }
-        if matches!(&result,Err(DesktopConnectionError::LaunchCancelled)) {
-            let mut view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            view.launch_cancelled=true;
-            view.launch_error=None;
+        if matches!(&result, Err(DesktopConnectionError::LaunchCancelled)) {
+            let mut view = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            view.launch_cancelled = true;
+            view.launch_error = None;
         }
         if matches!(requested_action, Some(DesktopSessionAction::Idle)) {
             pending_action = requested_action.clone();
@@ -971,11 +1020,18 @@ async fn connect_once(
     requests: DesktopRequestReceivers<'_>,
 ) -> Result<(), DesktopConnectionError> {
     while requests.input.try_recv().is_ok() {}
-    let diagnostic_epoch=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).connection_attempt;
+    let diagnostic_epoch = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .connection_attempt;
     let resolved = config.resolve()?;
-    let mut stream = tokio::time::timeout(Duration::from_secs(5), transport::connect(&resolved.endpoint))
-        .await.map_err(|_| DesktopConnectionError::IpcSetupTimeout)?
-        .map_err(DesktopConnectionError::Connect)?;
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        transport::connect(&resolved.endpoint),
+    )
+    .await
+    .map_err(|_| DesktopConnectionError::IpcSetupTimeout)?
+    .map_err(DesktopConnectionError::Connect)?;
 
     let mut handshake = Handshake::new(
         resolved.daemon_instance_id.to_vec(),
@@ -992,8 +1048,12 @@ async fn connect_once(
         | features::LOCAL_LAUNCH_OPTIONS
         | features::TERMINAL_CONTEXT_LAUNCH
         | features::COMPOSE_INPUT;
-    let negotiated = tokio::time::timeout(Duration::from_secs(5), client_handshake(&mut stream, 1, handshake))
-        .await.map_err(|_| DesktopConnectionError::IpcSetupTimeout)??;
+    let negotiated = tokio::time::timeout(
+        Duration::from_secs(5),
+        client_handshake(&mut stream, 1, handshake),
+    )
+    .await
+    .map_err(|_| DesktopConnectionError::IpcSetupTimeout)??;
     shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1070,17 +1130,29 @@ async fn connect_once(
             // Confirm absence before closing, so explicit reconnect can recover
             // without treating an already-gone session as an uncertain close.
             if *terminate {
-                write_envelope(&mut stream, &Envelope {
-                    request_id,
-                    payload: Some(envelope::Payload::SessionListRequest(cshell_ipc::SessionListRequest {})),
-                    ..Default::default()
-                }).await?;
+                write_envelope(
+                    &mut stream,
+                    &Envelope {
+                        request_id,
+                        payload: Some(envelope::Payload::SessionListRequest(
+                            cshell_ipc::SessionListRequest {},
+                        )),
+                        ..Default::default()
+                    },
+                )
+                .await?;
                 let response = read_envelope(&mut stream).await?;
-                if response.request_id != request_id { return Err(DesktopConnectionError::UnexpectedControlResponse); }
+                if response.request_id != request_id {
+                    return Err(DesktopConnectionError::UnexpectedControlResponse);
+                }
                 let Some(envelope::Payload::SessionListResponse(list)) = response.payload else {
                     return Err(DesktopConnectionError::UnexpectedControlResponse);
                 };
-                if !list.sessions.iter().any(|session| session.session_id == session_id.as_uuid().as_bytes()) {
+                if !list
+                    .sessions
+                    .iter()
+                    .any(|session| session.session_id == session_id.as_uuid().as_bytes())
+                {
                     return Ok(list.sessions);
                 }
                 request_id += 1;
@@ -1132,7 +1204,11 @@ async fn connect_once(
         .map_err(|_| DesktopConnectionError::SessionCloseUncertain)?
         .map_err(|_| DesktopConnectionError::SessionCloseUncertain);
         let sessions = closed?;
-        if *terminate && sessions.iter().any(|session| session.session_id == session_id.as_uuid().as_bytes()) {
+        if *terminate
+            && sessions
+                .iter()
+                .any(|session| session.session_id == session_id.as_uuid().as_bytes())
+        {
             return Err(DesktopConnectionError::SessionCloseUncertain);
         }
         let mut view = shared
@@ -1142,7 +1218,7 @@ async fn connect_once(
         view.session_profile_id = None;
         view.session_title = None;
         view.session_running = false;
-            view.session_reconnecting = false;
+        view.session_reconnecting = false;
         view.session_opening = false;
         view.invalidate_input();
         view.snapshot = None;
@@ -1159,9 +1235,7 @@ async fn connect_once(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .session_id;
     let launch = match requested_action.as_ref() {
-        Some(DesktopSessionAction::OpenProfile(id) | DesktopSessionAction::NewShell(id)) => {
-            Some((*id, None, None))
-        }
+        Some(DesktopSessionAction::OpenProfile(id)) => Some((*id, None, None)),
         Some(DesktopSessionAction::OpenLocal(id, options)) => {
             Some((*id, Some(options.as_ref().clone()), None))
         }
@@ -1180,37 +1254,59 @@ async fn connect_once(
             return Err(DesktopConnectionError::ProfileSessionNotNegotiated);
         }
         let size = *requests.resize.borrow();
-        let trace_enabled=negotiated.protocol_minor>=77;
-        let creation = async { if let Some(report) = context {
-            if negotiated.feature_bits & features::TERMINAL_CONTEXT_LAUNCH == 0 {
-                return Err(DesktopConnectionError::ProfileSessionNotNegotiated);
+        let trace_enabled = negotiated.protocol_minor >= 77;
+        let creation = async {
+            if let Some(report) = context {
+                if negotiated.feature_bits & features::TERMINAL_CONTEXT_LAUNCH == 0 {
+                    return Err(DesktopConnectionError::ProfileSessionNotNegotiated);
+                }
+                create_terminal_context_session(
+                    &mut stream,
+                    &mut request_id,
+                    &report,
+                    size.map_or(24, |value| u32::from(value.rows)),
+                    size.map_or(80, |value| u32::from(value.cols)),
+                )
+                .await
+            } else {
+                create_saved_profile_session(
+                    &mut stream,
+                    &mut request_id,
+                    profile_id,
+                    size.map_or(24, |value| u32::from(value.rows)),
+                    size.map_or(80, |value| u32::from(value.cols)),
+                    options,
+                )
+                .await
             }
-            create_terminal_context_session(
-                &mut stream,
-                &mut request_id,
-                &report,
-                size.map_or(24, |value| u32::from(value.rows)),
-                size.map_or(80, |value| u32::from(value.cols)),
-            )
-            .await
-        } else {
-            create_saved_profile_session(
-                &mut stream,
-                &mut request_id,
-                profile_id,
-                size.map_or(24, |value| u32::from(value.rows)),
-                size.map_or(80, |value| u32::from(value.cols)),
-                options,
-            )
-            .await
-        }};
-        let capture=shared.clone();
-        let creation=crate::connection_diagnostics::observe(trace_enabled,move|trace|{let mut view=capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner);if view.connection_attempt==diagnostic_epoch{view.connection_trace=Some(trace);}},creation);
-        let created=tokio::select! {biased;_=shutdown.changed()=>return Ok(()), result=creation=>result};
-        if created.is_err(){let mut view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);if view.connection_attempt==diagnostic_epoch{crate::connection_diagnostics::uncertain(&mut view.connection_trace);}}
-        let created=created
-        .map_err(|error| match error {
-            DesktopConnectionError::ProfileLaunch(_) | DesktopConnectionError::LaunchCancelled => error,
+        };
+        let capture = shared.clone();
+        let creation = crate::connection_diagnostics::observe(
+            trace_enabled,
+            move |trace| {
+                let mut view = capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if view.connection_attempt == diagnostic_epoch {
+                    view.connection_trace = Some(trace);
+                }
+            },
+            creation,
+        );
+        let created =
+            tokio::select! {biased;_=shutdown.changed()=>return Ok(()), result=creation=>result};
+        if created.is_err() {
+            let mut view = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if view.connection_attempt == diagnostic_epoch {
+                crate::connection_diagnostics::uncertain(&mut view.connection_trace);
+            }
+        }
+        let created = created.map_err(|error| match error {
+            DesktopConnectionError::ProfileLaunch(_) | DesktopConnectionError::LaunchCancelled => {
+                error
+            }
             _ => DesktopConnectionError::SessionCreationUncertain,
         })?;
         shared
@@ -1218,21 +1314,54 @@ async fn connect_once(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .launch_error = None;
         created
-    } else if let Some(DesktopSessionAction::DuplicateSshChannel(source, profile)) = requested_action.as_ref() {
-        if negotiated.protocol_minor < 63 || negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0 {
-            return Err(DesktopConnectionError::ProfileLaunch("后台需要更新后才能复制 SSH 渠道".into()));
+    } else if let Some(DesktopSessionAction::DuplicateSshChannel(source, profile)) =
+        requested_action.as_ref()
+    {
+        if negotiated.protocol_minor < 63
+            || negotiated.feature_bits & features::SSH_PROFILE_SESSION == 0
+        {
+            return Err(DesktopConnectionError::ProfileLaunch(
+                "后台需要更新后才能复制 SSH 渠道".into(),
+            ));
         }
-        let size=*requests.resize.borrow();
-        let capture=shared.clone();
-        let result=crate::connection_diagnostics::observe(negotiated.protocol_minor>=77,move|trace|{let mut view=capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner);if view.connection_attempt==diagnostic_epoch{view.connection_trace=Some(trace);}},create_ssh_channel_session(&mut stream,&mut request_id,*source,*profile,size.unwrap_or(TerminalSize::cells(24,80)))).await;
-        if result.is_err(){let mut view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);if view.connection_attempt==diagnostic_epoch{crate::connection_diagnostics::uncertain(&mut view.connection_trace);}}result?
+        let size = *requests.resize.borrow();
+        let capture = shared.clone();
+        let result = crate::connection_diagnostics::observe(
+            negotiated.protocol_minor >= 77,
+            move |trace| {
+                let mut view = capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if view.connection_attempt == diagnostic_epoch {
+                    view.connection_trace = Some(trace);
+                }
+            },
+            create_ssh_channel_session(
+                &mut stream,
+                &mut request_id,
+                *source,
+                *profile,
+                size.unwrap_or(TerminalSize::cells(24, 80)),
+            ),
+        )
+        .await;
+        if result.is_err() {
+            let mut view = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if view.connection_attempt == diagnostic_epoch {
+                crate::connection_diagnostics::uncertain(&mut view.connection_trace);
+            }
+        }
+        result?
     } else if matches!(requested_action, Some(DesktopSessionAction::NewDefault)) {
         write_envelope(
             &mut stream,
             &Envelope {
                 request_id,
                 payload: Some(envelope::Payload::SessionCreateRequest(
-                    cshell_ipc::SessionCreateRequest {connection_diagnostics:false,
+                    cshell_ipc::SessionCreateRequest {
+                        connection_diagnostics: false,
                         source_ssh_session_id: None,
                         rows: 24,
                         cols: 80,
@@ -1295,7 +1424,6 @@ async fn connect_once(
     }
     if let Some(
         DesktopSessionAction::OpenProfile(id)
-        | DesktopSessionAction::NewShell(id)
         | DesktopSessionAction::OpenLocal(id, _)
         | DesktopSessionAction::OpenContext(id, _),
     ) = requested_action.as_ref()
@@ -1304,18 +1432,13 @@ async fn connect_once(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         view.session_profile_id = Some(*id);
-        if matches!(requested_action, Some(DesktopSessionAction::NewShell(_))) {
-            view.session_title = view
-                .session_title
-                .as_ref()
-                .map(|title| format!("{title} · New Shell"));
-            view.terminal_detail = "New Shell opened; the previous process is not restored".into();
-        }
     }
     if let Some(DesktopSessionAction::DuplicateSshChannel(_, profile)) = requested_action.as_ref() {
-        let mut view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        view.session_profile_id=*profile;
-        view.terminal_detail="已在原 SSH 连接打开独立渠道，无需再次认证".into();
+        let mut view = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        view.session_profile_id = *profile;
+        view.terminal_detail = "已在原 SSH 连接打开独立渠道，无需再次认证".into();
     }
     let mut replica = TerminalSubscriptionReplica::new(session_id);
     write_snapshot_request(&mut stream, request_id, replica.snapshot_request()).await?;
@@ -1464,7 +1587,7 @@ where
                 request_id: id,
                 payload: Some(envelope::Payload::TerminalContextLaunchRequest(
                     cshell_ipc::TerminalContextLaunchRequest {
-                        connection_diagnostics:crate::connection_diagnostics::requested(),
+                        connection_diagnostics: crate::connection_diagnostics::requested(),
                         report_json: bytes,
                         rows,
                         cols,
@@ -1475,7 +1598,7 @@ where
             },
         )
         .await?;
-        let response = crate::connection_diagnostics::read_response(stream,id).await?;
+        let response = crate::connection_diagnostics::read_response(stream, id).await?;
         if response.request_id != id {
             return Err(DesktopConnectionError::UnexpectedControlResponse);
         }
@@ -1493,7 +1616,7 @@ where
             if !response.report_json.is_empty() {
                 return Err(DesktopConnectionError::UnexpectedControlResponse);
             }
-            return Err(profile_creation_failure(result.failure_code,result.detail));
+            return Err(profile_creation_failure(result.failure_code, result.detail));
         };
         if result.failure_code != SessionFailureCode::None as i32
             || !result.detail.is_empty()
@@ -1526,25 +1649,73 @@ where
     outcome
 }
 
-async fn create_ssh_channel_session<S>(stream:&mut S,request_id:&mut u64,source:SessionId,profile:Option<ProfileId>,size:TerminalSize)->Result<(SessionId,String),DesktopConnectionError>
-where S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin {
-    let id=*request_id;
-    let result=tokio::time::timeout(Duration::from_secs(30),async {
-        write_envelope(stream,&Envelope {request_id:id,payload:Some(envelope::Payload::SessionCreateRequest(cshell_ipc::SessionCreateRequest {
-            connection_diagnostics:crate::connection_diagnostics::requested(),rows:u32::from(size.rows),cols:u32::from(size.cols),source_ssh_session_id:Some(source.as_uuid().as_bytes().to_vec()),..Default::default()
-        })),..Default::default()}).await?;
-        let reply=crate::connection_diagnostics::read_response(stream,id).await?;
-        if reply.request_id!=id {return Err(DesktopConnectionError::UnexpectedControlResponse);}
-        let Some(envelope::Payload::SessionCreateResponse(created))=reply.payload else {return Err(DesktopConnectionError::UnexpectedControlResponse);};
-        let Some(session)=created.session else {return Err(profile_creation_failure(created.failure_code,created.detail));};
-        if created.failure_code!=SessionFailureCode::None as i32 || !created.detail.is_empty() || !session.can_duplicate_ssh_channel || session.profile_id!=profile.map(|p|p.as_uuid().as_bytes().to_vec()) {return Err(DesktopConnectionError::UnexpectedControlResponse);}
-        let bytes:[u8;16]=session.session_id.as_slice().try_into().map_err(|_|DesktopConnectionError::InvalidSessionId)?;
-        let session_id=SessionId::from_bytes(bytes);
-        if session_id.as_uuid().is_nil() || session_id==source {return Err(DesktopConnectionError::UnexpectedControlResponse);}
-        Ok((session_id,session.title))
-    }).await.map_err(|_|DesktopConnectionError::SessionCreationUncertain)?;
-    *request_id=id.saturating_add(1);
-    result.map_err(|error|match error {DesktopConnectionError::ProfileLaunch(_)|DesktopConnectionError::LaunchCancelled=>error,_=>DesktopConnectionError::SessionCreationUncertain})
+async fn create_ssh_channel_session<S>(
+    stream: &mut S,
+    request_id: &mut u64,
+    source: SessionId,
+    profile: Option<ProfileId>,
+    size: TerminalSize,
+) -> Result<(SessionId, String), DesktopConnectionError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let id = *request_id;
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        write_envelope(
+            stream,
+            &Envelope {
+                request_id: id,
+                payload: Some(envelope::Payload::SessionCreateRequest(
+                    cshell_ipc::SessionCreateRequest {
+                        connection_diagnostics: crate::connection_diagnostics::requested(),
+                        rows: u32::from(size.rows),
+                        cols: u32::from(size.cols),
+                        source_ssh_session_id: Some(source.as_uuid().as_bytes().to_vec()),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let reply = crate::connection_diagnostics::read_response(stream, id).await?;
+        if reply.request_id != id {
+            return Err(DesktopConnectionError::UnexpectedControlResponse);
+        }
+        let Some(envelope::Payload::SessionCreateResponse(created)) = reply.payload else {
+            return Err(DesktopConnectionError::UnexpectedControlResponse);
+        };
+        let Some(session) = created.session else {
+            return Err(profile_creation_failure(
+                created.failure_code,
+                created.detail,
+            ));
+        };
+        if created.failure_code != SessionFailureCode::None as i32
+            || !created.detail.is_empty()
+            || !session.can_duplicate_ssh_channel
+            || session.profile_id != profile.map(|p| p.as_uuid().as_bytes().to_vec())
+        {
+            return Err(DesktopConnectionError::UnexpectedControlResponse);
+        }
+        let bytes: [u8; 16] = session
+            .session_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| DesktopConnectionError::InvalidSessionId)?;
+        let session_id = SessionId::from_bytes(bytes);
+        if session_id.as_uuid().is_nil() || session_id == source {
+            return Err(DesktopConnectionError::UnexpectedControlResponse);
+        }
+        Ok((session_id, session.title))
+    })
+    .await
+    .map_err(|_| DesktopConnectionError::SessionCreationUncertain)?;
+    *request_id = id.saturating_add(1);
+    result.map_err(|error| match error {
+        DesktopConnectionError::ProfileLaunch(_) | DesktopConnectionError::LaunchCancelled => error,
+        _ => DesktopConnectionError::SessionCreationUncertain,
+    })
 }
 
 async fn create_saved_profile_session<S>(
@@ -1565,7 +1736,8 @@ where
             request_id: id,
             deadline_unix_ms: 0,
             payload: Some(envelope::Payload::SessionCreateRequest(
-                cshell_ipc::SessionCreateRequest {connection_diagnostics:crate::connection_diagnostics::requested(),
+                cshell_ipc::SessionCreateRequest {
+                    connection_diagnostics: crate::connection_diagnostics::requested(),
                     source_ssh_session_id: None,
                     local_launch,
                     rows,
@@ -1576,7 +1748,7 @@ where
         },
     )
     .await?;
-    let response = crate::connection_diagnostics::read_response(stream,id).await?;
+    let response = crate::connection_diagnostics::read_response(stream, id).await?;
     *request_id = id.saturating_add(1);
     if response.request_id != id {
         return Err(DesktopConnectionError::UnexpectedControlResponse);
@@ -1584,7 +1756,9 @@ where
     let Some(envelope::Payload::SessionCreateResponse(created)) = response.payload else {
         return Err(DesktopConnectionError::UnexpectedControlResponse);
     };
-    let session = created.session.ok_or_else(|| profile_creation_failure(created.failure_code,created.detail))?;
+    let session = created
+        .session
+        .ok_or_else(|| profile_creation_failure(created.failure_code, created.detail))?;
     let bytes: [u8; 16] = session
         .session_id
         .as_slice()
@@ -1593,13 +1767,20 @@ where
     Ok((SessionId::from_bytes(bytes), session.title))
 }
 
-fn profile_creation_failure(code:i32,detail:String)->DesktopConnectionError {
-    let code=SessionFailureCode::try_from(code).unwrap_or(SessionFailureCode::ProtocolRejected);
+fn profile_creation_failure(code: i32, detail: String) -> DesktopConnectionError {
+    let code = SessionFailureCode::try_from(code).unwrap_or(SessionFailureCode::ProtocolRejected);
     // Exact compatibility with pre-66 daemons; never infer cancellation from arbitrary peer text.
-    if code==SessionFailureCode::AuthenticationCancelled || code==SessionFailureCode::AuthenticationRejected && detail=="SSH 验证已取消，连接未建立。" {
+    if code == SessionFailureCode::AuthenticationCancelled
+        || code == SessionFailureCode::AuthenticationRejected
+            && detail == "SSH 验证已取消，连接未建立。"
+    {
         DesktopConnectionError::LaunchCancelled
     } else {
-        DesktopConnectionError::ProfileLaunch(if detail.is_empty(){"daemon did not return a session".into()}else{format!("{code:?}: {detail}")})
+        DesktopConnectionError::ProfileLaunch(if detail.is_empty() {
+            "daemon did not return a session".into()
+        } else {
+            format!("{code:?}: {detail}")
+        })
     }
 }
 async fn discover_or_create_session<S>(
@@ -1666,7 +1847,8 @@ where
                     request_id: create_request_id,
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateRequest(
-                        cshell_ipc::SessionCreateRequest {connection_diagnostics:false,
+                        cshell_ipc::SessionCreateRequest {
+                            connection_diagnostics: false,
                             source_ssh_session_id: None,
                             local_launch: None,
                             rows: 24,
@@ -1945,7 +2127,10 @@ async fn log_page_loop(
         .unwrap_or_else(DesktopLogPageRequest::initial_tail);
     let mut request_id = 2_u64;
     loop {
-        if desired.terminal_history && negotiated.feature_bits & features::TERMINAL_SCROLLBACK==0 {return Err(DesktopConnectionError::LogPagingNotNegotiated);}
+        if desired.terminal_history && negotiated.feature_bits & features::TERMINAL_SCROLLBACK == 0
+        {
+            return Err(DesktopConnectionError::LogPagingNotNegotiated);
+        }
         write_log_page_request(&mut stream, request_id, session_id, desired).await?;
         let mut response = tokio::select! {
             response = read_envelope(&mut stream) => response?,
@@ -1966,7 +2151,12 @@ async fn log_page_loop(
         // A cancelled view may already have been reopened at the tail. Never
         // publish an old anchored response into that new scrollback view.
         if requests.borrow().as_ref() == Some(&desired) {
-            update_log_page(shared, convert_log_page(page, *delivery_revision)?, desired.terminal_history, desired.epoch);
+            update_log_page(
+                shared,
+                convert_log_page(page, *delivery_revision)?,
+                desired.terminal_history,
+                desired.epoch,
+            );
         }
         request_id = request_id.saturating_add(1);
 
@@ -2000,7 +2190,9 @@ async fn log_page_loop(
         }
         if let Some(latest) = requests.borrow_and_update().as_ref().copied() {
             desired = latest;
-        } else { return Ok(()); }
+        } else {
+            return Ok(());
+        }
     }
 }
 
@@ -2180,7 +2372,7 @@ fn convert_log_page(
                 })
                 .collect::<Result<Vec<_>, DesktopConnectionError>>()?;
             Ok(RenderLogRow {
-            soft_wrap: row.soft_wrap,
+                soft_wrap: row.soft_wrap,
                 line_id: row.line_id,
                 text: Arc::from(row.text),
                 style_spans: style_spans.into(),
@@ -2238,8 +2430,15 @@ fn update_view(
     }
 }
 
-fn update_log_page(shared: &Arc<Mutex<DesktopDaemonView>>, page: Arc<RenderLogPage>, terminal_history: bool, epoch: u64) {
-    let mut view = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+fn update_log_page(
+    shared: &Arc<Mutex<DesktopDaemonView>>,
+    page: Arc<RenderLogPage>,
+    terminal_history: bool,
+    epoch: u64,
+) {
+    let mut view = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if view.log_page_epoch == epoch {
         view.log_page = Some(page);
         view.log_page_terminal_history = terminal_history;
@@ -2371,52 +2570,137 @@ fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     #[test]
     fn explicit_authentication_cancel_is_not_a_launch_error_but_rejection_and_timeout_are() {
         use super::*;
-        for (code,detail) in [(SessionFailureCode::AuthenticationCancelled,"cancelled"),(SessionFailureCode::AuthenticationRejected,"SSH 验证已取消，连接未建立。")] {
-            assert!(matches!(profile_creation_failure(code as i32,detail.into()),DesktopConnectionError::LaunchCancelled));
+        for (code, detail) in [
+            (SessionFailureCode::AuthenticationCancelled, "cancelled"),
+            (
+                SessionFailureCode::AuthenticationRejected,
+                "SSH 验证已取消，连接未建立。",
+            ),
+        ] {
+            assert!(matches!(
+                profile_creation_failure(code as i32, detail.into()),
+                DesktopConnectionError::LaunchCancelled
+            ));
         }
-        for detail in ["wrong password","SSH 验证输入已超时，请重新连接后填写新的验证码。","peer text contains cancelled"] {
-            assert!(matches!(profile_creation_failure(SessionFailureCode::AuthenticationRejected as i32,detail.into()),DesktopConnectionError::ProfileLaunch(_)));
+        for detail in [
+            "wrong password",
+            "SSH 验证输入已超时，请重新连接后填写新的验证码。",
+            "peer text contains cancelled",
+        ] {
+            assert!(matches!(
+                profile_creation_failure(
+                    SessionFailureCode::AuthenticationRejected as i32,
+                    detail.into()
+                ),
+                DesktopConnectionError::ProfileLaunch(_)
+            ));
         }
     }
-    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_profile_worker_stops_without_replay_or_default_shell() {
-        let _root=tempfile::tempdir().unwrap();
-        #[cfg(windows)] let endpoint=format!(r"\\.\pipe\cshell-cancel-profile-{}",SessionId::new());
-        #[cfg(unix)] let endpoint=_root.path().join("cancel.sock");
-        let listener=transport::LocalListener::bind(&endpoint).unwrap();
-        let config=DesktopConnectionConfig::for_fixture(ResolvedDesktopEndpoint{endpoint,instance_token:[91;32],daemon_instance_id:[92;16]});
-        let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));let created=calls.clone();
-        let (stop,mut stopped)=tokio::sync::watch::channel(false);
-        let server=tokio::spawn(async move {
-            let mut connections=tokio::task::JoinSet::new();
+        let _root = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let endpoint = format!(r"\\.\pipe\cshell-cancel-profile-{}", SessionId::new());
+        #[cfg(unix)]
+        let endpoint = _root.path().join("cancel.sock");
+        let listener = transport::LocalListener::bind(&endpoint).unwrap();
+        let config = DesktopConnectionConfig::for_fixture(ResolvedDesktopEndpoint {
+            endpoint,
+            instance_token: [91; 32],
+            daemon_instance_id: [92; 16],
+        });
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let created = calls.clone();
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let mut stream=tokio::select!{stream=listener.accept()=>stream.unwrap(),_=stopped.changed()=>break};let created=created.clone();
+                let mut stream = tokio::select! {stream=listener.accept()=>stream.unwrap(),_=stopped.changed()=>break};
+                let created = created.clone();
                 connections.spawn(async move {
-                    if server_handshake(&mut stream,&HandshakePolicy::with_instance_id([91;32],[92;16],u64::MAX)).await.is_err(){return;}
-                    while let Ok(query)=read_envelope(&mut stream).await {
-                        let payload=match query.payload {
-                            Some(envelope::Payload::SessionListRequest(_))=>envelope::Payload::SessionListResponse(SessionListResponse{sessions:vec![]}),
-                            Some(envelope::Payload::SessionCreateRequest(request))=>{
-                                assert!(request.profile_id.is_some(),"cancel must not create a local fallback");created.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-                                envelope::Payload::SessionCreateResponse(SessionCreateResponse{session:None,failure_code:cshell_ipc::SessionFailureCode::AuthenticationCancelled as i32,detail:"cancelled by user".into()})
-                            },
-                            _=>panic!("unexpected control request"),
+                    if server_handshake(
+                        &mut stream,
+                        &HandshakePolicy::with_instance_id([91; 32], [92; 16], u64::MAX),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                    while let Ok(query) = read_envelope(&mut stream).await {
+                        let payload = match query.payload {
+                            Some(envelope::Payload::SessionListRequest(_)) => {
+                                envelope::Payload::SessionListResponse(SessionListResponse {
+                                    sessions: vec![],
+                                })
+                            }
+                            Some(envelope::Payload::SessionCreateRequest(request)) => {
+                                assert!(
+                                    request.profile_id.is_some(),
+                                    "cancel must not create a local fallback"
+                                );
+                                created.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                envelope::Payload::SessionCreateResponse(SessionCreateResponse {
+                                    session: None,
+                                    failure_code:
+                                        cshell_ipc::SessionFailureCode::AuthenticationCancelled
+                                            as i32,
+                                    detail: "cancelled by user".into(),
+                                })
+                            }
+                            _ => panic!("unexpected control request"),
                         };
-                        if write_envelope(&mut stream,&Envelope{request_id:query.request_id,payload:Some(payload),..Default::default()}).await.is_err(){return;}
+                        if write_envelope(
+                            &mut stream,
+                            &Envelope {
+                                request_id: query.request_id,
+                                payload: Some(payload),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
                     }
                 });
             }
-            connections.abort_all();while connections.join_next().await.is_some(){}
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
         });
-        let connection=DesktopDaemonConnection::start_idle(config).unwrap();let profile=ProfileId::new();assert!(connection.open_profile(profile));
-        tokio::time::timeout(Duration::from_secs(10),async {loop {if connection.view().launch_cancelled && !connection.view().session_opening {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
-        let view=connection.view();assert_eq!(view.session_profile_id,Some(profile));assert!(view.session_id.is_none());assert!(view.launch_error.is_none());assert!(!view.connected);
-        tokio::time::sleep(Duration::from_millis(350)).await;assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),1);
-        drop(connection);let _=stop.send(true);server.await.unwrap();
+        let connection = DesktopDaemonConnection::start_idle(config).unwrap();
+        let profile = ProfileId::new();
+        assert!(connection.open_profile(profile));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if connection.view().launch_cancelled && !connection.view().session_opening {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let view = connection.view();
+        assert_eq!(view.session_profile_id, Some(profile));
+        assert!(view.session_id.is_none());
+        assert!(view.launch_error.is_none());
+        assert!(!view.connected);
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(connection);
+        let _ = stop.send(true);
+        server.await.unwrap();
     }
     use super::{
         DesktopConnectionConfig, DesktopDaemonConnection, DesktopEndpointSource,
@@ -2445,10 +2729,14 @@ mod tests {
         let active = SessionId::new();
         let retained = SessionId::new();
         let shared = Arc::new(Mutex::new(super::DesktopDaemonView {
-            session_id: Some(active), connected: true,
+            session_id: Some(active),
+            connected: true,
             sessions: Some(vec![SessionSummary {
                 can_duplicate_ssh_channel: false,
-                reconnecting: false, session_id: retained.as_uuid().as_bytes().to_vec(), ..Default::default() }]),
+                reconnecting: false,
+                session_id: retained.as_uuid().as_bytes().to_vec(),
+                ..Default::default()
+            }]),
             ..Default::default()
         }));
         let epoch = shared.lock().unwrap().input_epoch;
@@ -2461,15 +2749,25 @@ mod tests {
             log_requests: tokio::sync::watch::channel(None).0,
             history_search_requests: tokio::sync::watch::channel(None).0,
             resize_requests: tokio::sync::watch::channel(None).0,
-            open_requests, worker: None,
+            open_requests,
+            worker: None,
         };
         assert!(!connection.terminate_confirmed_session(SessionId::new()));
         assert!(!requests.has_changed().unwrap());
         assert!(connection.terminate_confirmed_session(retained));
-        assert!(!connection.attach_session(active), "an attach must not overwrite a queued termination");
-        assert!(!connection.new_default_shell(), "a new shell must not overwrite a queued termination");
+        assert!(
+            !connection.attach_session(active),
+            "an attach must not overwrite a queued termination"
+        );
+        assert!(
+            !connection.new_default_shell(),
+            "a new shell must not overwrite a queued termination"
+        );
         assert!(!connection.close_session_view(active));
-        assert_eq!(*requests.borrow_and_update(), Some(super::DesktopSessionAction::CloseView(retained, true)));
+        assert_eq!(
+            *requests.borrow_and_update(),
+            Some(super::DesktopSessionAction::CloseView(retained, true))
+        );
         assert_eq!(connection.view().session_id, Some(active));
         assert_eq!(connection.view().input_epoch, epoch);
     }
@@ -2483,8 +2781,12 @@ mod tests {
             ..Default::default()
         }));
         let connection = DesktopDaemonConnection {
-            input: crate::daemon_input::DesktopInputSender::new(shared.clone(), tokio::sync::mpsc::channel(1).0),
-            shared, shutdown: tokio::sync::watch::channel(false).0,
+            input: crate::daemon_input::DesktopInputSender::new(
+                shared.clone(),
+                tokio::sync::mpsc::channel(1).0,
+            ),
+            shared,
+            shutdown: tokio::sync::watch::channel(false).0,
             log_requests: tokio::sync::watch::channel(None).0,
             history_search_requests: tokio::sync::watch::channel(None).0,
             resize_requests: tokio::sync::watch::channel(None).0,
@@ -2492,14 +2794,20 @@ mod tests {
             worker: None,
         };
         let mut app = crate::DesktopApp::default();
-        let tab = app.workspace.add(Some(profile), "Saved SSH".into()).unwrap();
+        let tab = app
+            .workspace
+            .add(Some(profile), "Saved SSH".into())
+            .unwrap();
         app.current_workspace_tab = Some(tab);
         app.daemon = Some(connection);
         let before = app.workspace.document.clone();
         assert!(app.prepare_profile_tab(profile));
         assert_eq!(app.workspace.pending_launch, Some(tab));
         assert_eq!(app.current_workspace_tab, Some(tab));
-        assert_eq!(app.workspace.document, before, "retry must not create another placeholder");
+        assert_eq!(
+            app.workspace.document, before,
+            "retry must not create another placeholder"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2516,43 +2824,88 @@ mod tests {
             let instance = [0x38; 16];
             let server = tokio::spawn(async move {
                 let mut stream = listener.accept().await.unwrap();
-                server_handshake(&mut stream, &HandshakePolicy::with_instance_id(token, instance, features::TERMINAL_CONTROL)).await.unwrap();
+                server_handshake(
+                    &mut stream,
+                    &HandshakePolicy::with_instance_id(token, instance, features::TERMINAL_CONTROL),
+                )
+                .await
+                .unwrap();
                 for _ in 0..2 {
                     let request = read_envelope(&mut stream).await.unwrap();
-                    assert!(matches!(request.payload, Some(envelope::Payload::SessionListRequest(_))), "startup must not create or attach any terminal");
-                    write_envelope(&mut stream, &Envelope {
-                        request_id: request.request_id,
-                        payload: Some(envelope::Payload::SessionListResponse(SessionListResponse {
-                            sessions: vec![SessionSummary {
-                                can_duplicate_ssh_channel: false,
-                                reconnecting: false, session_id: live.as_uuid().as_bytes().to_vec(), title: "Retained session".into(), running: true, ..Default::default() }],
-                        })), ..Default::default()
-                    }).await.unwrap();
+                    assert!(
+                        matches!(
+                            request.payload,
+                            Some(envelope::Payload::SessionListRequest(_))
+                        ),
+                        "startup must not create or attach any terminal"
+                    );
+                    write_envelope(
+                        &mut stream,
+                        &Envelope {
+                            request_id: request.request_id,
+                            payload: Some(envelope::Payload::SessionListResponse(
+                                SessionListResponse {
+                                    sessions: vec![SessionSummary {
+                                        can_duplicate_ssh_channel: false,
+                                        reconnecting: false,
+                                        session_id: live.as_uuid().as_bytes().to_vec(),
+                                        title: "Retained session".into(),
+                                        running: true,
+                                        ..Default::default()
+                                    }],
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
                 }
             });
             let mut old = crate::workspace_model::DesktopWorkspace::default();
-            old.add(Some(ProfileId::new()), "Previous SSH".into()).unwrap();
-            let snapshot = restore_exists.then_some(cshell_application::WorkspaceSnapshot { revision: 9, document: old.document });
+            old.add(Some(ProfileId::new()), "Previous SSH".into())
+                .unwrap();
+            let snapshot = restore_exists.then_some(cshell_application::WorkspaceSnapshot {
+                revision: 9,
+                document: old.document,
+            });
             let mut app = crate::DesktopApp::default();
             app.workspace_config = Some(DesktopConnectionConfig {
-                source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint { endpoint, instance_token: token, daemon_instance_id: instance }),
+                source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
+                    endpoint,
+                    instance_token: token,
+                    daemon_instance_id: instance,
+                }),
                 // Even an inherited old target must not be attached at startup.
-                session_id: Some(live), request_log_pages: false,
+                session_id: Some(live),
+                request_log_pages: false,
             });
-            app.initialize_workspace(&crate::workspace_connection::WorkspaceView { ready: true, snapshot, ..Default::default() });
+            app.initialize_workspace(&crate::workspace_connection::WorkspaceView {
+                ready: true,
+                snapshot,
+                ..Default::default()
+            });
             tokio::time::timeout(Duration::from_secs(5), async {
                 while app.daemon.as_ref().unwrap().view().sessions.is_none() {
                     app.sync_workspace();
                     app.poll_primary_terminal(std::time::Instant::now());
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(app.workspace.document.bindings.is_empty());
             assert!(app.view_model.tabs.is_empty());
-            assert!(app.view_model.sessions.is_empty(), "previous-run sessions must not appear in the opened list");
+            assert!(
+                app.view_model.sessions.is_empty(),
+                "previous-run sessions must not appear in the opened list"
+            );
             assert!(app.current_workspace_tab.is_none());
             assert!(app.daemon.as_ref().unwrap().view().session_id.is_none());
-            tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
             drop(app);
         }
     }
@@ -2566,8 +2919,10 @@ mod tests {
         let summary = |id: SessionId| SessionSummary {
             can_duplicate_ssh_channel: false,
             reconnecting: false,
-            session_id: id.as_uuid().as_bytes().to_vec(), title: "Test session".into(),
-            running: true, ..Default::default()
+            session_id: id.as_uuid().as_bytes().to_vec(),
+            title: "Test session".into(),
+            running: true,
+            ..Default::default()
         };
         let sessions = Arc::new(Mutex::new(vec![summary(first), summary(retained)]));
         let server_sessions = sessions.clone();
@@ -2616,8 +2971,13 @@ mod tests {
             }
         });
         let config = DesktopConnectionConfig {
-            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint { endpoint, instance_token: token, daemon_instance_id: instance }),
-            session_id: None, request_log_pages: false,
+            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
+                endpoint,
+                instance_token: token,
+                daemon_instance_id: instance,
+            }),
+            session_id: None,
+            request_log_pages: false,
         };
         let mut app = crate::DesktopApp::default();
         app.workspace_loaded = true;
@@ -2637,11 +2997,21 @@ mod tests {
                 app.sync_workspace();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(app.current_workspace_tab.is_none());
         assert!(app.workspace.document.bindings.is_empty());
-        assert!(app.daemon.is_some(), "last-tab cleanup must retain metadata access");
-        assert!(app.view_model.sessions.iter().any(|session| session.id == retained));
+        assert!(
+            app.daemon.is_some(),
+            "last-tab cleanup must retain metadata access"
+        );
+        assert!(
+            app.view_model
+                .sessions
+                .iter()
+                .any(|session| session.id == retained)
+        );
         // Reproduce a previous version's missing connection with no open tabs.
         app.daemon.take().unwrap().retire();
         app.view_model.terminate_target = Some(retained);
@@ -2654,19 +3024,34 @@ mod tests {
                 app.sync_workspace();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(!app.view_model.confirm_terminate);
         assert!(app.view_model.sessions.is_empty());
         // The empty window must keep polling after a manual removal, too.
         sessions.lock().unwrap().push(summary(later));
         app.opened_sessions.lock().unwrap().insert(later);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !app.view_model.sessions.iter().any(|session| session.id == later) {
+            while !app
+                .view_model
+                .sessions
+                .iter()
+                .any(|session| session.id == later)
+            {
                 app.sync_workspace();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
-        assert_eq!(*closed.lock().unwrap(), vec![first.as_uuid().as_bytes().to_vec(), retained.as_uuid().as_bytes().to_vec()]);
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *closed.lock().unwrap(),
+            vec![
+                first.as_uuid().as_bytes().to_vec(),
+                retained.as_uuid().as_bytes().to_vec()
+            ]
+        );
         drop(app);
         server.abort();
     }
@@ -2689,8 +3074,14 @@ mod tests {
         let creates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = creates.clone();
         let server = tokio::spawn(async move {
-            let policy = HandshakePolicy::with_instance_id(token, instance,
-                features::TERMINAL_CONTROL | features::FULL_FRAME_RECOVERY | features::SSH_PROFILE_SESSION | features::LOCAL_PROFILE);
+            let policy = HandshakePolicy::with_instance_id(
+                token,
+                instance,
+                features::TERMINAL_CONTROL
+                    | features::FULL_FRAME_RECOVERY
+                    | features::SSH_PROFILE_SESSION
+                    | features::LOCAL_PROFILE,
+            );
             let mut initial = listener.accept().await.unwrap();
             accepted.send(()).unwrap();
             released.await.unwrap();
@@ -2704,36 +3095,72 @@ mod tests {
                 reconnecting: false,
                 session_id: session.as_uuid().as_bytes().to_vec(),
                 profile_id: Some(profile.as_uuid().as_bytes().to_vec()),
-                title: "One-click SSH".into(), running: true, ..Default::default()
+                title: "One-click SSH".into(),
+                running: true,
+                ..Default::default()
             };
             let mut terminal = ProbeTerminalEngine::new(TerminalSize::cells(24, 80));
             terminal.feed(b"ONE_CLICK_CONNECTED");
             while let Ok(request) = read_envelope(&mut stream).await {
                 let payload = match request.payload {
                     Some(envelope::Payload::SessionCreateRequest(create)) => {
-                        assert_eq!(create.profile_id.as_deref(), Some(profile.as_uuid().as_bytes().as_slice()));
+                        assert_eq!(
+                            create.profile_id.as_deref(),
+                            Some(profile.as_uuid().as_bytes().as_slice())
+                        );
                         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         envelope::Payload::SessionCreateResponse(SessionCreateResponse {
-                            session: Some(summary.clone()), ..Default::default()
+                            session: Some(summary.clone()),
+                            ..Default::default()
                         })
                     }
-                    Some(envelope::Payload::SessionListRequest(_)) => envelope::Payload::SessionListResponse(SessionListResponse { sessions: vec![summary.clone()] }),
-                    Some(envelope::Payload::SnapshotRequest(_)) => envelope::Payload::FullFrame(cshell_ipc::FullFrame::from_terminal_snapshot(session, &terminal.snapshot())),
+                    Some(envelope::Payload::SessionListRequest(_)) => {
+                        envelope::Payload::SessionListResponse(SessionListResponse {
+                            sessions: vec![summary.clone()],
+                        })
+                    }
+                    Some(envelope::Payload::SnapshotRequest(_)) => {
+                        envelope::Payload::FullFrame(cshell_ipc::FullFrame::from_terminal_snapshot(
+                            session,
+                            &terminal.snapshot(),
+                        ))
+                    }
                     other => panic!("unexpected request: {other:?}"),
                 };
-                if write_envelope(&mut stream, &Envelope {
-                    request_id: request.request_id, payload: Some(payload), ..Default::default()
-                }).await.is_err() { break; }
+                if write_envelope(
+                    &mut stream,
+                    &Envelope {
+                        request_id: request.request_id,
+                        payload: Some(payload),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
             }
         });
         let config = DesktopConnectionConfig {
-            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint { endpoint, instance_token: token, daemon_instance_id: instance }),
-            session_id: None, request_log_pages: false,
+            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
+                endpoint,
+                instance_token: token,
+                daemon_instance_id: instance,
+            }),
+            session_id: None,
+            request_log_pages: false,
         };
         let connection = DesktopDaemonConnection::start_idle(config.clone()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), accepted_rx).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
         let mut app = crate::DesktopApp::default();
-        let tab = app.workspace.add(Some(profile), "Saved SSH".into()).unwrap();
+        let tab = app
+            .workspace
+            .add(Some(profile), "Saved SSH".into())
+            .unwrap();
         app.current_workspace_tab = Some(tab);
         app.workspace.pending_launch = Some(tab);
         app.workspace_loaded = true;
@@ -2747,13 +3174,18 @@ mod tests {
                 app.sync_workspace();
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(app.current_workspace_tab, Some(tab));
         assert_eq!(app.workspace.document.bindings.len(), 1);
         assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(app.daemon.as_ref().unwrap().view().connected);
         drop(app);
-        tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -2776,109 +3208,224 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn explicit_termination_removes_retained_and_current_real_sessions() {
         let directory = tempfile::tempdir().unwrap();
-        let registry = Arc::new(LocalSessionRegistry::new(directory.path().join("journals"), 32).unwrap());
-        let active = registry.spawn_local(&interactive_profile(), TerminalSize::cells(24, 80)).unwrap().session_id();
-        let retained = registry.spawn_local(&interactive_profile(), TerminalSize::cells(24, 80)).unwrap().session_id();
+        let registry =
+            Arc::new(LocalSessionRegistry::new(directory.path().join("journals"), 32).unwrap());
+        let active = registry
+            .spawn_local(&interactive_profile(), TerminalSize::cells(24, 80))
+            .unwrap()
+            .session_id();
+        let retained = registry
+            .spawn_local(&interactive_profile(), TerminalSize::cells(24, 80))
+            .unwrap()
+            .session_id();
         #[cfg(windows)]
-        let endpoint = format!(r"\\.\pipe\cshell-close-test-{}-{active}", std::process::id());
+        let endpoint = format!(
+            r"\\.\pipe\cshell-close-test-{}-{active}",
+            std::process::id()
+        );
         #[cfg(unix)]
         let endpoint = directory.path().join("close-test.sock");
         let listener = transport::LocalListener::bind(&endpoint).unwrap();
         let token = [0x71; 32];
         let instance = [0x42; 16];
-        let server = Arc::new(SessionIpcServer::new(listener,
-            HandshakePolicy::with_instance_id(token, instance,
-                features::FULL_FRAME_RECOVERY | features::PRIORITY_STREAMS
-                    | features::TERMINAL_CONTROL | features::SSH_SESSION_STATUS | features::LOCAL_LAUNCH_OPTIONS),
-            SessionIpcService::new(Arc::clone(&registry))));
+        let server = Arc::new(SessionIpcServer::new(
+            listener,
+            HandshakePolicy::with_instance_id(
+                token,
+                instance,
+                features::FULL_FRAME_RECOVERY
+                    | features::PRIORITY_STREAMS
+                    | features::TERMINAL_CONTROL
+                    | features::SSH_SESSION_STATUS
+                    | features::LOCAL_LAUNCH_OPTIONS,
+            ),
+            SessionIpcService::new(Arc::clone(&registry)),
+        ));
         let (shutdown, receiver) = tokio::sync::watch::channel(false);
         let server_task = tokio::spawn(async move { server.run_until(receiver).await });
         let config = DesktopConnectionConfig {
-            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint { endpoint, instance_token: token, daemon_instance_id: instance }),
-            session_id: Some(active), request_log_pages: false,
+            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
+                endpoint,
+                instance_token: token,
+                daemon_instance_id: instance,
+            }),
+            session_id: Some(active),
+            request_log_pages: false,
         };
         let connection = DesktopDaemonConnection::start(config.clone()).unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        while !connection.view().connected || !connection.view().sessions.as_ref().is_some_and(|sessions| sessions.iter().any(|s| s.session_id == retained.as_uuid().as_bytes())) {
-            assert!(tokio::time::Instant::now() < deadline, "session setup failed: {}", connection.view().detail);
+        while !connection.view().connected
+            || !connection.view().sessions.as_ref().is_some_and(|sessions| {
+                sessions
+                    .iter()
+                    .any(|s| s.session_id == retained.as_uuid().as_bytes())
+            })
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session setup failed: {}",
+                connection.view().detail
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(connection.terminate_confirmed_session(retained));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         while connection.view().closed_session != Some(retained) {
-            assert!(tokio::time::Instant::now() < deadline, "retained termination did not complete: {}", connection.view().detail);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "retained termination did not complete: {}",
+                connection.view().detail
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(registry.list().unwrap().iter().all(|s| s.session_id != retained));
-        assert!(registry.list().unwrap().iter().any(|s| s.session_id == active));
+        assert!(
+            registry
+                .list()
+                .unwrap()
+                .iter()
+                .all(|s| s.session_id != retained)
+        );
+        assert!(
+            registry
+                .list()
+                .unwrap()
+                .iter()
+                .any(|s| s.session_id == active)
+        );
         assert!(connection.attach_session(active));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !connection.view().connected {
-            assert!(tokio::time::Instant::now() < deadline, "active session did not reattach: {}", connection.view().detail);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "active session did not reattach: {}",
+                connection.view().detail
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let mut app = crate::DesktopApp::default();
-        let tab = app.workspace.add(None, "Close while layout is paused".into()).unwrap();
+        let tab = app
+            .workspace
+            .add(None, "Close while layout is paused".into())
+            .unwrap();
         app.workspace.sessions.insert(tab, active);
         app.workspace.select(tab);
         app.current_workspace_tab = Some(tab);
         app.workspace.writable = false;
         app.workspace_loaded = true;
-        app.workspace_connection = Some(Arc::new(crate::workspace_connection::WorkspaceConnection::paused_for_test()));
+        app.workspace_connection = Some(Arc::new(
+            crate::workspace_connection::WorkspaceConnection::paused_for_test(),
+        ));
         app.daemon_config = Some(config);
         app.daemon = Some(connection);
         app.view_model.confirm_terminate = true;
         app.view_model.terminate_target = Some(active);
         let document = app.workspace.document.clone();
         let stale = SessionId::new();
-        app.daemon.as_ref().unwrap().shared.lock().unwrap().sessions.as_mut().unwrap()
+        app.daemon
+            .as_ref()
+            .unwrap()
+            .shared
+            .lock()
+            .unwrap()
+            .sessions
+            .as_mut()
+            .unwrap()
             .push(SessionSummary {
                 can_duplicate_ssh_channel: false,
-                reconnecting: false, session_id: stale.as_uuid().as_bytes().to_vec(), ..Default::default() });
+                reconnecting: false,
+                session_id: stale.as_uuid().as_bytes().to_vec(),
+                ..Default::default()
+            });
         app.view_model.terminate_target = Some(stale);
         app.request_termination(stale);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         while app.view_model.terminate_pending {
             app.sync_workspace();
-            assert!(tokio::time::Instant::now() < deadline, "rejected termination never produced a result");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "rejected termination never produced a result"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(app.view_model.confirm_terminate, "a failure must stay visible");
+        assert!(
+            app.view_model.confirm_terminate,
+            "a failure must stay visible"
+        );
         assert!(app.view_model.terminate_error.is_some());
-        assert!(registry.list().unwrap().iter().any(|session| session.session_id == active));
+        assert!(
+            registry
+                .list()
+                .unwrap()
+                .iter()
+                .any(|session| session.session_id == active)
+        );
         tokio::time::timeout(Duration::from_secs(8), async {
             while !app.daemon.as_ref().unwrap().view().connected {
                 app.sync_workspace();
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.unwrap();
-        assert!(app.daemon.as_ref().unwrap().send_input(InputAction::Text("echo RECOVERED\r".into())),
-            "failed removal must restore input to the unrelated current terminal");
+        })
+        .await
+        .unwrap();
+        assert!(
+            app.daemon
+                .as_ref()
+                .unwrap()
+                .send_input(InputAction::Text("echo RECOVERED\r".into())),
+            "failed removal must restore input to the unrelated current terminal"
+        );
         app.view_model.terminate_target = Some(active);
         app.request_termination(active);
         assert!(app.view_model.terminate_pending);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         while app.view_model.terminate_pending {
             app.sync_workspace();
-            assert!(tokio::time::Instant::now() < deadline, "current termination did not complete: {:?}", app.view_model.terminate_error);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "current termination did not complete: {:?}",
+                app.view_model.terminate_error
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(!app.view_model.confirm_terminate);
-        assert_eq!(app.workspace.document, document, "paused layout must not be changed by process termination");
+        assert_eq!(
+            app.workspace.document, document,
+            "paused layout must not be changed by process termination"
+        );
         assert!(!app.workspace.sessions.contains_key(&tab));
         assert!(registry.list().unwrap().is_empty());
-        assert!(app.daemon.is_some(), "paused cleanup must retain a metadata connection");
+        assert!(
+            app.daemon.is_some(),
+            "paused cleanup must retain a metadata connection"
+        );
         assert_eq!(app.current_workspace_tab, Some(tab));
-        assert!(app.view_model.sessions.is_empty(), "confirmed removal must immediately update the list");
+        assert!(
+            app.view_model.sessions.is_empty(),
+            "confirmed removal must immediately update the list"
+        );
         tokio::time::timeout(Duration::from_secs(5), async {
             while app.daemon.as_ref().unwrap().view().sessions.is_none() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.unwrap();
-        assert!(app.daemon.as_ref().unwrap().view().sessions.unwrap().is_empty());
+        })
+        .await
+        .unwrap();
+        assert!(
+            app.daemon
+                .as_ref()
+                .unwrap()
+                .view()
+                .sessions
+                .unwrap()
+                .is_empty()
+        );
         drop(app);
         shutdown.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), server_task).await.unwrap().unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2957,27 +3504,46 @@ mod tests {
             });
             let connection = DesktopDaemonConnection::start_idle(DesktopConnectionConfig {
                 source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
-                    endpoint, instance_token: token, daemon_instance_id: instance,
+                    endpoint,
+                    instance_token: token,
+                    daemon_instance_id: instance,
                 }),
-                session_id: None, request_log_pages: false,
-            }).unwrap();
+                session_id: None,
+                request_log_pages: false,
+            })
+            .unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while connection.view().sessions.is_none() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(connection.terminate_confirmed_session(target));
             tokio::time::timeout(Duration::from_secs(8), async {
                 while connection.view().close_pending.is_some() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(connection.view().close_error.is_some());
             assert_eq!(connection.view().closed_session, None);
             tokio::time::sleep(Duration::from_millis(1200)).await;
-            assert_eq!(close_count.load(Ordering::SeqCst), 1, "never replay an uncertain termination; {:?}", connection.view().close_error);
-            assert!(connection.view().sessions.unwrap().iter()
-                .any(|session| session.session_id == target.as_uuid().as_bytes()));
+            assert_eq!(
+                close_count.load(Ordering::SeqCst),
+                1,
+                "never replay an uncertain termination; {:?}",
+                connection.view().close_error
+            );
+            assert!(
+                connection
+                    .view()
+                    .sessions
+                    .unwrap()
+                    .iter()
+                    .any(|session| session.session_id == target.as_uuid().as_bytes())
+            );
             drop(connection);
             server.abort();
             assert!(server.await.unwrap_err().is_cancelled());
@@ -3001,34 +3567,62 @@ mod tests {
             let mut initial = listener.accept().await.unwrap();
             server_handshake(&mut initial, &policy).await.unwrap();
             let list = read_envelope(&mut initial).await.unwrap();
-            write_envelope(&mut initial, &Envelope {
-                request_id: list.request_id,
-                payload: Some(envelope::Payload::SessionListResponse(SessionListResponse { sessions: vec![] })),
-                ..Default::default()
-            }).await.unwrap();
+            write_envelope(
+                &mut initial,
+                &Envelope {
+                    request_id: list.request_id,
+                    payload: Some(envelope::Payload::SessionListResponse(
+                        SessionListResponse { sessions: vec![] },
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
             let mut stalled = listener.accept().await.unwrap();
             // Receive the client handshake but deliberately omit its reply.
             read_envelope(&mut stalled).await.unwrap();
-            assert!(tokio::time::timeout(Duration::from_secs(7), read_envelope(&mut stalled)).await.unwrap().is_err());
+            assert!(
+                tokio::time::timeout(Duration::from_secs(7), read_envelope(&mut stalled))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
             let mut retry = listener.accept().await.unwrap();
             server_handshake(&mut retry, &policy).await.unwrap();
             let request = read_envelope(&mut retry).await.unwrap();
             let Some(envelope::Payload::SessionCreateRequest(create)) = request.payload else {
-                panic!("retry must preserve the requested profile rather than rediscovering another session");
+                panic!(
+                    "retry must preserve the requested profile rather than rediscovering another session"
+                );
             };
-            assert_eq!(create.profile_id.as_deref(), Some(profile.as_uuid().as_bytes().as_slice()));
+            assert_eq!(
+                create.profile_id.as_deref(),
+                Some(profile.as_uuid().as_bytes().as_slice())
+            );
         });
         let connection = DesktopDaemonConnection::start_idle(DesktopConnectionConfig {
-            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint { endpoint, instance_token: token, daemon_instance_id: instance }),
-            session_id: None, request_log_pages: false,
-        }).unwrap();
+            source: DesktopEndpointSource::Explicit(ResolvedDesktopEndpoint {
+                endpoint,
+                instance_token: token,
+                daemon_instance_id: instance,
+            }),
+            session_id: None,
+            request_log_pages: false,
+        })
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while connection.view().sessions.is_none() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(connection.open_profile(profile));
-        tokio::time::timeout(Duration::from_secs(12), server).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(12), server)
+            .await
+            .unwrap()
+            .unwrap();
         drop(connection);
     }
 
@@ -3075,12 +3669,26 @@ mod tests {
 
     #[test]
     fn cancelled_history_cache_and_late_responses_cannot_reenter_a_new_view() {
-        use super::{DesktopDaemonView, DesktopInputSender, RenderLogPage, RenderLogRow, RenderLogPageRequest, LogSourceId, update_log_page};
-        let page = Arc::new(RenderLogPage { first_line_id: 1,
-            source_id: LogSourceId(1), revision: 1, anchor_line_id: 10,
+        use super::{
+            DesktopDaemonView, DesktopInputSender, LogSourceId, RenderLogPage,
+            RenderLogPageRequest, RenderLogRow, update_log_page,
+        };
+        let page = Arc::new(RenderLogPage {
+            first_line_id: 1,
+            source_id: LogSourceId(1),
+            revision: 1,
+            anchor_line_id: 10,
             rows: vec![RenderLogRow {
-            soft_wrap: false,line_id: 10, text: "old command".into(), style_spans: Arc::from([]), truncated: false}].into(),
-            total_line_count: 100, has_before: true, has_after: true,
+                soft_wrap: false,
+                line_id: 10,
+                text: "old command".into(),
+                style_spans: Arc::from([]),
+                truncated: false,
+            }]
+            .into(),
+            total_line_count: 100,
+            has_before: true,
+            has_after: true,
         });
         let shared = Arc::new(Mutex::new(DesktopDaemonView::default()));
         let connection = DesktopDaemonConnection {
@@ -3098,8 +3706,18 @@ mod tests {
         connection.cancel_log_page();
         assert!(connection.view().log_page.is_none());
         update_log_page(&connection.shared, Arc::clone(&page), true, 0);
-        assert!(connection.view().log_page.is_none(), "cancelled IPC response must be dropped");
-        let request = RenderLogPageRequest {source_id: LogSourceId(1), follow_tail: true, anchor_line_id: 0, cell_offset: 0, rows_before: 128, rows_after: 0};
+        assert!(
+            connection.view().log_page.is_none(),
+            "cancelled IPC response must be dropped"
+        );
+        let request = RenderLogPageRequest {
+            source_id: LogSourceId(1),
+            follow_tail: true,
+            anchor_line_id: 0,
+            cell_offset: 0,
+            rows_before: 128,
+            rows_after: 0,
+        };
         assert!(connection.request_terminal_history_page(request));
         let old = connection.log_requests.borrow().unwrap();
         connection.cancel_log_page();
@@ -3107,7 +3725,10 @@ mod tests {
         let new = connection.log_requests.borrow().unwrap();
         assert_ne!(old.epoch, new.epoch);
         update_log_page(&connection.shared, Arc::clone(&page), true, old.epoch);
-        assert!(connection.view().log_page.is_none(), "same request in a new view must reject old response");
+        assert!(
+            connection.view().log_page.is_none(),
+            "same request in a new view must reject old response"
+        );
         update_log_page(&connection.shared, page, true, new.epoch);
         assert!(connection.view().log_page.is_some());
     }
@@ -3365,72 +3986,143 @@ mod tests {
                 bracketed: true,
             }));
             tokio::time::timeout(PTY_E2E_TIMEOUT, async {
-                while !connection.view().snapshot.as_deref().is_some_and(|snapshot| {
-                    snapshot_has_executed_line(snapshot, "CSHELL_HISTORY_DONE")
-                }) {
+                while !connection
+                    .view()
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| {
+                        snapshot_has_executed_line(snapshot, "CSHELL_HISTORY_DONE")
+                    })
+                {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.expect("long output must finish");
-            assert!(!connection.view().snapshot.as_deref().is_some_and(|snapshot| {
-                (0..snapshot.rows).any(|row| snapshot.row(row).is_some_and(|cells| {
-                    cells.iter().flat_map(cshell_terminal::Cell::characters).collect::<String>().trim() == "CSHELL_HISTORY_1"
-                }))
-            }), "old output must have left the live viewport");
+            })
+            .await
+            .expect("long output must finish");
+            assert!(
+                !connection
+                    .view()
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| {
+                        (0..snapshot.rows).any(|row| {
+                            snapshot.row(row).is_some_and(|cells| {
+                                cells
+                                    .iter()
+                                    .flat_map(cshell_terminal::Cell::characters)
+                                    .collect::<String>()
+                                    .trim()
+                                    == "CSHELL_HISTORY_1"
+                            })
+                        })
+                    }),
+                "old output must have left the live viewport"
+            );
             let mut app = crate::DesktopApp::default();
             app.daemon = Some(connection);
             app.view_model.selected = Some(session_id);
             app.viewport_rows = 24;
-            app.terminal_viewport = Some(cshell_render::TerminalViewport { x: 0, y: 0, width: 800, height: 480 });
+            app.terminal_viewport = Some(cshell_render::TerminalViewport {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 480,
+            });
             let mut first_top = None;
             let mut reached_old_output = false;
             for step in 0..80 {
                 app.handle_terminal_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
                 for _ in 0..10 {
                     app.poll_primary_terminal(std::time::Instant::now());
-                    while let Some(completed) = app.log_reflow.as_ref().and_then(|worker| worker.results.try_recv().ok()) {
+                    while let Some(completed) = app
+                        .log_reflow
+                        .as_ref()
+                        .and_then(|worker| worker.results.try_recv().ok())
+                    {
                         app.apply_log_reflow(completed);
                     }
                     if let Some(surface) = &mut app.log_surface {
                         if let Some(request) = surface.request_reflow(80) {
-                            assert!(app.log_reflow.as_ref().expect("history worker").submit(request, None));
+                            assert!(
+                                app.log_reflow
+                                    .as_ref()
+                                    .expect("history worker")
+                                    .submit(request, None)
+                            );
                         }
                         if let Some(request) = surface.take_page_request(24) {
-                            app.daemon.as_ref().unwrap().request_terminal_history_page(request);
+                            app.daemon
+                                .as_ref()
+                                .unwrap()
+                                .request_terminal_history_page(request);
                         }
                         if let Some(frame) = surface.prepare_frame(24) {
                             if first_top.is_none() && step == 0 {
-                                first_top = Some(frame.page.rows[frame.visual_rows[frame.visible_rows.start + frame.first_viewport_row].logical_row_index as usize].line_id);
+                                first_top = Some(
+                                    frame.page.rows[frame.visual_rows
+                                        [frame.visible_rows.start + frame.first_viewport_row]
+                                        .logical_row_index
+                                        as usize]
+                                        .line_id,
+                                );
                             }
-                            reached_old_output |= frame.visual_rows[frame.visible_rows.clone()].iter().any(|row| {
-                                frame.page.rows[row.logical_row_index as usize].text.trim() == "CSHELL_HISTORY_1"
-                            });
+                            reached_old_output |= frame.visual_rows[frame.visible_rows.clone()]
+                                .iter()
+                                .any(|row| {
+                                    frame.page.rows[row.logical_row_index as usize].text.trim()
+                                        == "CSHELL_HISTORY_1"
+                                });
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                if reached_old_output { break; }
+                if reached_old_output {
+                    break;
+                }
             }
-            assert!(first_top.is_some(), "the first wheel must load a history frame");
-            assert!(reached_old_output, "repeated upward wheels must display output beyond the first history page");
+            assert!(
+                first_top.is_some(),
+                "the first wheel must load a history frame"
+            );
+            assert!(
+                reached_old_output,
+                "repeated upward wheels must display output beyond the first history page"
+            );
             assert!(app.terminal_scrollback);
             for cycle in 0..3 {
                 let marker = format!("CSHELL_NEW_OUTPUT_DONE_{cycle}");
                 assert!(app.submit_terminal_action(InputAction::Paste {
-                    text: format!("(for /L %i in (1,1,80) do @echo NEW_OUTPUT_%i) & echo {marker}\r"),
+                    text: format!(
+                        "(for /L %i in (1,1,80) do @echo NEW_OUTPUT_%i) & echo {marker}\r"
+                    ),
                     bracketed: true,
                 }));
                 assert!(app.log_surface.is_none());
                 assert!(app.daemon.as_ref().unwrap().view().log_page.is_none());
                 tokio::time::timeout(PTY_E2E_TIMEOUT, async {
-                    while !app.daemon.as_ref().unwrap().view().snapshot.as_deref().is_some_and(|snapshot| {
-                        snapshot_has_executed_line(snapshot, &marker)
-                    }) { tokio::time::sleep(Duration::from_millis(10)).await; }
-                }).await.expect("new command must finish");
+                    while !app
+                        .daemon
+                        .as_ref()
+                        .unwrap()
+                        .view()
+                        .snapshot
+                        .as_deref()
+                        .is_some_and(|snapshot| snapshot_has_executed_line(snapshot, &marker))
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("new command must finish");
                 app.handle_terminal_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
                 let mut top_after_reflow = None;
                 for _ in 0..100 {
                     app.poll_primary_terminal(std::time::Instant::now());
-                    while let Some(completed) = app.log_reflow.as_ref().and_then(|worker| worker.results.try_recv().ok()) {
+                    while let Some(completed) = app
+                        .log_reflow
+                        .as_ref()
+                        .and_then(|worker| worker.results.try_recv().ok())
+                    {
                         app.apply_log_reflow(completed);
                     }
                     let surface = app.log_surface.as_mut().unwrap();
@@ -3438,13 +4130,22 @@ mod tests {
                         assert!(app.log_reflow.as_ref().unwrap().submit(request, None));
                     }
                     if let Some(request) = surface.take_page_request(24) {
-                        app.daemon.as_ref().unwrap().request_terminal_history_page(request);
+                        app.daemon
+                            .as_ref()
+                            .unwrap()
+                            .request_terminal_history_page(request);
                     }
                     if let Some(frame) = surface.prepare_frame(24) {
-                        let top = frame.page.rows[frame.visual_rows[frame.visible_rows.start + frame.first_viewport_row].logical_row_index as usize].line_id;
+                        let top = frame.page.rows[frame.visual_rows
+                            [frame.visible_rows.start + frame.first_viewport_row]
+                            .logical_row_index
+                            as usize]
+                            .line_id;
                         let expected = frame.page.total_line_count.saturating_sub(26);
-                        assert!(top >= expected && top <= expected + 3,
-                            "one wheel after command {cycle} jumped: top={top}, expected={expected}");
+                        assert!(
+                            top >= expected && top <= expected + 3,
+                            "one wheel after command {cycle} jumped: top={top}, expected={expected}"
+                        );
                         if matches!(surface.mode(), cshell_render::ScrollMode::Anchored { .. }) {
                             assert_eq!(top, expected, "one notch must move exactly three rows");
                             top_after_reflow = Some(top);
@@ -4122,12 +4823,13 @@ mod tests {
                     &Envelope {
                         request_id: request.request_id,
                         deadline_unix_ms: 0,
-                        payload: Some(envelope::Payload::LogPage(LogPage { first_line_id: 1,
+                        payload: Some(envelope::Payload::LogPage(LogPage {
+                            first_line_id: 1,
                             session_id: session_id.as_uuid().as_bytes().to_vec(),
                             revision: 77,
                             anchor_line_id: expected_anchor,
                             rows: vec![LogRow {
-            soft_wrap: false,
+                                soft_wrap: false,
                                 line_id: expected_anchor,
                                 text: format!("line {expected_anchor}"),
                                 style_spans: vec![],
@@ -4433,7 +5135,8 @@ mod tests {
     fn validated_ipc_log_page_converts_to_zero_copy_render_page_shape() {
         let session_id = SessionId::new();
         let page = convert_log_page(
-            LogPage { first_line_id: 1,
+            LogPage {
+                first_line_id: 1,
                 session_id: session_id.as_uuid().as_bytes().to_vec(),
                 revision: 41,
                 anchor_line_id: 11,
@@ -4591,4 +5294,9 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod channel_tests;

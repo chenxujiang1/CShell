@@ -108,14 +108,12 @@ impl ProfileBatchDraft {
         }
         if let TagEdit::Replace(tags) | TagEdit::Append(tags) | TagEdit::Remove(tags) =
             &self.patch.tags
-        {
-            if tags.len() > 64
+            && (tags.len() > 64
                 || tags
                     .iter()
-                    .any(|t| t.is_empty() || t.len() > 64 || t.chars().any(char::is_control))
-            {
-                return Err("invalid batch tags");
-            }
+                    .any(|t| t.is_empty() || t.len() > 64 || t.chars().any(char::is_control)))
+        {
+            return Err("invalid batch tags");
         }
         Ok(())
     }
@@ -300,6 +298,7 @@ pub enum ProfileBatchReply {
     Settings(ProfileSettingsReport),
     Authority(ProfileBatchAuthority),
 }
+#[derive(Debug)]
 pub enum ProfileBatchExpectation<'a> {
     Preview {
         draft: &'a ProfileBatchDraft,

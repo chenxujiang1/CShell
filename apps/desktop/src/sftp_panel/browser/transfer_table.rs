@@ -145,8 +145,12 @@ fn category(item: &SftpQueueItem, view: &SftpView) -> Filter {
     }
 }
 fn status(item: &SftpQueueItem, view: &SftpView) -> &'static str {
-    if item.state==SftpQueueState::Succeeded {
-        return if item.draft.verification==Some(cshell_domain::SftpVerification::Standard) {"已传输"}else{"已校验"};
+    if item.state == SftpQueueState::Succeeded {
+        return if item.draft.verification == Some(cshell_domain::SftpVerification::Standard) {
+            "已传输"
+        } else {
+            "已校验"
+        };
     }
     if view
         .queue
@@ -162,13 +166,25 @@ fn status(item: &SftpQueueItem, view: &SftpView) -> &'static str {
         if category(item, view) == Filter::Paused {
             return "已暂停";
         }
-        if let Some(transfer)=item.transfer_id.and_then(|id|view.queue_transfers.get(&id)) {
+        if let Some(transfer) = item
+            .transfer_id
+            .and_then(|id| view.queue_transfers.get(&id))
+        {
             use cshell_ipc::SftpTransferPhase as Phase;
             match Phase::try_from(transfer.phase).unwrap_or(Phase::Unknown) {
-                Phase::Preparing=>return "准备中", Phase::Verifying=>return "校验文件",
-                Phase::ServerChecksum=>return "服务器校验",
-                Phase::Publishing=>return "发布文件", Phase::CheckingPublished=>return if item.draft.verification.is_some(){"核对大小"}else{"核验目标"},
-                Phase::Cleaning=>return "清理中", _=>{},
+                Phase::Preparing => return "准备中",
+                Phase::Verifying => return "校验文件",
+                Phase::ServerChecksum => return "服务器校验",
+                Phase::Publishing => return "发布文件",
+                Phase::CheckingPublished => {
+                    return if item.draft.verification.is_some() {
+                        "核对大小"
+                    } else {
+                        "核验目标"
+                    };
+                }
+                Phase::Cleaning => return "清理中",
+                _ => {}
             }
         }
         if item.verified.as_ref().is_some_and(|v| v.content.is_none()) {
@@ -196,9 +212,16 @@ fn remaining(seconds: u64) -> String {
         format!("{seconds}秒")
     }
 }
-fn tree_category(row:&cshell_application::SftpTreeSnapshot)->Filter {
+fn tree_category(row: &cshell_application::SftpTreeSnapshot) -> Filter {
     use cshell_application::TerminalUploadState as S;
-    match row.state {S::Preparing|S::Ready=>Filter::Waiting,S::Running=>Filter::Active,S::Paused=>Filter::Paused,S::Succeeded=>Filter::Succeeded,S::Failed=>Filter::Failed,S::Cancelled=>Filter::Cancelled}
+    match row.state {
+        S::Preparing | S::Ready => Filter::Waiting,
+        S::Running => Filter::Active,
+        S::Paused => Filter::Paused,
+        S::Succeeded => Filter::Succeeded,
+        S::Failed => Filter::Failed,
+        S::Cancelled => Filter::Cancelled,
+    }
 }
 fn cell<R>(ui: &mut egui::Ui, width: f32, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.allocate_ui_with_layout(
@@ -266,7 +289,7 @@ impl SftpPanel {
             && !view.queue_busy
             && !view.workspace_busy;
         let work = !queue.retry_items.is_empty()
-            || view.trees.values().any(|v|!v.state.finished())
+            || view.trees.values().any(|v| !v.state.finished())
             || queue.items.iter().any(|item| {
                 matches!(
                     item.state,
@@ -276,15 +299,22 @@ impl SftpPanel {
         let previous_filter = self.browser.table.filter;
         ui.horizontal_wrapped(|ui| {
             ui.strong("传输任务");
-            if visuals::tool(ui, Icon::Refresh, "刷新队列", !view.queue_busy && !view.workspace_busy, None, false)
-                .on_hover_text("重新读取后台任务，核对未确认的提交结果，不重复上传")
-                .clicked()
+            if visuals::tool(
+                ui,
+                Icon::Refresh,
+                "刷新队列",
+                !view.queue_busy && !view.workspace_busy,
+                None,
+                false,
+            )
+            .on_hover_text("重新读取后台任务，核对未确认的提交结果，不重复上传")
+            .clicked()
             {
                 *command = Some(SftpClientCommand::QueueGet(session));
             }
             ui.weak(format!(
                 "{} 项 · 并发 {}",
-                queue.items.len()+view.trees.len(),
+                queue.items.len() + view.trees.len(),
                 queue.concurrency.unwrap_or(3)
             ));
             egui::ComboBox::from_id_salt("transfer-filter")
@@ -296,7 +326,12 @@ impl SftpPanel {
                             .items
                             .iter()
                             .filter(|row| filter == Filter::All || category(row, view) == filter)
-                            .count()+view.trees.values().filter(|r|filter==Filter::All||tree_category(r)==filter).count();
+                            .count()
+                            + view
+                                .trees
+                                .values()
+                                .filter(|r| filter == Filter::All || tree_category(r) == filter)
+                                .count();
                         ui.selectable_value(
                             &mut self.browser.table.filter,
                             filter,
@@ -304,13 +339,23 @@ impl SftpPanel {
                         );
                     }
                 });
-            if visuals::tool(ui,Icon::Pause,"暂停队列",ready&&work,None,false)
-                .clicked()
+            if visuals::tool(ui, Icon::Pause, "暂停队列", ready && work, None, false).clicked()
             {
                 *command = Some(SftpClientCommand::LiveQueue(session, true));
             }
-            if visuals::tool(ui,Icon::Play,"继续队列",ready && work && (queue.paused || view.queue_hold || view.queue_transfers.values().any(|t|t.paused)),None,false)
-                .clicked()
+            if visuals::tool(
+                ui,
+                Icon::Play,
+                "继续队列",
+                ready
+                    && work
+                    && (queue.paused
+                        || view.queue_hold
+                        || view.queue_transfers.values().any(|t| t.paused)),
+                None,
+                false,
+            )
+            .clicked()
             {
                 *command = Some(SftpClientCommand::LiveQueue(session, false));
             }
@@ -513,93 +558,217 @@ impl SftpPanel {
         } else {
             0
         };
-        if self.browser.tree.is_some() {ui.horizontal_wrapped(|ui|{ui.colored_label(cshell_ui::theme::WARNING,"目录任务尚未加入");if ui.button("重试加入").clicked(){self.browser.tree_auto=true;}});}
-        let trees=view.trees.values().filter(|r|self.browser.table.filter==Filter::All||tree_category(r)==self.browser.table.filter).collect::<Vec<_>>();
+        if self.browser.tree.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(cshell_ui::theme::WARNING, "目录任务尚未加入");
+                if ui.button("重试加入").clicked() {
+                    self.browser.tree_auto = true;
+                }
+            });
+        }
+        let trees = view
+            .trees
+            .values()
+            .filter(|r| {
+                self.browser.table.filter == Filter::All
+                    || tree_category(r) == self.browser.table.filter
+            })
+            .collect::<Vec<_>>();
         let row_height = 26.0;
         egui::ScrollArea::vertical()
             .id_salt(("compact-transfer-rows", self.browser.table.filter as u8))
             .min_scrolled_height(0.0)
             .auto_shrink([false, false])
             .max_height(ui.available_height().max(0.0))
-            .show_rows(ui, row_height, visible.len() + trees.len() + staged, |ui, range| {
-                for index in range {
-                    if let Some(item) = visible.get(index) {
-                        ui.push_id(item.id, |ui| {
-                            self.task_row(ui, session, view, queue, item, &columns, ready, command)
-                        });
-                    } else if let Some(tree)=trees.get(index-visible.len()) {
-                        ui.push_id(tree.id,|ui|self.tree_row(ui,session,view,tree,&columns,command));
-                    } else if let Some(draft) = self
-                        .browser
-                        .submitted_drafts
-                        .iter()
-                        .chain(&self.browser.staged)
-                        .nth(index - visible.len() - trees.len())
-                    {
-                        ui.horizontal(|ui| {
-                            label(ui, columns[0], "");
-                            label(
-                                ui,
-                                columns[1],
-                                format!(
-                                    "{} {}",
-                                    if draft.direction == SftpQueueDirection::Upload {
-                                        "↑"
-                                    } else {
-                                        "↓"
-                                    },
-                                    draft
-                                        .remote_path
-                                        .rsplit('/')
-                                        .next()
-                                        .unwrap_or(&draft.remote_path)
-                                ),
-                            );
-                            let submitted = index - visible.len() - trees.len() < self.browser.submitted_drafts.len();
-                            let (state, detail) = if submitted && view.queue_busy {
-                                ("正在加入", "等待队列确认")
-                            } else if submitted {
-                                ("需核对", "结果未确认，请刷新队列")
-                            } else if !view.queue_writable {
-                                ("待加入", "队列未就绪，请刷新队列")
-                            } else if self.browser.auto_submit {
-                                ("待加入", "等待提交")
-                            } else {
-                                ("未加入", "请在更多菜单重试")
-                            };
-                            label(ui, columns[2], state);
-                            ui.add(egui::Label::new(egui::RichText::new(detail).weak()).truncate())
+            .show_rows(
+                ui,
+                row_height,
+                visible.len() + trees.len() + staged,
+                |ui, range| {
+                    for index in range {
+                        if let Some(item) = visible.get(index) {
+                            ui.push_id(item.id, |ui| {
+                                self.task_row(
+                                    ui, session, view, queue, item, &columns, ready, command,
+                                )
+                            });
+                        } else if let Some(tree) = trees.get(index - visible.len()) {
+                            ui.push_id(tree.id, |ui| {
+                                self.tree_row(ui, session, view, tree, &columns, command)
+                            });
+                        } else if let Some(draft) = self
+                            .browser
+                            .submitted_drafts
+                            .iter()
+                            .chain(&self.browser.staged)
+                            .nth(index - visible.len() - trees.len())
+                        {
+                            ui.horizontal(|ui| {
+                                label(ui, columns[0], "");
+                                label(
+                                    ui,
+                                    columns[1],
+                                    format!(
+                                        "{} {}",
+                                        if draft.direction == SftpQueueDirection::Upload {
+                                            "↑"
+                                        } else {
+                                            "↓"
+                                        },
+                                        draft
+                                            .remote_path
+                                            .rsplit('/')
+                                            .next()
+                                            .unwrap_or(&draft.remote_path)
+                                    ),
+                                );
+                                let submitted = index - visible.len() - trees.len()
+                                    < self.browser.submitted_drafts.len();
+                                let (state, detail) = if submitted && view.queue_busy {
+                                    ("正在加入", "等待队列确认")
+                                } else if submitted {
+                                    ("需核对", "结果未确认，请刷新队列")
+                                } else if !view.queue_writable {
+                                    ("待加入", "队列未就绪，请刷新队列")
+                                } else if self.browser.auto_submit {
+                                    ("待加入", "等待提交")
+                                } else {
+                                    ("未加入", "请在更多菜单重试")
+                                };
+                                label(ui, columns[2], state);
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(detail).weak()).truncate(),
+                                )
                                 .on_hover_text(detail);
+                            });
+                        }
+                    }
+                    if visible.is_empty() && trees.is_empty() && staged == 0 {
+                        ui.weak(if queue.items.is_empty() {
+                            "拖入文件即可自动上传或下载"
+                        } else {
+                            "当前筛选没有任务"
                         });
                     }
-                }
-                if visible.is_empty() && trees.is_empty() && staged == 0 {
-                    ui.weak(if queue.items.is_empty() {
-                        "拖入文件即可自动上传或下载"
-                    } else {
-                        "当前筛选没有任务"
-                    });
-                }
-            });
+                },
+            );
     }
-    fn tree_row(&mut self,ui:&mut egui::Ui,session:SessionId,view:&SftpView,row:&cshell_application::SftpTreeSnapshot,columns:&[f32;7],command:&mut Option<SftpClientCommand>){
+    fn tree_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: SessionId,
+        view: &SftpView,
+        row: &cshell_application::SftpTreeSnapshot,
+        columns: &[f32; 7],
+        command: &mut Option<SftpClientCommand>,
+    ) {
         use cshell_application::TerminalUploadState as S;
-        let ready=!view.tree_pending.contains(&row.id)&&(view.connection_profile.is_none()||view.connection_phase==crate::sftp_connection::ConnectionPhase::Connected);
-        ui.horizontal(|ui|{
-            label(ui,columns[0],"▤");
-            cell(ui,columns[1],|ui|{ui.add(egui::Label::new(format!("{} {}",if row.direction==SftpQueueDirection::Upload{"→ 上传"}else{"← 下载"},row.label)).truncate()).on_hover_text(&row.detail);});
-            label(ui,columns[2],tree_category(row).label());
-            cell(ui,columns[3],|ui|{let ratio=if row.state==S::Succeeded{1.0}else if row.total_bytes>0{row.bytes as f32/row.total_bytes as f32}else{0.0};ui.add(egui::ProgressBar::new(ratio.clamp(0.0,1.0)).text(format!("{}/{} 文件",row.completed,row.total_files))).on_hover_text(format!("{} / {}\n{}",bytes(row.bytes),bytes(row.total_bytes),row.detail));});
-            label(ui,columns[4],if row.bytes_per_second>0{format!("{}/s",bytes(row.bytes_per_second))}else{"—".into()});
-            label(ui,columns[5],if row.bytes_per_second>0{remaining(row.total_bytes.saturating_sub(row.bytes)/row.bytes_per_second)}else{"—".into()});
-            cell(ui,columns[6],|ui|{
-                let op=match row.state {S::Preparing|S::Running=>Some((SftpOperation::TreePause,Icon::Pause,"暂停")),S::Paused=>Some((SftpOperation::TreeContinue,Icon::Play,"继续")),_ if row.retryable=>Some((SftpOperation::TreeRetry,Icon::Reconnect,"重试失败项")),_=>None};
-                if let Some((op,icon,label))=op {if visuals::tool(ui,icon,label,ready,None,true).on_hover_text(label).clicked(){*command=Some(SftpClientCommand::Tree(session,op,row.id,None));}}
-                if !row.state.finished()&&visuals::tool(ui,Icon::Close,"取消",ready,None,true).on_hover_text("取消目录任务，已完成文件保留").clicked(){*command=Some(SftpClientCommand::Tree(session,SftpOperation::TreeCancel,row.id,None));}
-                if visuals::tool(ui,Icon::Refresh,"刷新进度",ready,None,true).on_hover_text(&row.detail).clicked(){*command=Some(SftpClientCommand::Tree(session,SftpOperation::TreeGet,row.id,None));}
+        let ready = !view.tree_pending.contains(&row.id)
+            && (view.connection_profile.is_none()
+                || view.connection_phase == crate::sftp_connection::ConnectionPhase::Connected);
+        ui.horizontal(|ui| {
+            label(ui, columns[0], "▤");
+            cell(ui, columns[1], |ui| {
+                ui.add(
+                    egui::Label::new(format!(
+                        "{} {}",
+                        if row.direction == SftpQueueDirection::Upload {
+                            "→ 上传"
+                        } else {
+                            "← 下载"
+                        },
+                        row.label
+                    ))
+                    .truncate(),
+                )
+                .on_hover_text(&row.detail);
+            });
+            label(ui, columns[2], tree_category(row).label());
+            cell(ui, columns[3], |ui| {
+                let ratio = if row.state == S::Succeeded {
+                    1.0
+                } else if row.total_bytes > 0 {
+                    row.bytes as f32 / row.total_bytes as f32
+                } else {
+                    0.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(ratio.clamp(0.0, 1.0))
+                        .text(format!("{}/{} 文件", row.completed, row.total_files)),
+                )
+                .on_hover_text(format!(
+                    "{} / {}\n{}",
+                    bytes(row.bytes),
+                    bytes(row.total_bytes),
+                    row.detail
+                ));
+            });
+            label(
+                ui,
+                columns[4],
+                if row.bytes_per_second > 0 {
+                    format!("{}/s", bytes(row.bytes_per_second))
+                } else {
+                    "—".into()
+                },
+            );
+            label(
+                ui,
+                columns[5],
+                row.total_bytes
+                    .saturating_sub(row.bytes)
+                    .checked_div(row.bytes_per_second)
+                    .map(remaining)
+                    .unwrap_or_else(|| "—".into()),
+            );
+            cell(ui, columns[6], |ui| {
+                let op = match row.state {
+                    S::Preparing | S::Running => {
+                        Some((SftpOperation::TreePause, Icon::Pause, "暂停"))
+                    }
+                    S::Paused => Some((SftpOperation::TreeContinue, Icon::Play, "继续")),
+                    _ if row.retryable => {
+                        Some((SftpOperation::TreeRetry, Icon::Reconnect, "重试失败项"))
+                    }
+                    _ => None,
+                };
+                if let Some((op, icon, label)) = op
+                    && visuals::tool(ui, icon, label, ready, None, true)
+                        .on_hover_text(label)
+                        .clicked()
+                {
+                    *command = Some(SftpClientCommand::Tree(session, op, row.id, None));
+                }
+                if !row.state.finished()
+                    && visuals::tool(ui, Icon::Close, "取消", ready, None, true)
+                        .on_hover_text("取消目录任务，已完成文件保留")
+                        .clicked()
+                {
+                    *command = Some(SftpClientCommand::Tree(
+                        session,
+                        SftpOperation::TreeCancel,
+                        row.id,
+                        None,
+                    ));
+                }
+                if visuals::tool(ui, Icon::Refresh, "刷新进度", ready, None, true)
+                    .on_hover_text(&row.detail)
+                    .clicked()
+                {
+                    *command = Some(SftpClientCommand::Tree(
+                        session,
+                        SftpOperation::TreeGet,
+                        row.id,
+                        None,
+                    ));
+                }
             });
         });
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
     fn task_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -612,17 +781,34 @@ impl SftpPanel {
         command: &mut Option<SftpClientCommand>,
     ) {
         let (uploaded, upload_total) = transferred(item, view);
-        let phase=item.transfer_id.and_then(|id|view.queue_transfers.get(&id));
-        let server_check=phase.is_some_and(|t|t.phase==cshell_ipc::SftpTransferPhase::ServerChecksum as i32);
-        let verifying=phase.is_some_and(|t|t.phase==cshell_ipc::SftpTransferPhase::Verifying as i32 || t.phase==cshell_ipc::SftpTransferPhase::CheckingPublished as i32 && item.draft.verification.is_none());
-        let moving=phase.is_none_or(|t|matches!(cshell_ipc::SftpTransferPhase::try_from(t.phase),Ok(cshell_ipc::SftpTransferPhase::Unknown|cshell_ipc::SftpTransferPhase::Transferring)));
-        let (done, total) = phase.filter(|_| verifying)
+        let phase = item
+            .transfer_id
+            .and_then(|id| view.queue_transfers.get(&id));
+        let server_check =
+            phase.is_some_and(|t| t.phase == cshell_ipc::SftpTransferPhase::ServerChecksum as i32);
+        let verifying = phase.is_some_and(|t| {
+            t.phase == cshell_ipc::SftpTransferPhase::Verifying as i32
+                || t.phase == cshell_ipc::SftpTransferPhase::CheckingPublished as i32
+                    && item.draft.verification.is_none()
+        });
+        let moving = phase.is_none_or(|t| {
+            matches!(
+                cshell_ipc::SftpTransferPhase::try_from(t.phase),
+                Ok(cshell_ipc::SftpTransferPhase::Unknown
+                    | cshell_ipc::SftpTransferPhase::Transferring)
+            )
+        });
+        let (done, total) = phase
+            .filter(|_| verifying)
             .map_or((uploaded, upload_total), |t| (t.phase_bytes, t.phase_total));
         let detail = format!(
             "本地：{}\n远程：{}\n校验策略：{}{}",
             item.draft.local_path,
             item.draft.remote_path,
-            item.draft.verification.map(crate::zmodem_settings::verification_label).unwrap_or("原有严格校验"),
+            item.draft
+                .verification
+                .map(crate::zmodem_settings::verification_label)
+                .unwrap_or("原有严格校验"),
             item.receipt
                 .as_ref()
                 .and_then(|r| r.detail.as_ref())
@@ -695,11 +881,30 @@ impl SftpPanel {
                 columns::clip_accessibility(ui, &response);
             });
             cell(ui, columns[1], |ui| {
-                let upload=item.draft.direction==SftpQueueDirection::Upload;
-                ui.spacing_mut().item_spacing.x=5.0;
-                ui.label(egui::RichText::new(if upload {"→ 上传"}else{"← 下载"}).small().strong().color(visuals::direction_color(!upload)))
-                    .on_hover_text(if upload {"本地 → 当前主机"}else{"当前主机 → 本地"});
-                ui.add(egui::Label::new(item.draft.remote_path.rsplit('/').next().unwrap_or(&item.draft.remote_path)).truncate()).on_hover_text(&detail);
+                let upload = item.draft.direction == SftpQueueDirection::Upload;
+                ui.spacing_mut().item_spacing.x = 5.0;
+                ui.label(
+                    egui::RichText::new(if upload { "→ 上传" } else { "← 下载" })
+                        .small()
+                        .strong()
+                        .color(visuals::direction_color(!upload)),
+                )
+                .on_hover_text(if upload {
+                    "本地 → 当前主机"
+                } else {
+                    "当前主机 → 本地"
+                });
+                ui.add(
+                    egui::Label::new(
+                        item.draft
+                            .remote_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&item.draft.remote_path),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&detail);
             });
             let color = match category(item, view) {
                 Filter::Failed | Filter::Review => cshell_ui::theme::DANGER,
@@ -714,11 +919,24 @@ impl SftpPanel {
                 ui.add(
                     egui::ProgressBar::new(ratio)
                         .desired_width(columns[3])
-                        .text(if server_check {"服务器计算 SHA-256…".into()}else{format!("{}{:.0}% · {}",if verifying {"校验 "} else {""}, ratio * 100.0, bytes(done))}),
+                        .text(if server_check {
+                            "服务器计算 SHA-256…".into()
+                        } else {
+                            format!(
+                                "{}{:.0}% · {}",
+                                if verifying { "校验 " } else { "" },
+                                ratio * 100.0,
+                                bytes(done)
+                            )
+                        }),
                 )
                 .on_hover_text(format!(
                     "{}{} / {}",
-                    if verifying {"当前校验阶段："} else {"已传输："},
+                    if verifying {
+                        "当前校验阶段："
+                    } else {
+                        "已传输："
+                    },
                     bytes(done),
                     total.map(bytes).unwrap_or_else(|| "计算中".into())
                 ));

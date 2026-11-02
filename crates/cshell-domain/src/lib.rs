@@ -37,13 +37,16 @@ mod tasks;
 pub use id::{PaneId, TabGroupId, TabId, WorkspaceWindowId};
 pub use id::{QuickCommandFolderId, QuickCommandId};
 pub use id::{SyncInputGroupId, SyncInputSendId, SyncInputSnapshotId};
-pub use input::{ControlAction, InputAction, KeyCode, KeyEvent, Modifiers, TerminalSize, MouseButton, MouseEvent, MouseEventKind};
+pub use input::{
+    ControlAction, InputAction, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
+    MouseEventKind, TerminalSize,
+};
 pub use profile::{
-    DEFAULT_TERMINAL_FONT_PIXELS, MIN_TERMINAL_FONT_PIXELS, MAX_TERMINAL_FONT_PIXELS,
-    LocalClosePolicy, LocalConnectionRecord, LocalWorkingDirectory, ProfileFolder, ProfileKind,
-    ProfileRecord, ResolvedField, ResolvedTerminalSettings, SettingSource, SshAgentBackend,
-    SshAuthMethod, SshAuthStep, SshConnectionRecord, SshConnectionOptions, SshRoute, TerminalDefaults, TerminalOverrides,
-    reserved_local_environment_name,
+    DEFAULT_TERMINAL_FONT_PIXELS, LocalClosePolicy, LocalConnectionRecord, LocalWorkingDirectory,
+    MAX_TERMINAL_FONT_PIXELS, MIN_TERMINAL_FONT_PIXELS, ProfileFolder, ProfileKind, ProfileRecord,
+    ResolvedField, ResolvedTerminalSettings, SettingSource, SshAgentBackend, SshAuthMethod,
+    SshAuthStep, SshConnectionOptions, SshConnectionRecord, SshRoute, TerminalDefaults,
+    TerminalOverrides, reserved_local_environment_name,
 };
 pub use state::{ConnectionState, TargetState, TaskState};
 pub use tasks::*;

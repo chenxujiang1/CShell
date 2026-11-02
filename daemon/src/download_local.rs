@@ -84,39 +84,78 @@ async fn absent(path: &Path) -> Result<(), DownloadReason> {
     }
 }
 impl LocalDownload {
-    pub(crate) async fn set_modified(&mut self,seconds:u32)->Result<(),DownloadReason>{
+    pub(crate) async fn set_modified(&mut self, seconds: u32) -> Result<(), DownloadReason> {
         directory(&self.root).await?;
-        let opened=self.file.as_ref().ok_or(DownloadReason::Invalid)?;
-        let before=opened.metadata().await.map_err(|_|DownloadReason::LocalIo)?;
-        let named=tokio::fs::symlink_metadata(&self.temporary).await.map_err(|_|DownloadReason::LocalIo)?;
-        if !same_file(&before,&named)||self.verified.as_ref().is_some_and(|v|!same_file(v,&before)){return Err(DownloadReason::Checksum);}
-        let file=opened.try_clone().await.map_err(|_|DownloadReason::LocalIo)?.into_std().await;
-        file.set_modified(std::time::UNIX_EPOCH+std::time::Duration::from_secs(u64::from(seconds))).map_err(|_|DownloadReason::LocalIo)?;
-        file.sync_all().map_err(|_|DownloadReason::LocalIo)?;
-        let after=opened.metadata().await.map_err(|_|DownloadReason::LocalIo)?;
-        let named=tokio::fs::symlink_metadata(&self.temporary).await.map_err(|_|DownloadReason::LocalIo)?;
-        if !same_file(&after,&named)||after.len()!=before.len(){return Err(DownloadReason::Checksum);}
-        if self.verified.is_some(){self.verified=Some(after);}Ok(())
+        let opened = self.file.as_ref().ok_or(DownloadReason::Invalid)?;
+        let before = opened
+            .metadata()
+            .await
+            .map_err(|_| DownloadReason::LocalIo)?;
+        let named = tokio::fs::symlink_metadata(&self.temporary)
+            .await
+            .map_err(|_| DownloadReason::LocalIo)?;
+        if !same_file(&before, &named)
+            || self
+                .verified
+                .as_ref()
+                .is_some_and(|v| !same_file(v, &before))
+        {
+            return Err(DownloadReason::Checksum);
+        }
+        let file = opened
+            .try_clone()
+            .await
+            .map_err(|_| DownloadReason::LocalIo)?
+            .into_std()
+            .await;
+        file.set_modified(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(seconds)),
+        )
+        .map_err(|_| DownloadReason::LocalIo)?;
+        file.sync_all().map_err(|_| DownloadReason::LocalIo)?;
+        let after = opened
+            .metadata()
+            .await
+            .map_err(|_| DownloadReason::LocalIo)?;
+        let named = tokio::fs::symlink_metadata(&self.temporary)
+            .await
+            .map_err(|_| DownloadReason::LocalIo)?;
+        if !same_file(&after, &named) || after.len() != before.len() {
+            return Err(DownloadReason::Checksum);
+        }
+        if self.verified.is_some() {
+            self.verified = Some(after);
+        }
+        Ok(())
     }
-    pub(crate) async fn verify_size(&mut self,expected:u64)->Result<(),DownloadReason> {
+    pub(crate) async fn verify_size(&mut self, expected: u64) -> Result<(), DownloadReason> {
         self.flush().await?;
         directory(&self.root).await?;
-        let named=tokio::fs::symlink_metadata(&self.temporary).await.map_err(|_|DownloadReason::LocalIo)?;
-        let opened=self.opened()?.metadata().await.map_err(|_|DownloadReason::LocalIo)?;
-        if !regular(&named) || !same_file(&named,&opened) || opened.len()!=expected {return Err(DownloadReason::Checksum);}
-        self.verified=Some(opened);Ok(())
+        let named = tokio::fs::symlink_metadata(&self.temporary)
+            .await
+            .map_err(|_| DownloadReason::LocalIo)?;
+        let opened = self
+            .opened()?
+            .metadata()
+            .await
+            .map_err(|_| DownloadReason::LocalIo)?;
+        if !regular(&named) || !same_file(&named, &opened) || opened.len() != expected {
+            return Err(DownloadReason::Checksum);
+        }
+        self.verified = Some(opened);
+        Ok(())
     }
-    pub(crate) async fn probe_sizes(&self)->Result<(Option<u64>,Option<u64>),DownloadReason> {
+    pub(crate) async fn probe_sizes(&self) -> Result<(Option<u64>, Option<u64>), DownloadReason> {
         directory(&self.root).await?;
-        async fn size(path:&Path)->Result<Option<u64>,DownloadReason> {
+        async fn size(path: &Path) -> Result<Option<u64>, DownloadReason> {
             match tokio::fs::symlink_metadata(path).await {
-                Ok(meta) if meta.is_file() && regular(&meta)=>Ok(Some(meta.len())),
-                Ok(_)=>Err(DownloadReason::Invalid),
-                Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(None),
-                Err(_)=>Err(DownloadReason::LocalIo),
+                Ok(meta) if meta.is_file() && regular(&meta) => Ok(Some(meta.len())),
+                Ok(_) => Err(DownloadReason::Invalid),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(DownloadReason::LocalIo),
             }
         }
-        Ok((size(&self.temporary).await?,size(&self.destination).await?))
+        Ok((size(&self.temporary).await?, size(&self.destination).await?))
     }
     pub(crate) fn for_session(
         destination: PathBuf,

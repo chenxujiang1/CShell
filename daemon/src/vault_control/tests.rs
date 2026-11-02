@@ -77,7 +77,10 @@ fn native_system_root_vault_reopens_locked_and_unlocks_only_with_the_keychain() 
     assert!(reopened.unlock_system(generation(&reopened)).is_err());
     assert!(!reopened.response(None).unlocked);
     assert!(reopened.mode(target.profile_id).unwrap());
-    assert_eq!(reopened.read(&target, Kind::Password).unwrap_err(), VaultError::Locked);
+    assert_eq!(
+        reopened.read(&target, Kind::Password).unwrap_err(),
+        VaultError::Locked
+    );
 }
 
 #[test]
@@ -117,6 +120,7 @@ fn mode_is_readable_while_locked_but_vault_secrets_never_fall_back_to_native() {
         controller.read(&target, Kind::Password).unwrap().expose(),
         b"saved"
     );
+    let saved_target = target.clone();
     target.username = "other-account".into();
     assert_eq!(
         controller.read(&target, Kind::Password).unwrap_err(),
@@ -132,7 +136,10 @@ fn mode_is_readable_while_locked_but_vault_secrets_never_fall_back_to_native() {
     );
     assert!(!controller.mode(ProfileId::new()).unwrap());
     assert!(controller.mode(target.profile_id).unwrap());
-    assert_eq!(controller.read(&target, Kind::Password).unwrap_err(), VaultError::Locked);
+    assert_eq!(
+        controller.read(&target, Kind::Password).unwrap_err(),
+        VaultError::Locked
+    );
     assert_eq!(
         controller.unlock(&password(), previous).unwrap_err(),
         VaultError::AlreadyExists
@@ -150,6 +157,13 @@ fn mode_is_readable_while_locked_but_vault_secrets_never_fall_back_to_native() {
     assert!(!reopened.response(None).unlocked);
     reopened.unlock(&password(), generation(&reopened)).unwrap();
     assert!(reopened.mode(target.profile_id).unwrap());
+    assert_eq!(
+        reopened
+            .read(&saved_target, Kind::Password)
+            .unwrap()
+            .expose(),
+        b"saved"
+    );
     drop(reopened);
     std::fs::remove_file(path).unwrap();
     let missing = VaultController::new(directory.path().join("credentials.vault"));

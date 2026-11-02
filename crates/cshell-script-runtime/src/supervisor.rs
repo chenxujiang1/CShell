@@ -153,10 +153,10 @@ impl Lease {
 }
 impl Drop for Lease {
     fn drop(&mut self) {
-        if !self.cleanup() {
-            if let Some(scratch) = self.scratch.take() {
-                let _ = scratch.keep();
-            }
+        if !self.cleanup()
+            && let Some(scratch) = self.scratch.take()
+        {
+            let _ = scratch.keep();
         }
     }
 }

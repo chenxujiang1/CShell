@@ -131,7 +131,7 @@ pub(super) fn history_text(
         let Some(left) = selected.next() else {
             continue;
         };
-        let right = selected.last().unwrap_or(left);
+        let right = selected.next_back().unwrap_or(left);
         let Some(visual) = frame.visual_rows.get(first + usize::from(screen_row)) else {
             break;
         };
@@ -199,9 +199,12 @@ impl DesktopApp {
     pub(super) fn clipboard_pointer_available(&self, scale: f32) -> bool {
         let over_control = self.cursor_position.is_some_and(|pos| {
             let point = egui::pos2(pos.x as f32 / scale, pos.y as f32 / scale);
-            self.terminal_ui_regions.iter().any(|rect| rect.contains(point))
+            self.terminal_ui_regions
+                .iter()
+                .any(|rect| rect.contains(point))
         });
-        !over_control && self.terminal_wheel_available(scale)
+        !over_control
+            && self.terminal_wheel_available(scale)
             && (self.log_surface.is_none() || self.terminal_scrollback)
             && !self.task_panel.open
             && !self.host_panel.open
@@ -274,26 +277,27 @@ impl DesktopApp {
             (!extending && !self.modifiers.alt_key() && self.terminal_clipboard.clicks == 3)
                 .then_some(point);
         let previous = self.terminal_decorations.selection;
-        self.terminal_decorations.selection = Some(if let Some(previous) = previous.filter(|_| extending) {
-            TerminalSelection {
-                focus: point,
-                ..previous
-            }
-        } else {
-            TerminalSelection {
-                anchor: point,
-                focus: point,
-                mode: if self.modifiers.alt_key() {
-                    TerminalSelectionMode::Block
-                } else if self.terminal_clipboard.clicks == 3 {
-                    TerminalSelectionMode::Line
-                } else if self.terminal_clipboard.clicks == 2 {
-                    TerminalSelectionMode::Word
-                } else {
-                    TerminalSelectionMode::Character
-                },
-            }
-        });
+        self.terminal_decorations.selection =
+            Some(if let Some(previous) = previous.filter(|_| extending) {
+                TerminalSelection {
+                    focus: point,
+                    ..previous
+                }
+            } else {
+                TerminalSelection {
+                    anchor: point,
+                    focus: point,
+                    mode: if self.modifiers.alt_key() {
+                        TerminalSelectionMode::Block
+                    } else if self.terminal_clipboard.clicks == 3 {
+                        TerminalSelectionMode::Line
+                    } else if self.terminal_clipboard.clicks == 2 {
+                        TerminalSelectionMode::Word
+                    } else {
+                        TerminalSelectionMode::Character
+                    },
+                }
+            });
         self.terminal_selecting = true;
         if extending && self.terminal_clipboard.cross.is_some() {
             self.refresh_history_drag(true);
@@ -310,7 +314,9 @@ impl DesktopApp {
             (self.terminal_clipboard.press_position, self.cursor_position)
         {
             let threshold = 3.0 * f64::from(self.egui_context.pixels_per_point());
-            if !self.terminal_clipboard.dragged && (now.x - start.x).hypot(now.y - start.y) <= threshold {
+            if !self.terminal_clipboard.dragged
+                && (now.x - start.x).hypot(now.y - start.y) <= threshold
+            {
                 return;
             }
         }
@@ -326,29 +332,29 @@ impl DesktopApp {
                 self.terminal_clipboard.dragged = true;
             }
         }
-        if let Some(selection) = &mut self.terminal_decorations.selection {
-            if selection.focus != point {
-                *selection = if let Some(anchor) = self.terminal_clipboard.line_anchor {
-                    TerminalSelection {
-                        anchor,
-                        focus: point,
-                        mode: TerminalSelectionMode::Line,
-                    }
-                } else if let Some(anchor) = self.terminal_clipboard.word_anchor {
-                    TerminalSelection {
-                        anchor,
-                        focus: point,
-                        mode: TerminalSelectionMode::Word,
-                    }
-                } else {
-                    TerminalSelection {
-                        focus: point,
-                        ..*selection
-                    }
-                };
-                self.terminal_clipboard.dragged = true;
-                self.update_clipboard_highlight();
-            }
+        if let Some(selection) = &mut self.terminal_decorations.selection
+            && selection.focus != point
+        {
+            *selection = if let Some(anchor) = self.terminal_clipboard.line_anchor {
+                TerminalSelection {
+                    anchor,
+                    focus: point,
+                    mode: TerminalSelectionMode::Line,
+                }
+            } else if let Some(anchor) = self.terminal_clipboard.word_anchor {
+                TerminalSelection {
+                    anchor,
+                    focus: point,
+                    mode: TerminalSelectionMode::Word,
+                }
+            } else {
+                TerminalSelection {
+                    focus: point,
+                    ..*selection
+                }
+            };
+            self.terminal_clipboard.dragged = true;
+            self.update_clipboard_highlight();
         }
     }
 
@@ -479,14 +485,29 @@ impl DesktopApp {
             ctx.open_url(egui::OpenUrl::new_tab(link));
         }
         let mut command = None;
-        if self.terminal_clipboard.menu.is_none() && self.modifiers.control_key() && self.clipboard_pointer_available(ctx.pixels_per_point())
-            && let (Some(link),Some(pos))=(self.terminal_link_hint(),self.cursor_position) {
+        if self.terminal_clipboard.menu.is_none()
+            && self.modifiers.control_key()
+            && self.clipboard_pointer_available(ctx.pixels_per_point())
+            && let (Some(link), Some(pos)) = (self.terminal_link_hint(), self.cursor_position)
+        {
             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-            egui::Area::new(egui::Id::new("terminal-link-hint")).order(egui::Order::Tooltip).interactable(false)
-                .fixed_pos(egui::pos2(pos.x as f32/ctx.pixels_per_point()+16.0,pos.y as f32/ctx.pixels_per_point()+20.0)).constrain(true)
-                .show(ctx,|ui|{egui::Frame::popup(ui.style()).show(ui,|ui|{ui.set_max_width(420.0);ui.add(egui::Label::new(format!("Ctrl＋单击打开：{link}")).truncate());});});
+            egui::Area::new(egui::Id::new("terminal-link-hint"))
+                .order(egui::Order::Tooltip)
+                .interactable(false)
+                .fixed_pos(egui::pos2(
+                    pos.x as f32 / ctx.pixels_per_point() + 16.0,
+                    pos.y as f32 / ctx.pixels_per_point() + 20.0,
+                ))
+                .constrain(true)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(420.0);
+                        ui.add(egui::Label::new(format!("Ctrl＋单击打开：{link}")).truncate());
+                    });
+                });
         }
-        if self.command_center.blocks_input() || self.pending_paste.is_some()
+        if self.command_center.blocks_input()
+            || self.pending_paste.is_some()
             || self.profile_panel.is_dialog_open()
             || self.zmodem.blocks_input()
             || self.keyboard_auth.blocks_input()
@@ -530,14 +551,22 @@ impl DesktopApp {
                     .show(ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_min_width(250.0);
-                            let copy = cshell_ui::form::menu_item(ui,"复制                 Ctrl+Shift+C",selection);
+                            let copy = cshell_ui::form::menu_item(
+                                ui,
+                                "复制                 Ctrl+Shift+C",
+                                selection,
+                            );
                             if self.terminal_clipboard.menu_focus_requested && selection {
                                 copy.request_focus();
                             }
                             if copy.clicked() {
                                 command = Some(Action::Copy);
                             }
-                            let paste_button = cshell_ui::form::menu_item(ui,"粘贴                 Ctrl+Shift+V",paste);
+                            let paste_button = cshell_ui::form::menu_item(
+                                ui,
+                                "粘贴                 Ctrl+Shift+V",
+                                paste,
+                            );
                             if self.terminal_clipboard.menu_focus_requested && !selection && paste {
                                 paste_button.request_focus();
                             }
@@ -546,7 +575,12 @@ impl DesktopApp {
                                 command = Some(Action::Paste);
                             }
                             if ui
-                                .add_enabled(paste && self.sync_input.is_some(),egui::Button::new("粘贴到多行编辑器…").min_size(egui::vec2(ui.available_width(),28.0)).right_text(()))
+                                .add_enabled(
+                                    paste && self.sync_input.is_some(),
+                                    egui::Button::new("粘贴到多行编辑器…")
+                                        .min_size(egui::vec2(ui.available_width(), 28.0))
+                                        .right_text(()),
+                                )
                                 .clicked()
                             {
                                 command = Some(Action::Edit);
@@ -554,30 +588,39 @@ impl DesktopApp {
                             let context = &self.terminal_clipboard.context;
                             if let Some(text) = &context.selected {
                                 ui.separator();
-                                if cshell_ui::form::menu_item(ui,"查找选中文本",true).clicked() {
+                                if cshell_ui::form::menu_item(ui, "查找选中文本", true).clicked()
+                                {
                                     command = Some(Action::Find(text.to_string()));
                                 }
                             }
                             if let Some(link) = &context.link {
                                 ui.separator();
-                                if cshell_ui::form::menu_item(ui,"打开链接",true).on_hover_text(link).clicked() {
+                                if cshell_ui::form::menu_item(ui, "打开链接", true)
+                                    .on_hover_text(link)
+                                    .clicked()
+                                {
                                     command = Some(Action::OpenLink(link.clone()));
                                 }
-                                if cshell_ui::form::menu_item(ui,"复制链接地址",true).clicked() {
+                                if cshell_ui::form::menu_item(ui, "复制链接地址", true).clicked()
+                                {
                                     command = Some(Action::CopyLink(link.clone()));
                                 }
                             }
                             if let Some(path) = &context.path {
                                 ui.separator();
-                                if cshell_ui::form::menu_item(ui,"在 SFTP 中定位",remote)
+                                if cshell_ui::form::menu_item(ui, "在 SFTP 中定位", remote)
                                     .on_hover_text(path)
                                     .clicked()
                                 {
                                     command = Some(Action::RemotePath(path.clone(), false));
                                 }
-                                if cshell_ui::form::menu_item(ui,"通过 SFTP 下载",remote && path != "/")
-                                    .on_hover_text("下载到 SFTP 左侧当前本地目录，进度进入传输队列")
-                                    .clicked()
+                                if cshell_ui::form::menu_item(
+                                    ui,
+                                    "通过 SFTP 下载",
+                                    remote && path != "/",
+                                )
+                                .on_hover_text("下载到 SFTP 左侧当前本地目录，进度进入传输队列")
+                                .clicked()
                                 {
                                     command = Some(Action::RemotePath(path.clone(), true));
                                 }
@@ -598,21 +641,21 @@ impl DesktopApp {
                 }
             }
         }
-        if let Some((message, at)) = &self.terminal_clipboard.toast {
-            if at.elapsed() < std::time::Duration::from_millis(1400) {
-                egui::Area::new(egui::Id::new("terminal-copy-toast"))
-                    .order(egui::Order::Tooltip)
-                    .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -50.0])
-                    .interactable(false)
-                    .show(ctx, |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.label(message);
-                        });
+        if let Some((message, at)) = &self.terminal_clipboard.toast
+            && at.elapsed() < std::time::Duration::from_millis(1400)
+        {
+            egui::Area::new(egui::Id::new("terminal-copy-toast"))
+                .order(egui::Order::Tooltip)
+                .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -50.0])
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(message);
                     });
-                ctx.request_repaint_after(
-                    std::time::Duration::from_millis(1400).saturating_sub(at.elapsed()),
-                );
-            }
+                });
+            ctx.request_repaint_after(
+                std::time::Duration::from_millis(1400).saturating_sub(at.elapsed()),
+            );
         }
         command
     }
@@ -638,6 +681,11 @@ impl DesktopApp {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};

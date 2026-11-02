@@ -1,34 +1,49 @@
+use super::visuals::{self, Icon};
 use super::*;
-use super::visuals::{self,Icon};
 use cshell_domain::SftpQueueItemId;
 use std::collections::BTreeSet;
 mod columns;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+mod layout_memory_tests;
 mod navigation;
-mod transfer_table;
-mod selection;
 mod operations;
+mod selection;
 mod shared_local;
 mod sync;
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests;
+mod transfer_table;
 #[cfg(test)]
-mod layout_memory_tests;
-#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod visual_feedback_tests;
 
 #[derive(Default)]
 pub(super) struct BrowserState {
-    sync:sync::Panel,
+    sync: sync::Panel,
     navigation: navigation::Navigation,
     selection: [selection::Selection; 2],
     operation: Option<operations::Dialog>,
     staged: Vec<SftpQueueDraft>,
     submitted_drafts: Vec<SftpQueueDraft>,
     auto_submit: bool,
-    tree:Option<cshell_application::SftpTreeStart>,
-    tree_auto:bool,
-    tree_sent:Option<(SessionId,cshell_application::SftpTreeStart)>,
-    completed_trees:BTreeSet<SessionId>,
+    tree: Option<cshell_application::SftpTreeStart>,
+    tree_auto: bool,
+    tree_sent: Option<(SessionId, cshell_application::SftpTreeStart)>,
+    completed_trees: BTreeSet<SessionId>,
     local_history: Vec<String>,
     remote_history: Vec<String>,
     sort: [Option<columns::SortState>; 2],
@@ -41,32 +56,72 @@ pub(super) struct BrowserState {
     pub(super) local_rect: Option<egui::Rect>,
     pub(super) remote_rect: Option<egui::Rect>,
     table: transfer_table::TableState,
-    #[cfg(test)] drop_feedback:[Option<visuals::DropFeedback>;2],
+    #[cfg(test)]
+    drop_feedback: [Option<visuals::DropFeedback>; 2],
 }
 
-impl BrowserState { pub(super) fn set_layout_error(&mut self,error:String) {self.error=Some(error);} }
+impl BrowserState {
+    pub(super) fn set_layout_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
+}
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod terminal_path_tests {
     use super::*;
     #[test]
     fn terminal_file_request_waits_for_exact_session_and_stages_download_only_once() {
-        let ctx=egui::Context::default();let session=SessionId::new();let mut panel=SftpPanel::default();
-        panel.queue_terminal_path(session,"/var/log/test.log".into(),true);
-        let mut view=SftpView{session_id:Some(session),connection_phase:crate::sftp_connection::ConnectionPhase::Connected,generation:1,..Default::default()};
-        assert!(matches!(panel.process_terminal_path(&ctx,&view),Some(SftpClientCommand::BrowseManaged(id,ref options)) if id==session&&options.path=="/var/log"));
-        assert!(panel.process_terminal_path(&ctx,&view).is_none());assert!(panel.browser.staged.is_empty());
-        view.remote_loaded_directory=Some("/var/log".into());view.generation=2;
-        view.remote_requested_directory=Some("/var/log".into());
-        view.local_directory=Some(std::env::temp_dir().to_string_lossy().into());
-        view.entries=vec![cshell_ipc::SftpDirectoryEntry{name:"test.log".into(),path:"/var/log/test.log".into(),kind:1,..Default::default()}];
-        panel.process_terminal_path(&ctx,&view);
-        assert_eq!(panel.browser.staged.len(),1);assert!(panel.browser.auto_submit);
-        assert_eq!(panel.browser.staged[0].remote_path,"/var/log/test.log");
-        assert_eq!(panel.browser.staged[0].direction,SftpQueueDirection::Download);
-        panel.process_terminal_path(&ctx,&view);assert_eq!(panel.browser.staged.len(),1);
-        panel.queue_terminal_path(SessionId::new(),"/different".into(),true);
-        panel.process_terminal_path(&ctx,&view);assert!(panel.terminal_path.is_none());assert!(panel.browser.error.as_deref().unwrap().contains("会话已变化"));
+        let ctx = egui::Context::default();
+        let session = SessionId::new();
+        let mut panel = SftpPanel::default();
+        panel.queue_terminal_path(session, "/var/log/test.log".into(), true);
+        let mut view = SftpView {
+            session_id: Some(session),
+            connection_phase: crate::sftp_connection::ConnectionPhase::Connected,
+            generation: 1,
+            ..Default::default()
+        };
+        assert!(
+            matches!(panel.process_terminal_path(&ctx,&view),Some(SftpClientCommand::BrowseManaged(id,ref options)) if id==session&&options.path=="/var/log")
+        );
+        assert!(panel.process_terminal_path(&ctx, &view).is_none());
+        assert!(panel.browser.staged.is_empty());
+        view.remote_loaded_directory = Some("/var/log".into());
+        view.generation = 2;
+        view.remote_requested_directory = Some("/var/log".into());
+        view.local_directory = Some(std::env::temp_dir().to_string_lossy().into());
+        view.entries = vec![cshell_ipc::SftpDirectoryEntry {
+            name: "test.log".into(),
+            path: "/var/log/test.log".into(),
+            kind: 1,
+            ..Default::default()
+        }];
+        panel.process_terminal_path(&ctx, &view);
+        assert_eq!(panel.browser.staged.len(), 1);
+        assert!(panel.browser.auto_submit);
+        assert_eq!(panel.browser.staged[0].remote_path, "/var/log/test.log");
+        assert_eq!(
+            panel.browser.staged[0].direction,
+            SftpQueueDirection::Download
+        );
+        panel.process_terminal_path(&ctx, &view);
+        assert_eq!(panel.browser.staged.len(), 1);
+        panel.queue_terminal_path(SessionId::new(), "/different".into(), true);
+        panel.process_terminal_path(&ctx, &view);
+        assert!(panel.terminal_path.is_none());
+        assert!(
+            panel
+                .browser
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("会话已变化")
+        );
     }
 }
 
@@ -203,44 +258,92 @@ fn directory_choices(
 
 impl SftpPanel {
     #[cfg(test)]
-    pub(super) fn preview_directory_sync(&mut self,session:SessionId,id:SessionId){self.browser.sync=sync::Panel::preview(session,id);}
-    pub(super) fn open_directory_sync(&mut self){self.browser.sync.open();}
-    pub(crate) fn process_terminal_path(&mut self,ctx:&egui::Context,view:&SftpView)->Option<SftpClientCommand> {
-        let mut request=self.terminal_path.take()?;
-        if view.session_id!=Some(request.session) {
-            self.browser.error=Some("SFTP 会话已变化，终端文件操作已取消，请重新选择。".into());return None;
-        }
-        if view.connection_phase!=crate::sftp_connection::ConnectionPhase::Connected {
-            self.terminal_path=Some(request);return None;
-        }
-        let path=request.path.trim_end_matches('/');
-        let (parent,name)=if path.is_empty(){("/","")}else{path.rsplit_once('/').map(|(p,n)|(if p.is_empty(){"/"}else{p},n)).unwrap_or(("/",path))};
-        if request.phase==0 {
-            request.phase=1;request.generation=view.generation;
-            let command=self.navigate(request.session,false,parent.into());
-            self.terminal_path=Some(request);return Some(command);
-        }
-        if view.remote_requested_directory.as_deref().is_some_and(|p|p!=parent) {
-            self.browser.error=Some("SFTP 已切换目录，终端路径操作已取消。".into());return None;
-        }
-        if view.remote_loaded_directory.is_none()||view.remote_requested_directory.as_deref()!=Some(parent)||view.generation<=request.generation||view.workspace_busy {
-            if view.error.is_some()&&view.generation>request.generation {self.browser.error=Some("无法定位终端路径，请检查 SFTP 错误信息。".into());}
-            else {self.terminal_path=Some(request);}
+    pub(super) fn preview_directory_sync(&mut self, session: SessionId, id: SessionId) {
+        self.browser.sync = sync::Panel::preview(session, id);
+    }
+    pub(super) fn open_directory_sync(&mut self) {
+        self.browser.sync.open();
+    }
+    pub(crate) fn process_terminal_path(
+        &mut self,
+        ctx: &egui::Context,
+        view: &SftpView,
+    ) -> Option<SftpClientCommand> {
+        let mut request = self.terminal_path.take()?;
+        if view.session_id != Some(request.session) {
+            self.browser.error = Some("SFTP 会话已变化，终端文件操作已取消，请重新选择。".into());
             return None;
         }
-        if name.is_empty() {return None;}
-        if let Some(entry)=view.entries.iter().find(|e|e.name==name) {
+        if view.connection_phase != crate::sftp_connection::ConnectionPhase::Connected {
+            self.terminal_path = Some(request);
+            return None;
+        }
+        let path = request.path.trim_end_matches('/');
+        let (parent, name) = if path.is_empty() {
+            ("/", "")
+        } else {
+            path.rsplit_once('/')
+                .map(|(p, n)| (if p.is_empty() { "/" } else { p }, n))
+                .unwrap_or(("/", path))
+        };
+        if request.phase == 0 {
+            request.phase = 1;
+            request.generation = view.generation;
+            let command = self.navigate(request.session, false, parent.into());
+            self.terminal_path = Some(request);
+            return Some(command);
+        }
+        if view
+            .remote_requested_directory
+            .as_deref()
+            .is_some_and(|p| p != parent)
+        {
+            self.browser.error = Some("SFTP 已切换目录，终端路径操作已取消。".into());
+            return None;
+        }
+        if view.remote_loaded_directory.is_none()
+            || view.remote_requested_directory.as_deref() != Some(parent)
+            || view.generation <= request.generation
+            || view.workspace_busy
+        {
+            if view.error.is_some() && view.generation > request.generation {
+                self.browser.error = Some("无法定位终端路径，请检查 SFTP 错误信息。".into());
+            } else {
+                self.terminal_path = Some(request);
+            }
+            return None;
+        }
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(entry) = view.entries.iter().find(|e| e.name == name) {
             self.browser.selection[1].context(&entry.path);
             if request.download {
-                if view.local_directory.is_none() {self.terminal_path=Some(request);return None;}
-                self.stage_file(request.session,view,&DragFile{session:request.session,local:false,path:entry.path.clone(),name:entry.name.clone()},true);
+                if view.local_directory.is_none() {
+                    self.terminal_path = Some(request);
+                    return None;
+                }
+                self.stage_file(
+                    request.session,
+                    view,
+                    &DragFile {
+                        session: request.session,
+                        local: false,
+                        path: entry.path.clone(),
+                        name: entry.name.clone(),
+                    },
+                    true,
+                );
                 ctx.request_repaint();
             }
-        } else if let Some(cursor)=&view.remote_cursor {
-            request.generation=view.generation;
-            let command=SftpClientCommand::BrowseNext(request.session,false,cursor.clone());
-            self.terminal_path=Some(request);return Some(command);
-        } else {self.browser.error=Some(format!("远端目录中未找到：{}",request.path));}
+        } else if let Some(cursor) = &view.remote_cursor {
+            request.generation = view.generation;
+            let command = SftpClientCommand::BrowseNext(request.session, false, cursor.clone());
+            self.terminal_path = Some(request);
+            return Some(command);
+        } else {
+            self.browser.error = Some(format!("远端目录中未找到：{}", request.path));
+        }
         None
     }
     pub fn request_failed(&mut self, transfer: bool) {
@@ -248,7 +351,9 @@ impl SftpPanel {
             self.request_rejected();
         } else {
             self.browser.error = Some("后台正忙，请稍后重试当前操作。".into());
-            if let Some(dialog) = &mut self.browser.operation { dialog.rejected(); }
+            if let Some(dialog) = &mut self.browser.operation {
+                dialog.rejected();
+            }
         }
     }
     fn submit_dropped(
@@ -257,8 +362,22 @@ impl SftpPanel {
         view: &SftpView,
         command: &mut Option<SftpClientCommand>,
     ) {
-        if self.browser.tree_auto && self.browser.operation.is_none() && command.is_none() && !view.workspace_busy {
-            if let Some(options)=self.browser.tree.take(){let id=SessionId::new();self.browser.tree_sent=Some((id,options.clone()));self.browser.tree_auto=false;*command=Some(SftpClientCommand::Tree(session,SftpOperation::TreeStart,id,Some(options)));return;}
+        if self.browser.tree_auto
+            && self.browser.operation.is_none()
+            && command.is_none()
+            && !view.workspace_busy
+            && let Some(options) = self.browser.tree.take()
+        {
+            let id = SessionId::new();
+            self.browser.tree_sent = Some((id, options.clone()));
+            self.browser.tree_auto = false;
+            *command = Some(SftpClientCommand::Tree(
+                session,
+                SftpOperation::TreeStart,
+                id,
+                Some(options),
+            ));
+            return;
         }
         if self.browser.operation.is_some()
             || !self.browser.auto_submit
@@ -292,7 +411,10 @@ impl SftpPanel {
     }
     pub fn request_rejected(&mut self) {
         self.browser.sync.request_rejected();
-        if let Some((_,options))=self.browser.tree_sent.take(){self.browser.tree=Some(options);self.browser.tree_auto=false;}
+        if let Some((_, options)) = self.browser.tree_sent.take() {
+            self.browser.tree = Some(options);
+            self.browser.tree_auto = false;
+        }
         self.advanced.editor_request_rejected();
         self.browser
             .staged
@@ -311,11 +433,22 @@ impl SftpPanel {
         view: &SftpView,
         command: &mut Option<SftpClientCommand>,
     ) {
-        if self.browser.tree_sent.as_ref().is_some_and(|(id,_)|view.trees.contains_key(id)){self.browser.tree_sent=None;}
-        for tree in view.trees.values().filter(|r|r.session==session&&r.state==cshell_application::TerminalUploadState::Succeeded) {
+        if self
+            .browser
+            .tree_sent
+            .as_ref()
+            .is_some_and(|(id, _)| view.trees.contains_key(id))
+        {
+            self.browser.tree_sent = None;
+        }
+        for tree in view.trees.values().filter(|r| {
+            r.session == session && r.state == cshell_application::TerminalUploadState::Succeeded
+        }) {
             if command.is_none() && !self.browser.completed_trees.contains(&tree.id) {
-                let local=tree.direction==SftpQueueDirection::Download;
-                if loaded_path(view,local)==Some(tree.destination.as_str()){*command=Some(self.navigate(session,local,tree.destination.clone()));}
+                let local = tree.direction == SftpQueueDirection::Download;
+                if loaded_path(view, local) == Some(tree.destination.as_str()) {
+                    *command = Some(self.navigate(session, local, tree.destination.clone()));
+                }
                 self.browser.completed_trees.insert(tree.id);
             }
         }
@@ -369,11 +502,25 @@ impl SftpPanel {
             self.browser.submitted_existing.clear();
         }
         for (side, local) in [(0, true), (1, false)] {
-            self.browser.selection[side].sync(loaded_path(view, local),
-                if local { &view.local_entries } else { &view.entries });
-            let selected = if local { &mut self.local_file } else { &mut self.remote_file };
+            self.browser.selection[side].sync(
+                loaded_path(view, local),
+                if local {
+                    &view.local_entries
+                } else {
+                    &view.entries
+                },
+            );
+            let selected = if local {
+                &mut self.local_file
+            } else {
+                &mut self.remote_file
+            };
             if !self.browser.selection[side].paths.contains(selected) {
-                *selected = self.browser.selection[side].paths.first().cloned().unwrap_or_default();
+                *selected = self.browser.selection[side]
+                    .paths
+                    .first()
+                    .cloned()
+                    .unwrap_or_default();
             }
         }
         if self.browser.operation.is_none() && !self.browser.sync.blocks() {
@@ -381,62 +528,91 @@ impl SftpPanel {
             self.file_shortcuts(ui, session, view, command);
         }
         self.advance_file_operation(session, view, command);
-        #[cfg(test)] self.layout.column_handles.clear();
-        let verification=view.connection_profile.and_then(|p|self.verification_overrides.get(&p).copied()).unwrap_or_else(||crate::zmodem_settings::load().sftp_verification);
-        self.browser.sync.show(ui,session,view,verification,command);
-        let whole=ui.available_rect_before_wrap();
-        let dock_height=self.layout.transfer_height(whole.height());
-        let dock=egui::Panel::bottom("sftp-transfer-dock")
+        #[cfg(test)]
+        self.layout.column_handles.clear();
+        let verification = view
+            .connection_profile
+            .and_then(|p| self.verification_overrides.get(&p).copied())
+            .unwrap_or_else(|| crate::zmodem_settings::load().sftp_verification);
+        self.browser
+            .sync
+            .show(ui, session, view, verification, command);
+        let whole = ui.available_rect_before_wrap();
+        let dock_height = self.layout.transfer_height(whole.height());
+        let dock = egui::Panel::bottom("sftp-transfer-dock")
             .exact_size(dock_height)
-            .frame(egui::Frame::NONE.fill(cshell_ui::theme::PANEL)
-                .stroke(egui::Stroke::new(1.0,cshell_ui::theme::LINE)).inner_margin(8))
-            .show(ui,|ui|{ui.push_id(("queue-session",session),|ui|self.transfer_dock(ui,session,view,command));});
-        let panes=ui.available_rect_before_wrap();
-        let [left,right,divider]=self.layout.pane_rects(panes);
-        for (local,rect) in [(true,left),(false,right)] {
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)),|ui| {
-                self.file_pane(ui,session,view,local,panes.height(),command);
+            .frame(
+                egui::Frame::NONE
+                    .fill(cshell_ui::theme::PANEL)
+                    .stroke(egui::Stroke::new(1.0, cshell_ui::theme::LINE))
+                    .inner_margin(8),
+            )
+            .show(ui, |ui| {
+                ui.push_id(("queue-session", session), |ui| {
+                    self.transfer_dock(ui, session, view, command)
+                });
             });
+        let panes = ui.available_rect_before_wrap();
+        let [left, right, divider] = self.layout.pane_rects(panes);
+        for (local, rect) in [(true, left), (false, right)] {
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                |ui| {
+                    self.file_pane(ui, session, view, local, panes.height(), command);
+                },
+            );
         }
-        self.layout.split_handle(ui,panes,divider);
-        self.layout.transfer_handle(ui,whole,dock.response.rect.top());
+        self.layout.split_handle(ui, panes, divider);
+        self.layout
+            .transfer_handle(ui, whole, dock.response.rect.top());
         let native = context.input(|input| input.raw.dropped_files.clone());
         if self.browser.operation.is_none() && !self.browser.sync.blocks() && !native.is_empty() {
             context.request_repaint();
             if self.browser.remote_rect.is_some_and(|rect| {
-                context
-                    .pointer_latest_pos()
-                    .is_some_and(|pos| rect.contains(pos) && context.layer_id_at(pos)==Some(ui.layer_id()))
+                context.pointer_latest_pos().is_some_and(|pos| {
+                    rect.contains(pos) && context.layer_id_at(pos) == Some(ui.layer_id())
+                })
             }) {
-                if native.iter().any(|f|f.path().is_dir()) {
-                    self.stage_tree(session,view,true,native.iter().take(129).map(|f|f.path().to_string_lossy().into_owned()).collect());
-                } else {
-                for file in native.into_iter().take(129) {
-                    let path = file.path();
-                    if !path.is_file() {
-                        self.browser.error =
-                            Some("请拖入普通文件；文件夹请先打开后选择其中的文件。".into());
-                        continue;
-                    }
-                    let Some(path_text) = path.to_str() else {
-                        self.browser.error = Some("此文件路径无法读取。".into());
-                        continue;
-                    };
-                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                        continue;
-                    };
-                    self.stage_file(
+                if native.iter().any(|f| f.path().is_dir()) {
+                    self.stage_tree(
                         session,
                         view,
-                        &DragFile {
-                            session,
-                            local: true,
-                            path: path_text.into(),
-                            name: name.into(),
-                        },
-                        false,
+                        true,
+                        native
+                            .iter()
+                            .take(129)
+                            .map(|f| f.path().to_string_lossy().into_owned())
+                            .collect(),
                     );
-                }
+                } else {
+                    for file in native.into_iter().take(129) {
+                        let path = file.path();
+                        if !path.is_file() {
+                            self.browser.error =
+                                Some("请拖入普通文件；文件夹请先打开后选择其中的文件。".into());
+                            continue;
+                        }
+                        let Some(path_text) = path.to_str() else {
+                            self.browser.error = Some("此文件路径无法读取。".into());
+                            continue;
+                        };
+                        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                            continue;
+                        };
+                        self.stage_file(
+                            session,
+                            view,
+                            &DragFile {
+                                session,
+                                local: true,
+                                path: path_text.into(),
+                                name: name.into(),
+                            },
+                            false,
+                        );
+                    }
                 }
             } else {
                 self.browser.error = Some("请将本地文件拖到右侧远端列表上传。".into());
@@ -463,12 +639,24 @@ impl SftpPanel {
         command: &mut Option<SftpClientCommand>,
     ) {
         let width = ui.available_width();
-        let selected=&self.browser.selection[usize::from(!local)].paths;
-        let entries=if local {&view.local_entries}else{&view.entries};
-        let connected=view.connection_profile.is_none() || view.connection_phase==crate::sftp_connection::ConnectionPhase::Connected;
-        let can_transfer=connected && loaded_path(view,local).is_some() && loaded_path(view,!local).is_some()
-            && !selected.is_empty() && selected.len()<=128
-            && entries.iter().filter(|entry|matches!(entry.kind,1|2)&&selected.contains(&entry.path)).count()==selected.len();
+        let selected = &self.browser.selection[usize::from(!local)].paths;
+        let entries = if local {
+            &view.local_entries
+        } else {
+            &view.entries
+        };
+        let connected = view.connection_profile.is_none()
+            || view.connection_phase == crate::sftp_connection::ConnectionPhase::Connected;
+        let can_transfer = connected
+            && loaded_path(view, local).is_some()
+            && loaded_path(view, !local).is_some()
+            && !selected.is_empty()
+            && selected.len() <= 128
+            && entries
+                .iter()
+                .filter(|entry| matches!(entry.kind, 1 | 2) && selected.contains(&entry.path))
+                .count()
+                == selected.len();
         ui.push_id(
             if local {
                 "sftp-local-pane"
@@ -529,15 +717,13 @@ impl SftpPanel {
                                         );
                                     }
                                     if visuals::tool(ui,Icon::Up,"↑",true,None,true).on_hover_text("上级目录 · Alt+Up").clicked()
-                                    {
-                                        if let Some(path) = loaded_path(view, local) {
+                                        && let Some(path) = loaded_path(view, local) {
                                             *command = Some(self.navigate(
                                                 session,
                                                 local,
                                                 parent_path(local, path),
                                             ));
                                         }
-                                    }
                                 },
                             );
                         });
@@ -710,12 +896,35 @@ impl SftpPanel {
         );
     }
 
-    fn stage_tree(&mut self,session:SessionId,view:&SftpView,local:bool,paths:Vec<String>){
-        if view.session_id!=Some(session)||paths.is_empty()||paths.len()>128 {self.browser.error=Some("请选择当前会话的 1–128 个文件或文件夹".into());return;}
-        let Some(destination)=loaded_path(view,!local) else{self.browser.error=Some("请先载入目标目录".into());return;};
-        if self.browser.tree.is_some()||self.browser.tree_sent.is_some(){self.browser.error=Some("上一批目录任务正在加入，请稍后再拖入".into());return;}
-        let verification=view.connection_profile.and_then(|p|self.verification_overrides.get(&p).copied()).unwrap_or_else(||crate::zmodem_settings::load().sftp_verification);
-        self.browser.tree=Some(cshell_application::SftpTreeStart{direction:if local{SftpQueueDirection::Upload}else{SftpQueueDirection::Download},paths,destination:destination.into(),verification});self.browser.tree_auto=true;self.browser.error=None;
+    fn stage_tree(&mut self, session: SessionId, view: &SftpView, local: bool, paths: Vec<String>) {
+        if view.session_id != Some(session) || paths.is_empty() || paths.len() > 128 {
+            self.browser.error = Some("请选择当前会话的 1–128 个文件或文件夹".into());
+            return;
+        }
+        let Some(destination) = loaded_path(view, !local) else {
+            self.browser.error = Some("请先载入目标目录".into());
+            return;
+        };
+        if self.browser.tree.is_some() || self.browser.tree_sent.is_some() {
+            self.browser.error = Some("上一批目录任务正在加入，请稍后再拖入".into());
+            return;
+        }
+        let verification = view
+            .connection_profile
+            .and_then(|p| self.verification_overrides.get(&p).copied())
+            .unwrap_or_else(|| crate::zmodem_settings::load().sftp_verification);
+        self.browser.tree = Some(cshell_application::SftpTreeStart {
+            direction: if local {
+                SftpQueueDirection::Upload
+            } else {
+                SftpQueueDirection::Download
+            },
+            paths,
+            destination: destination.into(),
+            verification,
+        });
+        self.browser.tree_auto = true;
+        self.browser.error = None;
     }
     fn stage_file(
         &mut self,
@@ -731,8 +940,15 @@ impl SftpPanel {
         if file.local == local_target {
             return;
         }
-        let source=if file.local{&view.local_entries}else{&view.entries};
-        if source.iter().any(|e|e.path==file.path&&e.kind==2){self.stage_tree(session,view,file.local,vec![file.path.clone()]);return;}
+        let source = if file.local {
+            &view.local_entries
+        } else {
+            &view.entries
+        };
+        if source.iter().any(|e| e.path == file.path && e.kind == 2) {
+            self.stage_tree(session, view, file.local, vec![file.path.clone()]);
+            return;
+        }
         if self.browser.staged.len() >= 128 {
             self.browser.error = Some("一次最多选择 128 个文件。".into());
             return;
@@ -746,8 +962,10 @@ impl SftpPanel {
             self.browser.error = Some("文件名无效。".into());
             return;
         }
-        let verification=view.connection_profile.and_then(|profile|self.verification_overrides.get(&profile).copied())
-            .unwrap_or_else(||crate::zmodem_settings::load().sftp_verification);
+        let verification = view
+            .connection_profile
+            .and_then(|profile| self.verification_overrides.get(&profile).copied())
+            .unwrap_or_else(|| crate::zmodem_settings::load().sftp_verification);
         let draft = if local_target {
             view.local_directory
                 .as_ref()
@@ -793,5 +1011,4 @@ impl SftpPanel {
             Err(error) => self.browser.error = Some(error.into()),
         }
     }
-
 }

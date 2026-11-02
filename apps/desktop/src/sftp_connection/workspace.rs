@@ -1,8 +1,19 @@
 use super::*;
-pub(super) fn valid_edit_review(view:&SftpView,wire:SessionId,command:&WorkspaceCommand)->bool {
-    command.revision==0 && view.edit.as_ref().is_some_and(|edit|edit.session==wire && !edit.closed
-        && edit.id.as_uuid().as_bytes().as_slice()==command.object.as_slice()
-        && serde_json::from_slice::<cshell_application::SftpEditReviewRequest>(&command.data).is_ok_and(|r|r.revision==edit.revision))
+pub(super) fn valid_edit_review(
+    view: &SftpView,
+    wire: SessionId,
+    command: &WorkspaceCommand,
+) -> bool {
+    command.revision == 0
+        && view.edit.as_ref().is_some_and(|edit| {
+            edit.session == wire
+                && !edit.closed
+                && edit.id.as_uuid().as_bytes().as_slice() == command.object.as_slice()
+                && serde_json::from_slice::<cshell_application::SftpEditReviewRequest>(
+                    &command.data,
+                )
+                .is_ok_and(|r| r.revision == edit.revision)
+        })
 }
 fn mutation(op: SftpOperation) -> bool {
     matches!(
@@ -99,7 +110,9 @@ pub(super) async fn transfer_one(
         let mut view = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if view.session_id==Some(session) {view.status = "文件已保存；已有任务结束后，从队列明确启动此条".into();}
+        if view.session_id == Some(session) {
+            view.status = "文件已保存；已有任务结束后，从队列明确启动此条".into();
+        }
     } else {
         publish_queue(shared, session, result, false, Some(queue.revision));
     }
@@ -118,7 +131,7 @@ pub(super) async fn run_command(
         view.session_id == Some(scope)
             && view.workspace_epoch == command.epoch
             && match command.operation {
-                SftpOperation::EditReview => valid_edit_review(&view,wire,&command),
+                SftpOperation::EditReview => valid_edit_review(&view, wire, &command),
                 SftpOperation::FileApply | SftpOperation::FileJobCancel => {
                     view.file_writable
                         && view.file_job.as_ref().is_some_and(|j| {
@@ -131,7 +144,7 @@ pub(super) async fn run_command(
                 | SftpOperation::EditSave
                 | SftpOperation::EditClose
                 | SftpOperation::EditRebase
-            | SftpOperation::EditRebind => {
+                | SftpOperation::EditRebind => {
                     view.edit_writable
                         && view.edit.as_ref().is_some_and(|e| {
                             e.revision == command.revision
@@ -209,7 +222,7 @@ pub(super) async fn run_command(
 }
 fn fault(
     shared: &Arc<Mutex<SftpView>>,
-    scope:SessionId,
+    scope: SessionId,
     explicit: bool,
     uncertain: bool,
     operation: SftpOperation,
@@ -218,7 +231,9 @@ fn fault(
     let mut view = shared
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if view.session_id!=Some(scope) {return;}
+    if view.session_id != Some(scope) {
+        return;
+    }
     if explicit {
         view.workspace_busy = false;
     }
@@ -250,7 +265,17 @@ fn publish(
                 || id.as_uuid().as_bytes().as_slice() == command.object.as_slice()
         };
         let valid = match &reply {
-            SftpWorkspaceReply::Review(value)=>command.operation==SftpOperation::EditReview&&value.session==wire&&object(value.id)&&serde_json::from_slice::<cshell_application::SftpEditReviewRequest>(&command.data).is_ok_and(|r|r.revision==value.revision&&r.backup==value.selected_backup),
+            SftpWorkspaceReply::Review(value) => {
+                command.operation == SftpOperation::EditReview
+                    && value.session == wire
+                    && object(value.id)
+                    && serde_json::from_slice::<cshell_application::SftpEditReviewRequest>(
+                        &command.data,
+                    )
+                    .is_ok_and(|r| {
+                        r.revision == value.revision && r.backup == value.selected_backup
+                    })
+            }
             SftpWorkspaceReply::File(j) => {
                 matches!(
                     command.operation,
@@ -271,7 +296,7 @@ fn publish(
                         | SftpOperation::EditSave
                         | SftpOperation::EditClose
                         | SftpOperation::EditRebase
-            | SftpOperation::EditRebind
+                        | SftpOperation::EditRebind
                 ) && document.session == wire
                     && object(document.id)
                     && document.revision >= command.revision
@@ -335,9 +360,17 @@ fn publish(
     }
     let authority = explicit && command.epoch == view.workspace_epoch;
     match reply {
-        SftpWorkspaceReply::Review(value)=>{
-            if authority && view.edit.as_ref().is_some_and(|edit|edit.id==value.id&&edit.revision==value.revision&&edit.session==value.session){view.edit_writable=true;}
-            view.edit_review=Some(Arc::new(value));
+        SftpWorkspaceReply::Review(value) => {
+            if authority
+                && view.edit.as_ref().is_some_and(|edit| {
+                    edit.id == value.id
+                        && edit.revision == value.revision
+                        && edit.session == value.session
+                })
+            {
+                view.edit_writable = true;
+            }
+            view.edit_review = Some(Arc::new(value));
         }
         SftpWorkspaceReply::File(job) => {
             if view
@@ -377,7 +410,10 @@ fn publish(
             if authority
                 && matches!(
                     command.operation,
-                    SftpOperation::EditRebase | SftpOperation::EditOpen | SftpOperation::EditGet | SftpOperation::EditRebind
+                    SftpOperation::EditRebase
+                        | SftpOperation::EditOpen
+                        | SftpOperation::EditGet
+                        | SftpOperation::EditRebind
                 )
             {
                 view.edit_writable = true;
@@ -497,12 +533,35 @@ pub(super) async fn poll(config: &DesktopConnectionConfig, shared: &Arc<Mutex<Sf
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod lifecycle_scope_tests {
     use super::*;
     #[test]
     fn old_workspace_fault_does_not_disable_new_connection_authority() {
-        let new=SessionId::new();let shared=Arc::new(Mutex::new(SftpView{session_id:Some(new),workspace_epoch:12,workspace_busy:true,file_writable:true,..Default::default()}));
-        fault(&shared,SessionId::new(),true,true,SftpOperation::FileApply,"old timeout".into());
-        let view=shared.lock().unwrap();assert_eq!(view.workspace_epoch,12);assert!(view.workspace_busy);assert!(view.file_writable);assert!(view.error.is_none());
+        let new = SessionId::new();
+        let shared = Arc::new(Mutex::new(SftpView {
+            session_id: Some(new),
+            workspace_epoch: 12,
+            workspace_busy: true,
+            file_writable: true,
+            ..Default::default()
+        }));
+        fault(
+            &shared,
+            SessionId::new(),
+            true,
+            true,
+            SftpOperation::FileApply,
+            "old timeout".into(),
+        );
+        let view = shared.lock().unwrap();
+        assert_eq!(view.workspace_epoch, 12);
+        assert!(view.workspace_busy);
+        assert!(view.file_writable);
+        assert!(view.error.is_none());
     }
 }

@@ -8,9 +8,14 @@ use daemon_connection::DesktopDaemonView;
 pub(super) fn configured_target(connection: &cshell_domain::SshConnectionRecord) -> String {
     let host = if connection.host.contains(':') && !connection.host.starts_with('[') {
         format!("[{}]", connection.host)
-    } else { connection.host.clone() };
-    if connection.username.is_empty() {format!("{host}:{}", connection.port)}
-    else {format!("{}@{host}:{}", connection.username, connection.port)}
+    } else {
+        connection.host.clone()
+    };
+    if connection.username.is_empty() {
+        format!("{host}:{}", connection.port)
+    } else {
+        format!("{}@{host}:{}", connection.username, connection.port)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +68,9 @@ impl DesktopApp {
                 .as_ref()
                 .is_some_and(|c| c.view().paused);
         self.view_model.ssh_control_busy = busy;
-        self.view_model.can_disconnect_ssh = profile.is_some() && (live || view.as_ref().is_some_and(|v| v.session_reconnecting)) && !busy;
+        self.view_model.can_disconnect_ssh = profile.is_some()
+            && (live || view.as_ref().is_some_and(|v| v.session_reconnecting))
+            && !busy;
         self.view_model.can_restart_ssh = profile.is_some() && writable && !busy;
         self.view_model.can_reconnect_ssh = self.view_model.can_restart_ssh && !live;
         let mut states = self
@@ -72,10 +79,29 @@ impl DesktopApp {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(summaries) = view.as_ref().and_then(|v| v.sessions.as_ref()) {
             for (tab, id) in &self.workspace.sessions {
-                if let Some(summary) = summaries.iter().find(|s| s.session_id == id.as_uuid().as_bytes())
-                    && self.workspace.document.bindings.iter().any(|b| b.tab_id == *tab && b.profile_id.is_some_and(|p| self.view_model.saved_ssh_profiles.iter().any(|saved| saved.id == p && saved.kind == ProfileKind::Ssh)))
+                if let Some(summary) = summaries
+                    .iter()
+                    .find(|s| s.session_id == id.as_uuid().as_bytes())
+                    && self.workspace.document.bindings.iter().any(|b| {
+                        b.tab_id == *tab
+                            && b.profile_id.is_some_and(|p| {
+                                self.view_model
+                                    .saved_ssh_profiles
+                                    .iter()
+                                    .any(|saved| saved.id == p && saved.kind == ProfileKind::Ssh)
+                            })
+                    })
                 {
-                    states.insert(*tab, if summary.reconnecting { SshConnectionState::Reconnecting } else if summary.running { SshConnectionState::Connected } else { SshConnectionState::Disconnected });
+                    states.insert(
+                        *tab,
+                        if summary.reconnecting {
+                            SshConnectionState::Reconnecting
+                        } else if summary.running {
+                            SshConnectionState::Connected
+                        } else {
+                            SshConnectionState::Disconnected
+                        },
+                    );
                 }
             }
         }
@@ -105,7 +131,10 @@ impl DesktopApp {
             } else if live && view.as_ref().is_some_and(|v| v.connected) {
                 Some(SshConnectionState::Connected)
             } else if previous == Some(SshConnectionState::Disconnected)
-                && (!self.workspace.sessions.contains_key(&tab) || view.as_ref().is_some_and(|v| !v.session_running && !v.session_reconnecting && v.sessions.is_some()))
+                && (!self.workspace.sessions.contains_key(&tab)
+                    || view.as_ref().is_some_and(|v| {
+                        !v.session_running && !v.session_reconnecting && v.sessions.is_some()
+                    }))
             {
                 previous
             } else if previous.is_some() {

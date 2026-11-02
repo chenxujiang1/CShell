@@ -191,7 +191,7 @@ impl SshProviderPanel {
         let ready = self.connection.is_some() && !view.busy;
         let mut open = self.open;
         let mut query_input = None;
-        cshell_ui::form::dialog(&context, "SSH 能力").open(&mut open).default_size([700.0, 640.0]).show(context, |ui| {
+        cshell_ui::form::dialog(context, "SSH 能力").open(&mut open).default_size([700.0, 640.0]).show(context, |ui| {
             ui.weak("查看本机已启用的 SSH 后端，并检查连接需求。此处不连接服务器或读取凭据；支持的功能仍需服务器允许。");
             if ui.add_enabled(!view.busy, egui::Button::new("重新读取能力")).clicked() {
                 if self.connection.is_none() { self.error = None; } else { query_input = Some(None); }

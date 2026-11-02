@@ -3,9 +3,7 @@ use cshell_application::{
     ImportItemKind, ProfileImportError, ProfileImportPreview, ProfileRepositoryError,
     ProfileService, ProfileServiceError,
 };
-use cshell_domain::{
-    FolderId, ProfileFolder, ProfileId, ProfileRecord, SshAuthMethod, SshConnectionRecord,
-};
+use cshell_domain::{FolderId, ProfileFolder, ProfileId, ProfileRecord, SshConnectionRecord};
 use cshell_ipc::{
     HostKeyPreviewData, MAX_PROFILE_CONTROL_CHANGES, ProfileCatalogData, ProfileChange,
     ProfileCodecError, ProfileDefaultsData, ProfileFolderData, ProfileImportAction,
@@ -694,13 +692,28 @@ impl ProfileIpcService {
                     .await
                     .map_err(|error| (ProfileStatus::Unavailable, error))?;
                 let replacement = if replacing {
-                    if verifier.has_authority_entries() || verifier.public_key_revoked(&scanned.public_key_line)
-                        .map_err(|error| (ProfileStatus::Corrupt, error.into()))? {
-                        return Err((ProfileStatus::Conflict, "CA-managed or revoked host trust cannot be replaced".into()));
+                    if verifier.has_authority_entries()
+                        || verifier
+                            .public_key_revoked(&scanned.public_key_line)
+                            .map_err(|error| (ProfileStatus::Corrupt, error.into()))?
+                    {
+                        return Err((
+                            ProfileStatus::Conflict,
+                            "CA-managed or revoked host trust cannot be replaced".into(),
+                        ));
                     }
-                    Some(cshell_ssh::preview_host_key_update(&path, &target.host, target.port, &scanned.public_key_line)
-                        .map_err(|error| (ProfileStatus::Conflict, error))?)
-                } else { None };
+                    Some(
+                        cshell_ssh::preview_host_key_update(
+                            &path,
+                            &target.host,
+                            target.port,
+                            &scanned.public_key_line,
+                        )
+                        .map_err(|error| (ProfileStatus::Conflict, error))?,
+                    )
+                } else {
+                    None
+                };
                 let token: [u8; 32] = rand::random();
                 let expires_unix_seconds = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -708,7 +721,9 @@ impl ProfileIpcService {
                     .as_secs()
                     + 300;
                 let preview = HostKeyPreviewData {
-                    previous_fingerprints: replacement.as_ref().map_or_else(Vec::new, |r| r.previous_fingerprints.clone()),
+                    previous_fingerprints: replacement
+                        .as_ref()
+                        .map_or_else(Vec::new, |r| r.previous_fingerprints.clone()),
                     profile_id: id_bytes.to_vec(),
                     host: target.host.clone(),
                     port: target.port.into(),
@@ -808,16 +823,25 @@ impl ProfileIpcService {
                 }
                 tokio::task::spawn_blocking(move || {
                     if let Some(replacement) = &pending.replacement {
-                        cshell_ssh::update_confirmed_host_key(&path, &target.host, target.port,
-                            &scanned.public_key_line, &pending.fingerprint, &profile_id, replacement)
-                    } else { import_confirmed_host_key(
-                        &path,
-                        &target.host,
-                        target.port,
-                        &scanned.public_key_line,
-                        &pending.fingerprint,
-                        &profile_id,
-                    ) }
+                        cshell_ssh::update_confirmed_host_key(
+                            &path,
+                            &target.host,
+                            target.port,
+                            &scanned.public_key_line,
+                            &pending.fingerprint,
+                            &profile_id,
+                            replacement,
+                        )
+                    } else {
+                        import_confirmed_host_key(
+                            &path,
+                            &target.host,
+                            target.port,
+                            &scanned.public_key_line,
+                            &pending.fingerprint,
+                            &profile_id,
+                        )
+                    }
                 })
                 .await
                 .map_err(|_| {
@@ -830,7 +854,12 @@ impl ProfileIpcService {
                 Ok(ProfileResponse {
                     status: ProfileStatus::Ok as i32,
                     revision: request.expected_revision,
-                    detail: if replacing { "Host key updated in known_hosts with an audit record" } else { "Host key imported into known_hosts with an audit record" }.into(),
+                    detail: if replacing {
+                        "Host key updated in known_hosts with an audit record"
+                    } else {
+                        "Host key imported into known_hosts with an audit record"
+                    }
+                    .into(),
                     ..ProfileResponse::default()
                 })
             }

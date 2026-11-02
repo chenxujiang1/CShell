@@ -218,6 +218,11 @@ pub fn update_confirmed_host_key(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     const PROFILE: &str = "12345678-1234-1234-1234-123456789abc";

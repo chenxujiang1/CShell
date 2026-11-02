@@ -1,3 +1,10 @@
+type PreparedImportPreview = (
+    Vec<u8>,
+    ProfileImportPreviewData,
+    Vec<String>,
+    Option<[u8; 32]>,
+);
+
 use crate::daemon_connection::DesktopConnectionConfig;
 use cshell_domain::{
     LocalConnectionRecord, ProfileFolder, ProfileId, ProfileRecord, SshConnectionRecord,
@@ -238,10 +245,24 @@ pub enum ProfileClientCommand {
 impl ProfileClientCommand {
     fn host_key_scope(&self) -> Option<(ProfileId, u64)> {
         match self {
-            Self::PreviewHostKey { profile_id, expected_revision }
-            | Self::ConfirmHostKey { profile_id, expected_revision, .. }
-            | Self::PreviewHostKeyUpdate { profile_id, expected_revision }
-            | Self::ConfirmHostKeyUpdate { profile_id, expected_revision, .. } => Some((*profile_id, *expected_revision)),
+            Self::PreviewHostKey {
+                profile_id,
+                expected_revision,
+            }
+            | Self::ConfirmHostKey {
+                profile_id,
+                expected_revision,
+                ..
+            }
+            | Self::PreviewHostKeyUpdate {
+                profile_id,
+                expected_revision,
+            }
+            | Self::ConfirmHostKeyUpdate {
+                profile_id,
+                expected_revision,
+                ..
+            } => Some((*profile_id, *expected_revision)),
             _ => None,
         }
     }
@@ -251,9 +272,15 @@ impl ProfileClientCommand {
     }
 
     pub(crate) fn is_credential_mutation(&self) -> bool {
-        matches!(self, Self::Apply { .. } | Self::ApplyWithPassword { .. }
-            | Self::SetPassword { .. } | Self::DeletePassword { .. }
-            | Self::SetKeyPassphrase { .. } | Self::DeleteKeyPassphrase { .. })
+        matches!(
+            self,
+            Self::Apply { .. }
+                | Self::ApplyWithPassword { .. }
+                | Self::SetPassword { .. }
+                | Self::DeletePassword { .. }
+                | Self::SetKeyPassphrase { .. }
+                | Self::DeleteKeyPassphrase { .. }
+        )
     }
 }
 
@@ -320,7 +347,9 @@ impl DesktopProfileConnection {
                         while lock_receiver.recv().await.is_some() {
                             let result = send_vault(
                                 &lock_config,
-                                cshell_ipc::VaultRequest::new(cshell_ipc::VaultOperation::LockTransient),
+                                cshell_ipc::VaultRequest::new(
+                                    cshell_ipc::VaultOperation::LockTransient,
+                                ),
                             )
                             .await;
                             publish_vault(&lock_shared, result, false);
@@ -371,13 +400,23 @@ impl DesktopProfileConnection {
         let tracked = command.is_credential_mutation();
         let vault_mutation = command.is_vault_mutation();
         let host_key_scope = command.host_key_scope();
-        let mut view = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if tracked && view.credential_pending || vault_mutation && view.vault_mutations_pending>0 {
-            if vault_mutation {view.vault_error=Some("凭据操作正在进行，请等待完成后重试。".into());view.generation=view.generation.wrapping_add(1);}
+        let mut view = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if tracked && view.credential_pending || vault_mutation && view.vault_mutations_pending > 0
+        {
+            if vault_mutation {
+                view.vault_error = Some("凭据操作正在进行，请等待完成后重试。".into());
+                view.generation = view.generation.wrapping_add(1);
+            }
             return false;
         }
-        if host_key_scope.is_some() && view.host_key_pending { return false; }
-        let sent = self.sender
+        if host_key_scope.is_some() && view.host_key_pending {
+            return false;
+        }
+        let sent = self
+            .sender
             .as_ref()
             .is_some_and(|sender| sender.try_send(command).is_ok());
         if let Some(scope) = host_key_scope {
@@ -386,7 +425,9 @@ impl DesktopProfileConnection {
             view.host_key_confirmed = None;
             view.host_key_preview = None;
             view.host_key_existing_entry = false;
-            if sent { view.error = None; }
+            if sent {
+                view.error = None;
+            }
         }
         if sent && vault_mutation {
             view.vault_mutations_pending += 1;
@@ -397,7 +438,9 @@ impl DesktopProfileConnection {
             view.status = "正在保存或移除凭据，请稍候…".into();
         } else if !sent {
             view.error = Some("请求未提交：后台队列已满或连接已关闭，请稍后重试。".into());
-            if vault_mutation {view.vault_error=view.error.clone();}
+            if vault_mutation {
+                view.vault_error = view.error.clone();
+            }
         }
         view.generation = view.generation.wrapping_add(1);
         sent
@@ -407,8 +450,6 @@ impl DesktopProfileConnection {
             let _ = sender.try_send(());
         }
     }
-
-
 }
 
 impl Drop for DesktopProfileConnection {
@@ -571,7 +612,7 @@ async fn profile_worker(
                     ProfileClientCommand::PreviewImport(source) => {
                         pending_import = None;
                         update(&shared,|view|{view.preview=None;view.preview_source=None;view.import_digest=None;view.import_notices.clear();});
-                        let result: Result<(Vec<u8>, ProfileImportPreviewData,Vec<String>,Option<[u8;32]>), String> = async {
+                        let result: Result<PreparedImportPreview, String> = async {
                             let (bytes,notices) = prepare_import_source(&source).await?;
                             let digest=if source.format.reviewed_metadata(){Some(cshell_application::ProfileImportDocument::parse(&bytes).and_then(|d|d.fingerprint()).map_err(|_|"Converted session document is invalid")?)}else{None};
                             let mut outgoing = request(if source.format == ProfileImportFormat::Theme { ProfileOperation::PreviewThemes } else { ProfileOperation::PreviewImport });
@@ -628,7 +669,10 @@ async fn profile_worker(
                     }
                     command @ (ProfileClientCommand::PreviewHostKey { .. } | ProfileClientCommand::PreviewHostKeyUpdate { .. }) => {
                         let updating = matches!(&command, ProfileClientCommand::PreviewHostKeyUpdate { .. });
-                        let (profile_id, expected_revision) = command.host_key_scope().unwrap();
+                        let Some((profile_id, expected_revision)) = command.host_key_scope() else {
+                            update(&shared, |view| publish_host_key_preview(view, Err("Invalid host-key request scope".into())));
+                            continue;
+                        };
                         let mut outgoing = request(if updating { ProfileOperation::PreviewHostKeyUpdate } else { ProfileOperation::PreviewHostKey });
                         outgoing.expected_revision = expected_revision;
                         outgoing.credential_profile_id = profile_id.as_uuid().as_bytes().to_vec();
@@ -680,16 +724,23 @@ fn password_request_for_saved_target(
     changes: &[ProfileChange],
     password: &mut Zeroizing<Vec<u8>>,
 ) -> Result<ProfileRequest, String> {
-    let expected = changes.iter().find_map(|change| match &change.change {
-        Some(cshell_ipc::profile_change::Change::UpsertSshConnection(target))
-            if target.profile_id == profile_id.as_uuid().as_bytes() => Some(target),
-        _ => None,
-    }).ok_or("保存结果缺少 SSH 目标")?;
-    let actual = catalog.ssh_connections.iter().find(|target| target.profile_id == profile_id)
+    let expected = changes
+        .iter()
+        .find_map(|change| match &change.change {
+            Some(cshell_ipc::profile_change::Change::UpsertSshConnection(target))
+                if target.profile_id == profile_id.as_uuid().as_bytes() =>
+            {
+                Some(target)
+            }
+            _ => None,
+        })
         .ok_or("保存结果缺少 SSH 目标")?;
-    if !actual.uses_password()
-        || cshell_ipc::SshConnectionData::from(actual) != *expected
-    {
+    let actual = catalog
+        .ssh_connections
+        .iter()
+        .find(|target| target.profile_id == profile_id)
+        .ok_or("保存结果缺少 SSH 目标")?;
+    if !actual.uses_password() || cshell_ipc::SshConnectionData::from(actual) != *expected {
         return Err("保存后的 SSH 目标与草稿不一致".into());
     }
     let mut outgoing = request(ProfileOperation::SetPassword);
@@ -730,7 +781,11 @@ fn publish_vault(
                         cshell_ipc::VaultControlStatus::AuthenticationFailed => "密码不正确，或系统密钥与凭据库不匹配。请重试；无法恢复时可保留旧库并重建。".into(),
                         _ => format!("Vault: {status:?}；刷新状态后再操作"),
                     }});
-                view.vault_notice = if status == cshell_ipc::VaultControlStatus::Ok { response.key_notice.clone() } else { String::new() };
+                view.vault_notice = if status == cshell_ipc::VaultControlStatus::Ok {
+                    response.key_notice.clone()
+                } else {
+                    String::new()
+                };
             }
             view.vault = Some(response);
         }
@@ -833,8 +888,16 @@ async fn send_vault(
         if negotiated.feature_bits & features::VAULT_CONTROL == 0 {
             return Err("daemon 不支持 Vault；请更新后重启 daemon".into());
         }
-        if request.operation==cshell_ipc::VaultOperation::LockTransient as i32 && negotiated.protocol_minor<70 {request.operation=cshell_ipc::VaultOperation::Lock as i32;}
-        if request.operation>=cshell_ipc::VaultOperation::ProtectWithSystem as i32 && negotiated.protocol_minor<70 {return Err("请一起更新 GUI 和后台，以支持凭据库保护方式无损切换".into());}
+        if request.operation == cshell_ipc::VaultOperation::LockTransient as i32
+            && negotiated.protocol_minor < 70
+        {
+            request.operation = cshell_ipc::VaultOperation::Lock as i32;
+        }
+        if request.operation >= cshell_ipc::VaultOperation::ProtectWithSystem as i32
+            && negotiated.protocol_minor < 70
+        {
+            return Err("请一起更新 GUI 和后台，以支持凭据库保护方式无损切换".into());
+        }
         if request.managed_key.is_some() && negotiated.protocol_minor < 67 {
             return Err("后台版本不支持密钥对管理，请更新并重启后台".into());
         }
@@ -1076,7 +1139,10 @@ async fn send(
 ) -> Result<ProfileResponse, String> {
     let timeout = if matches!(
         ProfileOperation::try_from(request.operation),
-        Ok(ProfileOperation::PreviewHostKey | ProfileOperation::ConfirmHostKey | ProfileOperation::PreviewHostKeyUpdate | ProfileOperation::ConfirmHostKeyUpdate)
+        Ok(ProfileOperation::PreviewHostKey
+            | ProfileOperation::ConfirmHostKey
+            | ProfileOperation::PreviewHostKeyUpdate
+            | ProfileOperation::ConfirmHostKeyUpdate)
     ) {
         std::time::Duration::from_secs(40)
     } else if matches!(
@@ -1368,7 +1434,10 @@ fn save_openssh_response(
     crate::profile_export::save_export(path, &response.export_json)
 }
 
-fn publish_host_key_preview(view: &mut DesktopProfileView, result: Result<HostKeyPreviewData, String>) {
+fn publish_host_key_preview(
+    view: &mut DesktopProfileView,
+    result: Result<HostKeyPreviewData, String>,
+) {
     view.host_key_pending = false;
     view.host_key_existing_entry = false;
     match result {
@@ -1377,7 +1446,10 @@ fn publish_host_key_preview(view: &mut DesktopProfileView, result: Result<HostKe
             view.error = None;
             view.status = "请核对服务器指纹并确认信任".into();
         }
-        Err(error) if error.contains("host already has a known_hosts entry; first-key import is blocked") => {
+        Err(error)
+            if error
+                .contains("host already has a known_hosts entry; first-key import is blocked") =>
+        {
             // Existing daemons report this as a first-import conflict. It is a
             // read-only record notice, never evidence that the peer was verified.
             view.host_key_preview = None;
@@ -1393,13 +1465,27 @@ fn publish_host_key_preview(view: &mut DesktopProfileView, result: Result<HostKe
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
 
     #[test]
     fn existing_host_key_preview_is_a_notice_but_security_failures_remain_errors() {
-        let mut view = DesktopProfileView { host_key_pending: true, ..Default::default() };
-        publish_host_key_preview(&mut view, Err("Conflict: host already has a known_hosts entry; first-key import is blocked".into()));
+        let mut view = DesktopProfileView {
+            host_key_pending: true,
+            ..Default::default()
+        };
+        publish_host_key_preview(
+            &mut view,
+            Err(
+                "Conflict: host already has a known_hosts entry; first-key import is blocked"
+                    .into(),
+            ),
+        );
         assert!(view.host_key_existing_entry);
         assert!(!view.host_key_pending);
         assert!(view.error.is_none());
@@ -1414,20 +1500,34 @@ mod tests {
 
     #[test]
     fn profile_connection_exit_locks_vault_even_when_desktop_status_is_unknown() {
-        for state in [None, Some(cshell_ipc::VaultSessionState::Active),
-            Some(cshell_ipc::VaultSessionState::Locked), Some(cshell_ipc::VaultSessionState::Unavailable)] {
+        for state in [
+            None,
+            Some(cshell_ipc::VaultSessionState::Active),
+            Some(cshell_ipc::VaultSessionState::Locked),
+            Some(cshell_ipc::VaultSessionState::Unavailable),
+        ] {
             let (lock_sender, mut locks) = tokio::sync::mpsc::channel(1);
             let connection = DesktopProfileConnection {
                 shared: Arc::new(Mutex::new(DesktopProfileView {
                     vault: state.map(|state| cshell_ipc::VaultResponse {
-                        exists: true, unlocked: true, session_state: state as i32, ..Default::default()
-                    }), ..Default::default()
+                        exists: true,
+                        unlocked: true,
+                        session_state: state as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
                 })),
-                sender: None, worker: None, lock_sender: Some(lock_sender), lock_worker: None,
+                sender: None,
+                worker: None,
+                lock_sender: Some(lock_sender),
+                lock_worker: None,
             };
             assert!(locks.try_recv().is_err());
             drop(connection);
-            assert!(locks.try_recv().is_ok(), "program exit must clear the unlocked Vault");
+            assert!(
+                locks.try_recv().is_ok(),
+                "program exit must clear the unlocked Vault"
+            );
         }
     }
 
@@ -1436,18 +1536,32 @@ mod tests {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
         let connection = DesktopProfileConnection {
             shared: Arc::new(Mutex::new(DesktopProfileView::default())),
-            sender: Some(sender), worker: None, lock_sender: None, lock_worker: None,
+            sender: Some(sender),
+            worker: None,
+            lock_sender: None,
+            lock_worker: None,
         };
         let id = ProfileId::new();
-        let remove = || ProfileClientCommand::DeletePassword { profile_id: id, expected_revision: 1 };
+        let remove = || ProfileClientCommand::DeletePassword {
+            profile_id: id,
+            expected_revision: 1,
+        };
         assert!(connection.request(remove()));
-        for _ in 0..200 { assert!(!connection.request(remove())); }
+        for _ in 0..200 {
+            assert!(!connection.request(remove()));
+        }
         assert!(connection.view().credential_pending);
-        assert!(matches!(receiver.try_recv().unwrap(), ProfileClientCommand::DeletePassword { .. }));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            ProfileClientCommand::DeletePassword { .. }
+        ));
         assert!(receiver.try_recv().is_err());
         publish_credential_result(&connection.shared, Ok(()), "密码已从凭据存储移除");
         update(&connection.shared, |view| view.credential_pending = false);
-        assert!(connection.request(remove()), "completion must allow another deliberate operation");
+        assert!(
+            connection.request(remove()),
+            "completion must allow another deliberate operation"
+        );
         receiver.close();
         update(&connection.shared, |view| view.credential_pending = false);
         assert!(!connection.request(remove()));
@@ -1460,23 +1574,38 @@ mod tests {
         let id = ProfileId::new();
         let target = SshConnectionRecord {
             options: Default::default(),
-            profile_id: id, host: "host.example.test".into(), port: 22,
-            username: "operator".into(), auth_method: cshell_domain::SshAuthMethod::Password,
-            private_key_path: None, certificate_path: None,
-            agent_backend: cshell_domain::SshAgentBackend::Auto, agent_identity: None,
+            profile_id: id,
+            host: "host.example.test".into(),
+            port: 22,
+            username: "operator".into(),
+            auth_method: cshell_domain::SshAuthMethod::Password,
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: cshell_domain::SshAgentBackend::Auto,
+            agent_identity: None,
             route: cshell_domain::SshRoute::Direct,
         };
-        let changes = vec![ProfileChange { change: Some(cshell_ipc::profile_change::Change::UpsertSshConnection(cshell_ipc::SshConnectionData::from(&target))) }];
+        let changes = vec![ProfileChange {
+            change: Some(cshell_ipc::profile_change::Change::UpsertSshConnection(
+                cshell_ipc::SshConnectionData::from(&target),
+            )),
+        }];
         let mut catalog = DesktopProfileCatalog {
-            revision: 42, defaults: Default::default(), folders: vec![], profiles: vec![],
-            ssh_connections: vec![target], local_connections: vec![], themes: vec![],
+            revision: 42,
+            defaults: Default::default(),
+            folders: vec![],
+            profiles: vec![],
+            ssh_connections: vec![target],
+            local_connections: vec![],
+            themes: vec![],
         };
         let mut password = Zeroizing::new(b"test-only-secret".to_vec());
         catalog.ssh_connections[0].host = "different.example.test".into();
         assert!(password_request_for_saved_target(&catalog, id, &changes, &mut password).is_err());
         assert_eq!(&*password, b"test-only-secret");
         catalog.ssh_connections[0].host = "host.example.test".into();
-        let mut request = password_request_for_saved_target(&catalog, id, &changes, &mut password).unwrap();
+        let mut request =
+            password_request_for_saved_target(&catalog, id, &changes, &mut password).unwrap();
         assert_eq!(request.expected_revision, 42);
         assert_eq!(request.credential_profile_id, id.as_uuid().as_bytes());
         assert_eq!(request.credential_secret, b"test-only-secret");

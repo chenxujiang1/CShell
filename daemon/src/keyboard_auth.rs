@@ -90,7 +90,9 @@ impl Broker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|p| p.owner != Some(owner));
     }
-    pub(crate) fn current_owner_cancelled(&self)->bool {self.is_cancelled(OWNER.try_with(|id|*id).ok())}
+    pub(crate) fn current_owner_cancelled(&self) -> bool {
+        self.is_cancelled(OWNER.try_with(|id| *id).ok())
+    }
     fn is_cancelled(&self, owner: Option<SessionId>) -> bool {
         owner.is_some_and(|owner| {
             self.cancelled
@@ -150,12 +152,18 @@ impl Broker {
                     if (!answer.cancel
                         && answer.answers.len() != pending[index].challenge.prompts.len())
                         || answer.answers.iter().any(|s| s.len() > 4096)
-                        || (!answer.cancel && pending[index].challenge.vault_unlock && pending[index].challenge.password_required && answer.answers.first().is_none_or(String::is_empty))
+                        || (!answer.cancel
+                            && pending[index].challenge.vault_unlock
+                            && pending[index].challenge.password_required
+                            && answer.answers.first().is_none_or(String::is_empty))
                         || (!answer.cancel
                             && pending[index].challenge.login
                             && (answer.username.is_empty()
                                 || answer.username.len() > 128
-                                || answer.username.chars().any(|c| c.is_control() || c.is_whitespace())
+                                || answer
+                                    .username
+                                    .chars()
+                                    .any(|c| c.is_control() || c.is_whitespace())
                                 || (!pending[index].challenge.username_editable
                                     && answer.username != pending[index].challenge.username)
                                 || (pending[index].challenge.password_required
@@ -222,9 +230,34 @@ impl Broker {
         .await
         .map(|a| a.answers)
     }
-    pub(crate) async fn ask_vault(self:&Arc<Self>,vault:&VaultController,target:String,challenge:KeyboardInteractiveChallenge)->Answers {
-        self.ask_form(vault,KeyboardAuthChallenge{target,name:challenge.name,instructions:challenge.instructions,vault_unlock:true,password_required:!challenge.prompts.is_empty(),
-            prompts:challenge.prompts.into_iter().map(|p|KeyboardAuthPrompt{text:p.text,echo:false}).collect(),..Default::default()},OWNER.try_with(|id|*id).ok()).await.map(|a|a.answers)
+    pub(crate) async fn ask_vault(
+        self: &Arc<Self>,
+        vault: &VaultController,
+        target: String,
+        challenge: KeyboardInteractiveChallenge,
+    ) -> Answers {
+        self.ask_form(
+            vault,
+            KeyboardAuthChallenge {
+                target,
+                name: challenge.name,
+                instructions: challenge.instructions,
+                vault_unlock: true,
+                password_required: !challenge.prompts.is_empty(),
+                prompts: challenge
+                    .prompts
+                    .into_iter()
+                    .map(|p| KeyboardAuthPrompt {
+                        text: p.text,
+                        echo: false,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            OWNER.try_with(|id| *id).ok(),
+        )
+        .await
+        .map(|a| a.answers)
     }
     async fn ask_form(
         self: &Arc<Self>,
@@ -243,7 +276,11 @@ impl Broker {
             }
             tokio::select! {_=cancellation.changed()=>return Err(SshError::AuthenticationCancelled),_=tokio::time::sleep(Duration::from_millis(20))=>{}}
         }
-        let resume_stage=if challenge.vault_unlock{cshell_domain::ConnectionStage::Credentials}else{cshell_domain::ConnectionStage::Authentication};
+        let resume_stage = if challenge.vault_unlock {
+            cshell_domain::ConnectionStage::Credentials
+        } else {
+            cshell_domain::ConnectionStage::Authentication
+        };
         let id = SessionId::new().as_uuid().as_bytes().to_vec();
         let (reply, receiver) = tokio::sync::oneshot::channel();
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::WaitingForInput);
@@ -270,12 +307,14 @@ impl Broker {
         if self.is_cancelled(owner) {
             return Err(SshError::AuthenticationCancelled);
         }
-        let result=tokio::select! {biased;
+        let result = tokio::select! {biased;
             _=cancellation.changed()=>Err(SshError::AuthenticationCancelled),
             _=async {loop {tokio::time::sleep(Duration::from_secs(1)).await;if !self.frontend_active(){break;}}}=>Err(SshError::InteractiveAuthenticationRequired),
             result=tokio::time::timeout(Duration::from_secs(120),receiver)=>result.map_err(|_|SshError::KeyboardInteractiveTimeout)?.map_err(|_|SshError::AuthenticationCancelled)?,
         };
-        if result.is_ok(){cshell_ssh::connection_progress::stage(resume_stage);}
+        if result.is_ok() {
+            cshell_ssh::connection_progress::stage(resume_stage);
+        }
         result
     }
 }

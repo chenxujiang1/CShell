@@ -240,7 +240,6 @@ fn native_drop_submits_once_to_the_target_and_rejects_local_modal_or_outside_dro
             &mut draw,
         );
         out.textures_delta.clear();
-        drop(draw);
         if case == 0 {
             let request = receiver.try_recv().unwrap();
             assert_eq!(request.operation, Op::TerminalUploadStart as i32);

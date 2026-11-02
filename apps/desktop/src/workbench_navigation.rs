@@ -16,7 +16,8 @@ pub(super) fn shortcut(
 
 impl DesktopApp {
     pub(super) fn tab_navigation_available(&self) -> bool {
-        !self.command_center.blocks_input() && !self.workspace.visible_tabs().is_empty()
+        !self.command_center.blocks_input()
+            && !self.workspace.visible_tabs().is_empty()
             && !self.view_model.ssh_control_busy
             && !self.view_model.layout_paused
             && !self.egui_context.egui_wants_keyboard_input()

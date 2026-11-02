@@ -32,10 +32,10 @@ pub fn normalize_host_authority(
     let parsed = patterns
         .parse::<HostPatterns>()
         .map_err(|_| "invalid OpenSSH host patterns")?;
-    if let HostPatterns::Patterns(values) = parsed {
-        if values.len() > 64 || !values.iter().any(|v| !v.is_empty() && !v.starts_with('!')) {
-            return Err("host CA patterns need a positive bounded scope");
-        }
+    if let HostPatterns::Patterns(values) = parsed
+        && (values.len() > 64 || !values.iter().any(|v| !v.is_empty() && !v.starts_with('!')))
+    {
+        return Err("host CA patterns need a positive bounded scope");
     }
     let mut key = line
         .trim()

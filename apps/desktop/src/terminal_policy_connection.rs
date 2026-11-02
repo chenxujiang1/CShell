@@ -52,7 +52,8 @@ impl Connection {
                 match result{
                     Ok(TerminalPolicyReply::Catalog(catalog))=>{
                         if view.catalog.as_ref().is_some_and(|old|old.catalog.revision>catalog.catalog.revision){view.error=Some("策略版本回退，请恢复原目录".into());view.writable=false;}
-                        else{if apply{view.saved=Some(Arc::new(catalog.catalog.clone()));}if apply||view.catalog.as_ref().is_none_or(|old|old.catalog.revision!=catalog.catalog.revision||old.profile_revision!=catalog.profile_revision||old.host_revision!=catalog.host_revision){view.preview=None;view.report=None;}view.catalog=Some(Arc::new(catalog));view.error=None;if command.explicit&&command.request.operation==Op::Get as i32{view.writable=true;}}
+                        else{if apply{view.saved=Some(Arc::new(catalog.catalog.clone()));}
+if apply||view.catalog.as_ref().is_none_or(|old|old.catalog.revision!=catalog.catalog.revision||old.profile_revision!=catalog.profile_revision||old.host_revision!=catalog.host_revision){view.preview=None;view.report=None;}view.catalog=Some(Arc::new(catalog));view.error=None;if command.explicit&&command.request.operation==Op::Get as i32{view.writable=true;}}
                     },
                     Ok(TerminalPolicyReply::Preview(p))=>{view.preview=Some(Arc::new(p));view.preview_epoch=command.epoch;view.error=None;},
                     Ok(TerminalPolicyReply::Resolved(r))=>{view.report=Some(Arc::new(r));view.report_epoch=command.epoch;view.error=None;},

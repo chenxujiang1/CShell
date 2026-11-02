@@ -352,18 +352,17 @@ impl MixedConnection {
         {
             return false;
         }
-        if let Operation::Start(plan, expected, _) = &operation {
-            if view.plan.as_ref().is_none_or(|saved| {
+        if let Operation::Start(plan, expected, _) = &operation
+            && (view.plan.as_ref().is_none_or(|saved| {
                 saved.id() != plan.id() || saved.fingerprint() != plan.fingerprint()
             }) || view
                 .page
                 .as_ref()
                 .and_then(|page| page.confirmation_bound(view.rollout.as_deref()).ok())
                 .as_ref()
-                != Some(expected)
-            {
-                return false;
-            }
+                != Some(expected))
+        {
+            return false;
         }
         if let Operation::Retry(plan, confirmation) = &operation {
             if confirmation.validate().is_err()
@@ -389,19 +388,18 @@ impl MixedConnection {
                 return false;
             }
         }
-        if let Operation::Approve(_, document) = &operation {
-            if view
+        if let Operation::Approve(_, document) = &operation
+            && (view
                 .rollout
                 .as_ref()
                 .is_none_or(|current| !Arc::ptr_eq(current, document))
                 || document.active
-                || document.progress.gate.is_none()
-            {
-                return false;
-            }
+                || document.progress.gate.is_none())
+        {
+            return false;
         }
-        if let Operation::Repair(plan, host, step, revision, action, _) = &operation {
-            if view.cancel_busy
+        if let Operation::Repair(plan, host, step, revision, action, _) = &operation
+            && (view.cancel_busy
                 || !view.available
                 || view.page.as_ref().is_none_or(|page| {
                     page.active
@@ -417,30 +415,27 @@ impl MixedConnection {
                                             !document.matching_destination(plan, &target.run, *step)
                                         })
                             })
-                })
-            {
-                return false;
-            }
+                }))
+        {
+            return false;
         }
-        if let Operation::Results(_) = &operation {
-            if view.cancel_busy
+        if let Operation::Results(_) = &operation
+            && (view.cancel_busy
                 || !view.available
                 || view
                     .page
                     .as_ref()
-                    .is_none_or(|page| page.active || page.counts[0] != 0 || page.counts[1] != 0)
-            {
-                return false;
-            }
+                    .is_none_or(|page| page.active || page.counts[0] != 0 || page.counts[1] != 0))
+        {
+            return false;
         }
-        if let Operation::Export(document, _, _) = &operation {
-            if view
+        if let Operation::Export(document, _, _) = &operation
+            && view
                 .results
                 .as_ref()
                 .is_none_or(|saved| !Arc::ptr_eq(saved, document))
-            {
-                return false;
-            }
+        {
+            return false;
         }
         let hashing = if let Operation::Hash(key, _) = &operation {
             Some(*key)
@@ -648,6 +643,10 @@ async fn page(
         rollout,
     })
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 enum Outcome {
     List(Vec<MixedRunSummary>, Option<TaskRunId>),
     Loaded(

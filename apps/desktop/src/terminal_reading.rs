@@ -220,6 +220,11 @@ impl DesktopApp {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};

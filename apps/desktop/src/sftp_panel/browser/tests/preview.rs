@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 //! Offline production-egui preview, with synthetic files and no daemon/network.
 use super::*;
 use egui::{TextureId, pos2};
@@ -10,14 +17,46 @@ fn render_sftp_preview() -> Result<(), Box<dyn std::error::Error>> {
     let height = 900usize;
     let context = context();
     let (mut panel, mut view, _) = fixture();
-    view.peer=Some(cshell_domain::ClipboardTrust {host:cshell_domain::ClipboardHost::new("linux-build.internal",22).unwrap(),username:"operator".into(),host_key_sha256:"synthetic-preview".into(),route:"direct".into()});
-    view.connection_profile=Some(cshell_domain::ProfileId::new());
-    view.connection_phase=if std::env::var_os("CSHELL_SFTP_PREVIEW_DISCONNECTED").is_some() {crate::sftp_connection::ConnectionPhase::Disconnected} else {crate::sftp_connection::ConnectionPhase::Connected};
-    if view.connection_phase==crate::sftp_connection::ConnectionPhase::Disconnected {view.status="SFTP 已断开；可点击重新连接".into();}
-    panel.remote_tabs=vec![
-        crate::sftp_panel::RemoteTab{id:1,title:"Linux 构建机".into(),host:"operator@linux-build.internal:22".into(),phase:crate::sftp_connection::ConnectionPhase::Connected,active:true,running:1},
-        crate::sftp_panel::RemoteTab{id:2,title:"生产服务器".into(),host:"deploy@prod.internal:22".into(),phase:crate::sftp_connection::ConnectionPhase::Connected,active:false,running:2},
-        crate::sftp_panel::RemoteTab{id:3,title:"测试环境".into(),host:"operator@test.internal:22".into(),phase:crate::sftp_connection::ConnectionPhase::Disconnected,active:false,running:0},
+    view.peer = Some(cshell_domain::ClipboardTrust {
+        host: cshell_domain::ClipboardHost::new("linux-build.internal", 22).unwrap(),
+        username: "operator".into(),
+        host_key_sha256: "synthetic-preview".into(),
+        route: "direct".into(),
+    });
+    view.connection_profile = Some(cshell_domain::ProfileId::new());
+    view.connection_phase = if std::env::var_os("CSHELL_SFTP_PREVIEW_DISCONNECTED").is_some() {
+        crate::sftp_connection::ConnectionPhase::Disconnected
+    } else {
+        crate::sftp_connection::ConnectionPhase::Connected
+    };
+    if view.connection_phase == crate::sftp_connection::ConnectionPhase::Disconnected {
+        view.status = "SFTP 已断开；可点击重新连接".into();
+    }
+    panel.remote_tabs = vec![
+        crate::sftp_panel::RemoteTab {
+            id: 1,
+            title: "Linux 构建机".into(),
+            host: "operator@linux-build.internal:22".into(),
+            phase: crate::sftp_connection::ConnectionPhase::Connected,
+            active: true,
+            running: 1,
+        },
+        crate::sftp_panel::RemoteTab {
+            id: 2,
+            title: "生产服务器".into(),
+            host: "deploy@prod.internal:22".into(),
+            phase: crate::sftp_connection::ConnectionPhase::Connected,
+            active: false,
+            running: 2,
+        },
+        crate::sftp_panel::RemoteTab {
+            id: 3,
+            title: "测试环境".into(),
+            host: "operator@test.internal:22".into(),
+            phase: crate::sftp_connection::ConnectionPhase::Disconnected,
+            active: false,
+            running: 0,
+        },
     ];
     for i in 0..12 {
         let name = format!("application-{i:02}.tar.gz");
@@ -30,7 +69,6 @@ fn render_sftp_preview() -> Result<(), Box<dyn std::error::Error>> {
             permissions: Some(0o100644),
             uid: Some(1000),
             gid: Some(1000),
-            ..Default::default()
         });
         view.local_entries.push(cshell_ipc::SftpDirectoryEntry {
             path: format!("C:/Users/operator/{name}"),
@@ -81,7 +119,11 @@ fn render_sftp_preview() -> Result<(), Box<dyn std::error::Error>> {
             receipt: None,
             draft: SftpQueueDraft {
                 verified: true,
-                direction:if i==1 {SftpQueueDirection::Download}else{SftpQueueDirection::Upload},
+                direction: if i == 1 {
+                    SftpQueueDirection::Download
+                } else {
+                    SftpQueueDirection::Upload
+                },
                 local_path: format!("C:/Users/operator/application-{i:02}.tar.gz"),
                 remote_path: format!("/home/operator/application-{i:02}.tar.gz"),
                 ..Default::default()
@@ -91,7 +133,12 @@ fn render_sftp_preview() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 Some(SftpVerifiedTransfer {
                     temporary_owned: true,
-                    bytes: if state == SftpQueueState::Succeeded { 32 } else { 12 } * 1024 * 1024,
+                    bytes: if state == SftpQueueState::Succeeded {
+                        32
+                    } else {
+                        12
+                    } * 1024
+                        * 1024,
                     content: Some(SftpVerifiedContent {
                         size: 32 * 1024 * 1024,
                         sha256: [1; 32],
@@ -110,13 +157,19 @@ fn render_sftp_preview() -> Result<(), Box<dyn std::error::Error>> {
     for frame_index in 0..30 {
         if frame_index == 1 {
             if std::env::var_os("CSHELL_SFTP_PREVIEW_LAYOUT").is_some() {
-                panel.layout.value.left_ratio=0.60;
-                panel.layout.value.transfer_ratio=0.34;
-                panel.layout.value.columns[0]=vec![310.0,100.0,110.0,190.0];
+                panel.layout.value.left_ratio = 0.60;
+                panel.layout.value.transfer_ratio = 0.34;
+                panel.layout.value.columns[0] = vec![310.0, 100.0, 110.0, 190.0];
             }
-            panel.browser.selection[1].paths = view.entries.iter().filter(|entry| entry.kind == 1 && entry.permissions.is_some()).take(3).map(|entry|entry.path.clone()).collect();
+            panel.browser.selection[1].paths = view
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == 1 && entry.permissions.is_some())
+                .take(3)
+                .map(|entry| entry.path.clone())
+                .collect();
             if std::env::var_os("CSHELL_SFTP_PREVIEW_FILE_OPERATION").is_some() {
-                panel.open_file_dialog(&view,false,cshell_application::SftpFileAction::Inspect);
+                panel.open_file_dialog(&view, false, cshell_application::SftpFileAction::Inspect);
             }
         }
         let mut frame = context.run_ui(
@@ -126,12 +179,24 @@ fn render_sftp_preview() -> Result<(), Box<dyn std::error::Error>> {
                     pos2(0.0, 0.0),
                     egui::vec2(width as f32, height as f32),
                 )),
-                events: if frame_index>1 && std::env::var_os("CSHELL_SFTP_PREVIEW_DROP").is_some() {
-                    vec![Event::PointerMoved(panel.browser.remote_rect.unwrap().center())]
-                }else{vec![]},
-                hovered_files:if frame_index>1 && std::env::var_os("CSHELL_SFTP_PREVIEW_DROP").is_some() {
-                    vec![egui::HoveredFile {path:Some("C:/preview/application.tar.gz".into()),..Default::default()}]
-                }else{vec![]},
+                events: if frame_index > 1 && std::env::var_os("CSHELL_SFTP_PREVIEW_DROP").is_some()
+                {
+                    vec![Event::PointerMoved(
+                        panel.browser.remote_rect.unwrap().center(),
+                    )]
+                } else {
+                    vec![]
+                },
+                hovered_files: if frame_index > 1
+                    && std::env::var_os("CSHELL_SFTP_PREVIEW_DROP").is_some()
+                {
+                    vec![egui::HoveredFile {
+                        path: Some("C:/preview/application.tar.gz".into()),
+                        ..Default::default()
+                    }]
+                } else {
+                    vec![]
+                },
                 ..Default::default()
             },
             |ui| {

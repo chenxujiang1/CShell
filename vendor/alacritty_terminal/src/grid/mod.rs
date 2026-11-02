@@ -157,7 +157,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     pub fn update_history(&mut self, history_size: usize) {
         let current_history_size = self.history_size();
         if current_history_size > history_size {
-            self.history_offset = self.history_offset.saturating_add((current_history_size - history_size) as u64);
+            self.history_offset = self
+                .history_offset
+                .saturating_add((current_history_size - history_size) as u64);
             self.raw.shrink_lines(current_history_size - history_size);
         }
         self.display_offset = min(self.display_offset, history_size);
@@ -166,9 +168,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
     pub fn scroll_display(&mut self, scroll: Scroll) {
         self.display_offset = match scroll {
-            Scroll::Delta(count) => {
-                min(max((self.display_offset as i32) + count, 0) as usize, self.history_size())
-            },
+            Scroll::Delta(count) => min(
+                max((self.display_offset as i32) + count, 0) as usize,
+                self.history_size(),
+            ),
             Scroll::PageUp => min(self.display_offset + self.lines, self.history_size()),
             Scroll::PageDown => self.display_offset.saturating_sub(self.lines),
             Scroll::Top => self.history_size(),
@@ -178,7 +181,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
     fn increase_scroll_limit(&mut self, count: usize) {
         let retained = min(count, self.max_scroll_limit - self.history_size());
-        self.history_offset = self.history_offset.saturating_add((count - retained) as u64);
+        self.history_offset = self
+            .history_offset
+            .saturating_add((count - retained) as u64);
         let count = retained;
         if count != 0 {
             self.raw.initialize(count, self.columns);
@@ -388,7 +393,9 @@ impl<T> Grid<T> {
     #[inline]
     pub fn clear_history(&mut self) {
         // Explicitly purge all lines from history.
-        self.history_offset = self.history_offset.saturating_add(self.history_size() as u64);
+        self.history_offset = self
+            .history_offset
+            .saturating_add(self.history_size() as u64);
         self.raw.shrink_lines(self.history_size());
 
         // Reset display offset.
@@ -405,7 +412,8 @@ impl<T> Grid<T> {
         self.truncate();
 
         // Initialize everything with empty new lines.
-        self.raw.initialize(self.max_scroll_limit - self.history_size(), self.columns);
+        self.raw
+            .initialize(self.max_scroll_limit - self.history_size(), self.columns);
     }
 
     /// This is used only for truncating before saving ref-tests.
@@ -418,7 +426,11 @@ impl<T> Grid<T> {
     #[inline]
     pub fn iter_from(&self, point: Point) -> GridIterator<'_, T> {
         let end = Point::new(self.bottommost_line(), self.last_column());
-        GridIterator { grid: self, point, end }
+        GridIterator {
+            grid: self,
+            point,
+            end,
+        }
     }
 
     /// Iterate over all visible cells.
@@ -432,7 +444,11 @@ impl<T> Grid<T> {
         let end_line = min(start.line + self.screen_lines(), self.bottommost_line());
         let end = Point::new(end_line, last_column);
 
-        GridIterator { grid: self, point: start, end }
+        GridIterator {
+            grid: self,
+            point: start,
+            end,
+        }
     }
 
     #[inline]
@@ -609,11 +625,14 @@ impl<'a, T> Iterator for GridIterator<'a, T> {
             Point { column, .. } if column >= self.grid.last_column() => {
                 self.point.column = Column(0);
                 self.point.line += 1;
-            },
+            }
             _ => self.point.column += Column(1),
         }
 
-        Some(Indexed { cell: &self.grid[self.point], point: self.point })
+        Some(Indexed {
+            cell: &self.grid[self.point],
+            point: self.point,
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -651,33 +670,45 @@ impl<T> BidirectionalIterator for GridIterator<'_, T> {
         }
 
         match self.point {
-            Point { column: Column(0), .. } => {
+            Point {
+                column: Column(0), ..
+            } => {
                 self.point.column = last_column;
                 self.point.line -= 1;
-            },
+            }
             _ => self.point.column -= Column(1),
         }
 
-        Some(Indexed { cell: &self.grid[self.point], point: self.point })
+        Some(Indexed {
+            cell: &self.grid[self.point],
+            point: self.point,
+        })
     }
 }
 
 // CShell: history is independently bounded by bytes as well as physical rows.
 impl Grid<crate::term::cell::Cell> {
-    pub fn history_offset(&self) -> u64 { self.history_offset }
+    pub fn history_offset(&self) -> u64 {
+        self.history_offset
+    }
 
     pub fn limit_history_bytes(&mut self, limit: usize) -> usize {
-        use std::mem::size_of;
         use crate::term::cell::Cell;
+        use std::mem::size_of;
         self.raw.truncate();
         let history = self.history_size();
-        let mut data_bytes = (0..history).map(|index| {
-            self.raw[Line(index as i32-history as i32)].retained_memory_bytes()
-        }).sum::<usize>();
-        let mut bytes = data_bytes + self.raw.allocated_rows().saturating_sub(self.screen_lines()) * size_of::<Row<Cell>>();
+        let mut data_bytes = (0..history)
+            .map(|index| self.raw[Line(index as i32 - history as i32)].retained_memory_bytes())
+            .sum::<usize>();
+        let mut bytes = data_bytes
+            + self
+                .raw
+                .allocated_rows()
+                .saturating_sub(self.screen_lines())
+                * size_of::<Row<Cell>>();
         let mut remove = 0;
         while bytes > limit && remove < history {
-            let cost = self.raw[Line(remove as i32-history as i32)].retained_memory_bytes();
+            let cost = self.raw[Line(remove as i32 - history as i32)].retained_memory_bytes();
             data_bytes = data_bytes.saturating_sub(cost);
             bytes = bytes.saturating_sub(cost + size_of::<Row<Cell>>());
             remove += 1;
@@ -688,8 +719,15 @@ impl Grid<crate::term::cell::Cell> {
             self.display_offset = self.display_offset.min(self.history_size());
             self.raw.release_cache();
         }
-        if self.history_size() == 0 { self.raw.release_cache(); return 0; }
-        data_bytes + self.raw.allocated_rows().saturating_sub(self.screen_lines()) * size_of::<Row<Cell>>()
-
+        if self.history_size() == 0 {
+            self.raw.release_cache();
+            return 0;
+        }
+        data_bytes
+            + self
+                .raw
+                .allocated_rows()
+                .saturating_sub(self.screen_lines())
+                * size_of::<Row<Cell>>()
     }
 }

@@ -262,14 +262,14 @@ impl ScriptControlService {
                 for task in &proposal.scope.tasks {
                     check_task(tasks, task).await?;
                 }
-                if let Some(event) = proposal.scope.trigger_event {
-                    if !tools.script_event_current(
+                if let Some(event) = proposal.scope.trigger_event
+                    && !tools.script_event_current(
                         event,
                         proposal.scope.session.ok_or(Status::Invalid)?,
                         &proposal.document.script_id,
-                    ) {
-                        return Err(Status::Conflict);
-                    }
+                    )
+                {
+                    return Err(Status::Conflict);
                 }
                 let trigger_run = if proposal.scope.trigger_on_next_match {
                     Some(
@@ -410,14 +410,14 @@ impl ScriptControlService {
                     broker,
                 )
                 .map_err(|_| Status::Invalid)?;
-                if let Some(event) = frozen.proposal.scope.trigger_event {
-                    if !tools.claim_script_event(
+                if let Some(event) = frozen.proposal.scope.trigger_event
+                    && !tools.claim_script_event(
                         event,
                         frozen.proposal.scope.session.ok_or(Status::Invalid)?,
                         &frozen.proposal.document.script_id,
-                    ) {
-                        return Err(Status::Conflict);
-                    }
+                    )
+                {
+                    return Err(Status::Conflict);
                 }
                 let id = run.run_id();
                 let view = ScriptLiveView {

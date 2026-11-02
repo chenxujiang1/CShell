@@ -62,15 +62,14 @@ impl TunnelPanel {
             && self
                 .last_poll
                 .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+            && c.request(TunnelRequest::default(), false)
         {
-            if c.request(TunnelRequest::default(), false) {
-                self.last_poll = Some(std::time::Instant::now());
-            }
+            self.last_poll = Some(std::time::Instant::now());
         }
         let view = self.connection.as_ref().map(Connection::view);
         let mut open = self.open;
         let mut command = None;
-        cshell_ui::form::dialog(&context, "SSH 隧道管理").open(&mut open).default_size([760.0,660.0]).show(context,|ui|{
+        cshell_ui::form::dialog(context, "SSH 隧道管理").open(&mut open).default_size([760.0,660.0]).show(context,|ui|{
             ui.weak("保存不会启动。可绑定交互 SSH 会话，或另建无 PTY 的专用连接；专用连接关闭参考标签后仍可运行。");
             if ui.button("刷新隧道").clicked(){self.error=None;command=Some((TunnelRequest::default(),true));}
             if let Some(error)=&self.error{ui.colored_label(cshell_ui::theme::DANGER,error);}
@@ -122,7 +121,8 @@ impl TunnelPanel {
                         ui.weak("冻结的是配置与引用；密钥文件和凭据在认证时读取，不能改变已捕获的完整 peer。");
                     }
                     let mut changed=ui.checkbox(&mut self.retry_enabled,"明确允许本次专用运行自动恢复（默认关闭）").changed();
-                    if self.retry_enabled{if self.retry_max==0{self.retry_max=3;}if self.retry_delay==0{self.retry_delay=5000;}ui.horizontal_wrapped(|ui|{ui.label("最多恢复次数");changed|=ui.add(egui::DragValue::new(&mut self.retry_max).range(1..=5)).changed();ui.label("等待 ms");changed|=ui.add(egui::DragValue::new(&mut self.retry_delay).range(1000..=60000)).changed();});}
+                    if self.retry_enabled{if self.retry_max==0{self.retry_max=3;}
+if self.retry_delay==0{self.retry_delay=5000;}ui.horizontal_wrapped(|ui|{ui.label("最多恢复次数");changed|=ui.add(egui::DragValue::new(&mut self.retry_max).range(1..=5)).changed();ui.label("等待 ms");changed|=ui.add(egui::DragValue::new(&mut self.retry_delay).range(1000..=60000)).changed();});}
                     if changed{self.freeze_confirm=false;self.dedicated_start_confirm=false;}
                     let draft_policy=self.retry_enabled.then_some(TunnelReconnectPolicy{max_retries:self.retry_max,delay_ms:self.retry_delay});
                     let policy_matches=row.dedicated.as_ref().is_some_and(|p|p.configuration.reconnect.as_ref().filter(|p|p.max_retries>0)==draft_policy.as_ref());

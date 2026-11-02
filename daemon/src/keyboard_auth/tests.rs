@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::*;
 fn target() -> SshConnectionRecord {
     SshConnectionRecord {
@@ -57,7 +64,8 @@ fn reply(
         id: c.id.clone(),
         answers: if cancel { vec![] } else { vec![text.into()] },
         cancel,
-        username:String::new(),save_credentials:false
+        username: String::new(),
+        save_credentials: false,
     });
     vault
         .keyboard_auth

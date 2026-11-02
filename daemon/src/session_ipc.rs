@@ -146,7 +146,10 @@ impl SessionIpcService {
     }
 
     pub fn with_profiles(mut self, profiles: Arc<ProfileIpcService>) -> Self {
-        profiles.vault.keyboard_auth.bind_profiles(Arc::downgrade(&profiles));
+        profiles
+            .vault
+            .keyboard_auth
+            .bind_profiles(Arc::downgrade(&profiles));
         self.profiles = Some(profiles);
         self
     }
@@ -166,7 +169,10 @@ impl SessionIpcService {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let request = read_envelope(stream).await?;
-        let response = self.dispatch_observed(request,u64::MAX,stream).await?.response;
+        let response = self
+            .dispatch_observed(request, u64::MAX, stream)
+            .await?
+            .response;
         write_envelope(stream, &response).await?;
         Ok(())
     }
@@ -197,7 +203,7 @@ impl SessionIpcService {
             Err(error) => return Err(SessionIpcError::Transport(error)),
         };
         let initial = self
-            .dispatch_observed(initial_request, negotiated_features,&mut stream)
+            .dispatch_observed(initial_request, negotiated_features, &mut stream)
             .await?;
         let mut subscription = initial.subscription;
         if let Err(error) = write_envelope(&mut stream, &initial.response).await {
@@ -271,6 +277,7 @@ impl SessionIpcService {
         result
     }
 
+    #[cfg(test)]
     async fn dispatch_any(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
         self.dispatch_with_features(request, u64::MAX).await
     }
@@ -298,46 +305,94 @@ impl SessionIpcService {
                 subscription: None,
             });
         }
-        if let Some(envelope::Payload::LogPageRequest(page)) = request.payload.as_ref() && page.terminal_history {
-            if negotiated_features & cshell_ipc::features::TERMINAL_SCROLLBACK == 0 {return Err(SessionIpcError::UnsupportedRequest);}
+        if let Some(envelope::Payload::LogPageRequest(page)) = request.payload.as_ref()
+            && page.terminal_history
+        {
+            if negotiated_features & cshell_ipc::features::TERMINAL_SCROLLBACK == 0 {
+                return Err(SessionIpcError::UnsupportedRequest);
+            }
             page.validate()?;
-            let id=LocalSessionRegistry::parse_session_id(&page.session_id)?;
-            let snapshots=if let Ok(session)=self.ssh_sessions.get(id){session.history_snapshots()}else{self.registry.attach(id)?.snapshots()};
-            let page=page.clone();
-            static HISTORY_READERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-            let permit = HISTORY_READERS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
-                .clone().acquire_owned().await.map_err(|_| SessionIpcError::InitialFrameUnavailable)?;
-            let response=tokio::task::spawn_blocking(move|| { let _permit = permit; snapshots.history_page(&page) }).await
-                .map_err(|_|SessionIpcError::InitialFrameUnavailable)?.ok_or(SessionIpcError::InitialFrameUnavailable)?;
+            let id = LocalSessionRegistry::parse_session_id(&page.session_id)?;
+            let snapshots = if let Ok(session) = self.ssh_sessions.get(id) {
+                session.history_snapshots()
+            } else {
+                self.registry.attach(id)?.snapshots()
+            };
+            let page = page.clone();
+            static HISTORY_READERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+                std::sync::OnceLock::new();
+            let permit = HISTORY_READERS
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| SessionIpcError::InitialFrameUnavailable)?;
+            let response = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                snapshots.history_page(&page)
+            })
+            .await
+            .map_err(|_| SessionIpcError::InitialFrameUnavailable)?
+            .ok_or(SessionIpcError::InitialFrameUnavailable)?;
             response.validate()?;
-            return Ok(DispatchResult{response:Envelope{request_id:request.request_id,payload:Some(envelope::Payload::LogPage(response)),..Default::default()},subscription:None});
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::LogPage(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
         }
         if let Some(envelope::Payload::ZmodemRequest(command)) = request.payload.as_ref() {
             let mut response = cshell_ipc::ZmodemResponse::default();
             if negotiated_features & cshell_ipc::features::ZMODEM == 0 {
                 response.error = "后台未协商 ZMODEM 功能，请更新 GUI 和后台".into();
-            } else if command.operation > 3 || command.paths.len() > 128 || command.paths.iter().any(|p| p.len()>4096 || p.contains('\0')) {
+            } else if command.operation > 3
+                || command.paths.len() > 128
+                || command
+                    .paths
+                    .iter()
+                    .any(|p| p.len() > 4096 || p.contains('\0'))
+            {
                 response.error = "无效 ZMODEM 请求".into();
             } else if command.operation != 0 {
-                match <[u8;16]>::try_from(command.session_id.as_slice()).ok()
-                    .and_then(|id| self.ssh_sessions.get(cshell_domain::SessionId::from_bytes(id)).ok()) {
+                match <[u8; 16]>::try_from(command.session_id.as_slice())
+                    .ok()
+                    .and_then(|id| {
+                        self.ssh_sessions
+                            .get(cshell_domain::SessionId::from_bytes(id))
+                            .ok()
+                    }) {
                     Some(session) => {
                         let command = command.clone();
-                        match tokio::task::spawn_blocking(move || session.zmodem_control(&command)).await {
-                            Ok(Ok(())) => {},
-                            Ok(Err(error)) => response.error=error,
-                            Err(_) => response.error="ZMODEM 文件操作失败".into(),
+                        match tokio::task::spawn_blocking(move || session.zmodem_control(&command))
+                            .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => response.error = error,
+                            Err(_) => response.error = "ZMODEM 文件操作失败".into(),
                         }
                     }
-                    None => response.error="SSH 会话已关闭".into(),
+                    None => response.error = "SSH 会话已关闭".into(),
                 }
             }
             if negotiated_features & cshell_ipc::features::ZMODEM != 0 {
-                response.transfers=self.ssh_sessions.list().iter().filter_map(|s|s.zmodem_status()).collect();
+                response.transfers = self
+                    .ssh_sessions
+                    .list()
+                    .iter()
+                    .filter_map(|s| s.zmodem_status())
+                    .collect();
             }
-            return Ok(DispatchResult { response:Envelope {
-                request_id:request.request_id, payload:Some(envelope::Payload::ZmodemResponse(response)), ..Default::default()
-            }, subscription:None });
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::ZmodemResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
         }
         if matches!(request.payload, Some(envelope::Payload::VaultRequest(_))) {
             let Some(envelope::Payload::VaultRequest(vault_request)) = request.payload.take()
@@ -616,10 +671,15 @@ impl SessionIpcService {
                     cshell_ipc::SftpStatus::Unsupported,
                     "SFTP control was not negotiated",
                 )
-            } else if (cshell_ipc::SftpOperation::ConnectProfile as i32..=cshell_ipc::SftpOperation::ConnectionStatus as i32).contains(&sftp_request.operation) {
+            } else if (cshell_ipc::SftpOperation::ConnectProfile as i32
+                ..=cshell_ipc::SftpOperation::ConnectionStatus as i32)
+                .contains(&sftp_request.operation)
+            {
                 self.sftp_lifecycle(sftp_request, negotiated_features).await
             } else {
-                self.sftp.handle(sftp_request.clone(), &self.ssh_sessions).await
+                self.sftp
+                    .handle(sftp_request.clone(), &self.ssh_sessions)
+                    .await
             };
             return Ok(DispatchResult {
                 response: Envelope {
@@ -1081,9 +1141,18 @@ impl SessionIpcService {
                 Err(error) => (None, error.detail, error.code),
             };
             return Ok(DispatchResult {
-                response: Envelope { request_id: request.request_id,
-                    payload: Some(envelope::Payload::SessionCreateResponse(SessionCreateResponse {session, detail, failure_code:failure_code as i32})),
-                    ..Default::default() }, subscription:None,
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::SessionCreateResponse(
+                        SessionCreateResponse {
+                            session,
+                            detail,
+                            failure_code: failure_code as i32,
+                        },
+                    )),
+                    ..Default::default()
+                },
+                subscription: None,
             });
         }
         if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
@@ -1214,28 +1283,70 @@ impl SessionIpcService {
         self.dispatch(request)
     }
 
-    async fn spawn_ssh_channel(&self, request:&cshell_ipc::SessionCreateRequest, features:u64) -> Result<SessionSummary,SshLaunchFailure> {
+    async fn spawn_ssh_channel(
+        &self,
+        request: &cshell_ipc::SessionCreateRequest,
+        features: u64,
+    ) -> Result<SessionSummary, SshLaunchFailure> {
         if features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
-            return Err(SshLaunchFailure::new(SessionFailureCode::Unsupported, "SSH 渠道复制未协商"));
+            return Err(SshLaunchFailure::new(
+                SessionFailureCode::Unsupported,
+                "SSH 渠道复制未协商",
+            ));
         }
-        if request.profile_id.is_some() || request.local_launch.is_some() {return Err("复制渠道不能同时指定新配置或本地参数".into());}
-        let source = request.source_ssh_session_id.as_deref().ok_or("未指定原 SSH 会话")?;
+        if request.profile_id.is_some() || request.local_launch.is_some() {
+            return Err("复制渠道不能同时指定新配置或本地参数".into());
+        }
+        let source = request
+            .source_ssh_session_id
+            .as_deref()
+            .ok_or("未指定原 SSH 会话")?;
         let source = SessionId::from_bytes(source.try_into().map_err(|_| "无效的原 SSH 会话标识")?);
-        let source = self.ssh_sessions.get(source).map_err(|_| "原 SSH 会话不存在或不是 SSH 会话")?;
-        if let Some(peer)=source.clipboard_trust(){cshell_ssh::connection_progress::peer(0,&peer.host.host,peer.host.port);}
+        let source = self
+            .ssh_sessions
+            .get(source)
+            .map_err(|_| "原 SSH 会话不存在或不是 SSH 会话")?;
+        if let Some(peer) = source.clipboard_trust() {
+            cshell_ssh::connection_progress::peer(0, &peer.host.host, peer.host.port);
+        }
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::ReusingTransport);
-        let rows = u16::try_from(request.rows).ok().filter(|v| *v > 0 && *v <= cshell_terminal::MAX_TERMINAL_ROWS).ok_or("无效的终端行数")?;
-        let cols = u16::try_from(request.cols).ok().filter(|v| *v > 0 && *v <= cshell_terminal::MAX_TERMINAL_COLUMNS).ok_or("无效的终端列数")?;
-        if usize::from(rows)*usize::from(cols)>cshell_terminal::MAX_TERMINAL_CELLS {return Err("终端尺寸超出限制".into());}
-        let id=SessionId::new();
-        let journal=self.registry.journal_path(id);
-        let session=tokio::time::timeout(std::time::Duration::from_secs(15),source.duplicate_channel(id,TerminalSize::cells(rows,cols),&journal)).await
-            .map_err(|_|SshLaunchFailure::new(SessionFailureCode::ProtocolRejected,"新 SSH 渠道打开超时，未重新认证；原会话仍可使用"))?
-            .map_err(ssh_launch_failure)?;
-        let _gate=self.clipboard_policy_gate.lock().await;
-        let policy=self.load_launch_clipboard_policy().await.map_err(|_|"无法读取剪贴板策略")?;
+        let rows = u16::try_from(request.rows)
+            .ok()
+            .filter(|v| *v > 0 && *v <= cshell_terminal::MAX_TERMINAL_ROWS)
+            .ok_or("无效的终端行数")?;
+        let cols = u16::try_from(request.cols)
+            .ok()
+            .filter(|v| *v > 0 && *v <= cshell_terminal::MAX_TERMINAL_COLUMNS)
+            .ok_or("无效的终端列数")?;
+        if usize::from(rows) * usize::from(cols) > cshell_terminal::MAX_TERMINAL_CELLS {
+            return Err("终端尺寸超出限制".into());
+        }
+        let id = SessionId::new();
+        let journal = self.registry.journal_path(id);
+        let session = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            source.duplicate_channel(id, TerminalSize::cells(rows, cols), &journal),
+        )
+        .await
+        .map_err(|_| {
+            SshLaunchFailure::new(
+                SessionFailureCode::ProtocolRejected,
+                "新 SSH 渠道打开超时，未重新认证；原会话仍可使用",
+            )
+        })?
+        .map_err(ssh_launch_failure)?;
+        let _gate = self.clipboard_policy_gate.lock().await;
+        let policy = self
+            .load_launch_clipboard_policy()
+            .await
+            .map_err(|_| "无法读取剪贴板策略")?;
         session.set_clipboard_policy(&policy.document);
-        if self.clipboard_policy_restricted.load(std::sync::atomic::Ordering::Acquire) {session.set_host_clipboard_blocked(true);}
+        if self
+            .clipboard_policy_restricted
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            session.set_host_clipboard_blocked(true);
+        }
         Ok(self.ssh_sessions.insert(session).summary())
     }
 
@@ -1283,7 +1394,10 @@ impl SessionIpcService {
             .ok()
             .filter(|value| *value > 0)
             .ok_or("invalid terminal columns")?;
-        if rows > cshell_terminal::MAX_TERMINAL_ROWS || cols > cshell_terminal::MAX_TERMINAL_COLUMNS || usize::from(rows) * usize::from(cols) > cshell_terminal::MAX_TERMINAL_CELLS {
+        if rows > cshell_terminal::MAX_TERMINAL_ROWS
+            || cols > cshell_terminal::MAX_TERMINAL_COLUMNS
+            || usize::from(rows) * usize::from(cols) > cshell_terminal::MAX_TERMINAL_CELLS
+        {
             return Err("terminal dimensions exceed the limit".into());
         }
         let plan = match plan {
@@ -1410,9 +1524,12 @@ impl SessionIpcService {
                 "Vault control must be negotiated for saved SSH sessions",
             ));
         }
-        cshell_ssh::connection_progress::peer(0,&plan.target.host,plan.target.port);
+        cshell_ssh::connection_progress::peer(0, &plan.target.host, plan.target.port);
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::Credentials);
-        vault.prepare_plan(&plan).await.map_err(|error|ssh_launch_failure(SshSessionError::Ssh(error)))?;
+        vault
+            .prepare_plan(&plan)
+            .await
+            .map_err(|error| ssh_launch_failure(SshSessionError::Ssh(error)))?;
         let mut cancellation = vault.cancellation();
         let epoch = *cancellation.borrow();
         let launch = async {
@@ -1527,7 +1644,7 @@ impl SessionIpcService {
                     .rows
                     .into_iter()
                     .map(|row| LogRow {
-            soft_wrap: false,
+                        soft_wrap: false,
                         line_id: row.line_id,
                         text: row.text,
                         style_spans: row
@@ -1729,7 +1846,9 @@ pub(crate) async fn read_ssh_auth_file(
 }
 
 pub(crate) fn ssh_launch_failure(error: SshSessionError) -> SshLaunchFailure {
-    if let SshSessionError::ChannelReuse(detail)=&error {return SshLaunchFailure::new(SessionFailureCode::ProtocolRejected,*detail);}
+    if let SshSessionError::ChannelReuse(detail) = &error {
+        return SshLaunchFailure::new(SessionFailureCode::ProtocolRejected, *detail);
+    }
     if let SshSessionError::Ssh(SshError::ProviderUnsupported(refusals)) = &error {
         return SshLaunchFailure::new(
             SessionFailureCode::InvalidConfiguration,
@@ -1737,7 +1856,9 @@ pub(crate) fn ssh_launch_failure(error: SshSessionError) -> SshLaunchFailure {
         );
     }
     let (code, detail) = match error {
-        SshSessionError::Ssh(SshError::CredentialUnavailable(detail)) => return SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable,detail),
+        SshSessionError::Ssh(SshError::CredentialUnavailable(detail)) => {
+            return SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, detail);
+        }
         SshSessionError::Ssh(SshError::ProxyRejected(detail)) => {
             (SessionFailureCode::ProxyRejected, detail)
         }
@@ -2766,7 +2887,8 @@ mod tests {
                 request_id: 2,
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
-                    cshell_ipc::SessionCreateRequest {connection_diagnostics:false,
+                    cshell_ipc::SessionCreateRequest {
+                        connection_diagnostics: false,
                         source_ssh_session_id: None,
                         local_launch: None,
                         rows: 24,
@@ -2884,7 +3006,7 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::TerminalInputRequest(
                     TerminalInputRequest {
-            mouse: None,
+                        mouse: None,
                         observed_generation: None,
                         session_id: missing_session.as_uuid().as_bytes().to_vec(),
                         key: None,
@@ -3122,7 +3244,7 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::TerminalInputRequest(
                     TerminalInputRequest {
-            mouse: None,
+                        mouse: None,
                         observed_generation: None,
                         session_id: vec![0; 16],
                         key: None,
@@ -3395,6 +3517,6 @@ mod tests {
     }
 }
 
+mod connection_diagnostics;
 #[cfg(test)]
 mod memory_history_tests;
-mod connection_diagnostics;

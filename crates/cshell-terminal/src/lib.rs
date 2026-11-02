@@ -4,15 +4,18 @@
 //! product adapter is `AlacrittyTerminalEngine`; the probe remains for focused tests.
 
 mod alacritty;
-mod output_guard;
 mod input;
+mod output_guard;
 
 use cshell_domain::TerminalSize;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use unicode_width::UnicodeWidthChar;
 
-pub use alacritty::{HistorySlice, AlacrittyTerminalEngine, DEFAULT_HISTORY_BYTES, MAX_TERMINAL_COLUMNS, MAX_TERMINAL_ROWS, MAX_TERMINAL_CELLS};
+pub use alacritty::{
+    AlacrittyTerminalEngine, DEFAULT_HISTORY_BYTES, HistorySlice, MAX_TERMINAL_CELLS,
+    MAX_TERMINAL_COLUMNS, MAX_TERMINAL_ROWS,
+};
 pub use input::{InputEncodeError, InputEncoder, TerminalModes};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -78,7 +81,9 @@ pub struct Cell {
     pub style: Style,
 }
 
-fn is_false(value: &bool) -> bool { !*value }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 impl Default for Cell {
     fn default() -> Self {
@@ -143,7 +148,9 @@ impl Cell {
 
     /// This cell ends a display row continued by automatic wrapping.
     #[must_use]
-    pub const fn soft_wrap(&self) -> bool { self.soft_wrap }
+    pub const fn soft_wrap(&self) -> bool {
+        self.soft_wrap
+    }
 
     #[must_use]
     pub const fn with_soft_wrap(mut self, wrapped: bool) -> Self {

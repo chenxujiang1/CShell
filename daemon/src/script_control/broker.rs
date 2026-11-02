@@ -1,7 +1,7 @@
 use super::*;
 mod wait;
-pub(super) use wait::WaitCursor;
 use wait::LiteralWaitMatcher;
+pub(super) use wait::WaitCursor;
 pub(super) struct Broker {
     pub local: Arc<LocalSessionRegistry>,
     pub ssh: Arc<SshSessionRegistry>,

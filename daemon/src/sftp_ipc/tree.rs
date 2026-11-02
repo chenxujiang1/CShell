@@ -21,21 +21,52 @@ struct Job {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
-    fn local_directory_validation_rejects_parent_traversal_and_files(){
-        let root=tempfile::tempdir().unwrap();let path=root.path().join("file");std::fs::write(&path,b"keep").unwrap();
-        assert!(local_directory(&path,false).is_err());assert!(local_directory(&root.path().join("../outside"),true).is_err());assert_eq!(std::fs::read(path).unwrap(),b"keep");
-        assert!(!name(".."));assert!(!name("a/b"));if cfg!(windows){assert!(!name("con.txt"));assert!(!name("C:escape"));}
+    fn local_directory_validation_rejects_parent_traversal_and_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"keep").unwrap();
+        assert!(local_directory(&path, false).is_err());
+        assert!(local_directory(&root.path().join("../outside"), true).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"keep");
+        assert!(!name(".."));
+        assert!(!name("a/b"));
+        if cfg!(windows) {
+            assert!(!name("con.txt"));
+            assert!(!name("C:escape"));
+        }
     }
     #[tokio::test]
-    async fn invalid_scope_or_unknown_source_never_creates_a_tree_job(){
-        let service=SftpIpcService::default();let registry=SshSessionRegistry::default();let session=SessionId::new();
-        for id in [session,SessionId::new()] {
-            let request=SftpRequest{operation:SftpOperation::TreeStart as i32,session_id:session.as_uuid().as_bytes().to_vec(),transfer_id:id.as_uuid().as_bytes().to_vec(),confirmed:true,document_json:serde_json::to_vec(&SftpTreeStart{direction:SftpQueueDirection::Upload,paths:vec!["C:/sample".into()],destination:"/srv".into(),verification:Default::default()}).unwrap(),..Default::default()};
-            let response=service.handle(request,&registry).await;assert_ne!(response.status,SftpStatus::Ok as i32);
-        }assert!(service.trees.0.lock().unwrap().is_empty());
+    async fn invalid_scope_or_unknown_source_never_creates_a_tree_job() {
+        let service = SftpIpcService::default();
+        let registry = SshSessionRegistry::default();
+        let session = SessionId::new();
+        for id in [session, SessionId::new()] {
+            let request = SftpRequest {
+                operation: SftpOperation::TreeStart as i32,
+                session_id: session.as_uuid().as_bytes().to_vec(),
+                transfer_id: id.as_uuid().as_bytes().to_vec(),
+                confirmed: true,
+                document_json: serde_json::to_vec(&SftpTreeStart {
+                    direction: SftpQueueDirection::Upload,
+                    paths: vec!["C:/sample".into()],
+                    destination: "/srv".into(),
+                    verification: Default::default(),
+                })
+                .unwrap(),
+                ..Default::default()
+            };
+            let response = service.handle(request, &registry).await;
+            assert_ne!(response.status, SftpStatus::Ok as i32);
+        }
+        assert!(service.trees.0.lock().unwrap().is_empty());
     }
 }
 impl std::fmt::Debug for Job {
@@ -164,25 +195,91 @@ pub(super) fn local_directory(path: &Path, create: bool) -> Result<(), String> {
     Ok(())
 }
 impl SftpIpcService {
-    pub(super) fn start_sync_tree(&self,source:Arc<SshSession>,session:SessionId,id:SessionId,options:SftpTreeStart,files:Vec<SftpQueueDraft>,directories:Vec<String>,total_bytes:u64,epoch:u64)->Result<SftpTreeSnapshot,String> {
-        if !source.running()||source.generation()!=epoch{return Err("原连接已变化，请重新比较".into());}
-        for file in &files {file.validate().map_err(str::to_owned)?;}
-        let registry=Arc::new(SshSessionRegistry::default());
-        registry.sftp_targets.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id,source.clone());
-        let job=Arc::new(Job {epoch,source,options:options.clone(),
-            snapshot:Mutex::new(SftpTreeSnapshot{id,session,direction:options.direction,state:TerminalUploadState::Preparing,completed:0,total_files:files.len() as u32,
-                bytes:0,total_bytes,bytes_per_second:0,detail:"正在提交已审阅的目录差异".into(),retryable:false,label:"目录同步".into(),destination:options.destination.clone()}),
-            control:Mutex::new(TransferControl::default()),active:AtomicBool::new(true),registry,
-            plan:tokio::sync::Mutex::new(Some(Plan{files,directories,..Default::default()}))});
-        {
-            let mut jobs=self.trees.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if jobs.contains_key(&id) || super::queue::Queues::root().is_ok_and(|root|root.join(format!("{id}.json")).exists()){return Err("同步标识已被使用，请查询原任务，勿重复提交".into());}
-            if jobs.values().filter(|j|j.active.load(Ordering::Acquire)).count()>=2{return Err("目录任务已满，请稍后重新比较".into());}
-            if jobs.len()>=64{jobs.retain(|_,j|!j.view().state.finished()||j.view().retryable);}
-            if jobs.len()>=64{return Err("请先处理未完成的目录任务".into());}
-            jobs.insert(id,job.clone());
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
+    pub(super) fn start_sync_tree(
+        &self,
+        source: Arc<SshSession>,
+        session: SessionId,
+        id: SessionId,
+        options: SftpTreeStart,
+        files: Vec<SftpQueueDraft>,
+        directories: Vec<String>,
+        total_bytes: u64,
+        epoch: u64,
+    ) -> Result<SftpTreeSnapshot, String> {
+        if !source.running() || source.generation() != epoch {
+            return Err("原连接已变化，请重新比较".into());
         }
-        self.spawn_tree(job.clone());Ok(job.view())
+        for file in &files {
+            file.validate().map_err(str::to_owned)?;
+        }
+        let registry = Arc::new(SshSessionRegistry::default());
+        registry
+            .sftp_targets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, source.clone());
+        let job = Arc::new(Job {
+            epoch,
+            source,
+            options: options.clone(),
+            snapshot: Mutex::new(SftpTreeSnapshot {
+                id,
+                session,
+                direction: options.direction,
+                state: TerminalUploadState::Preparing,
+                completed: 0,
+                total_files: files.len() as u32,
+                bytes: 0,
+                total_bytes,
+                bytes_per_second: 0,
+                detail: "正在提交已审阅的目录差异".into(),
+                retryable: false,
+                label: "目录同步".into(),
+                destination: options.destination.clone(),
+            }),
+            control: Mutex::new(TransferControl::default()),
+            active: AtomicBool::new(true),
+            registry,
+            plan: tokio::sync::Mutex::new(Some(Plan {
+                files,
+                directories,
+                ..Default::default()
+            })),
+        });
+        {
+            let mut jobs = self
+                .trees
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if jobs.contains_key(&id)
+                || super::queue::Queues::root()
+                    .is_ok_and(|root| root.join(format!("{id}.json")).exists())
+            {
+                return Err("同步标识已被使用，请查询原任务，勿重复提交".into());
+            }
+            if jobs
+                .values()
+                .filter(|j| j.active.load(Ordering::Acquire))
+                .count()
+                >= 2
+            {
+                return Err("目录任务已满，请稍后重新比较".into());
+            }
+            if jobs.len() >= 64 {
+                jobs.retain(|_, j| !j.view().state.finished() || j.view().retryable);
+            }
+            if jobs.len() >= 64 {
+                return Err("请先处理未完成的目录任务".into());
+            }
+            jobs.insert(id, job.clone());
+        }
+        self.spawn_tree(job.clone());
+        Ok(job.view())
     }
     pub(super) async fn tree(
         &self,
@@ -240,7 +337,15 @@ impl SftpIpcService {
                 );
             };
             let registry = Arc::new(SshSessionRegistry::default());
-            if sessions.get_sftp(id).is_ok()||super::queue::Queues::root().is_ok_and(|root|root.join(format!("{id}.json")).exists()){return SftpResponse::with_status(SftpStatus::Conflict,"任务标识已被使用，请查询原任务状态");}
+            if sessions.get_sftp(id).is_ok()
+                || super::queue::Queues::root()
+                    .is_ok_and(|root| root.join(format!("{id}.json")).exists())
+            {
+                return SftpResponse::with_status(
+                    SftpStatus::Conflict,
+                    "任务标识已被使用，请查询原任务状态",
+                );
+            }
             registry
                 .sftp_targets
                 .write()
@@ -273,7 +378,7 @@ impl SftpIpcService {
                     } else {
                         label
                     },
-                    destination:options.destination.clone(),
+                    destination: options.destination.clone(),
                 }),
                 control: Mutex::new(TransferControl::default()),
                 active: AtomicBool::new(true),
@@ -395,21 +500,20 @@ impl SftpIpcService {
             let mut retryable = false;
             if result.is_err() && job.source.running() {
                 for _ in 0..30 {
-                    if let Ok(queue) = service.upload_queue(&job.registry, job.view().id).await {
-                        if !queue
+                    if let Ok(queue) = service.upload_queue(&job.registry, job.view().id).await
+                        && !queue
                             .items
                             .iter()
                             .any(|r| r.state == SftpQueueState::Running)
-                        {
-                            retryable = !queue.items.is_empty()
-                                && queue.items.iter().all(|r| {
-                                    matches!(
-                                        r.state,
-                                        SftpQueueState::Succeeded | SftpQueueState::Pending
-                                    ) || r.can_retry_verified()
-                                });
-                            break;
-                        }
+                    {
+                        retryable = !queue.items.is_empty()
+                            && queue.items.iter().all(|r| {
+                                matches!(
+                                    r.state,
+                                    SftpQueueState::Succeeded | SftpQueueState::Pending
+                                ) || r.can_retry_verified()
+                            });
+                        break;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -806,12 +910,13 @@ impl SftpIpcService {
                     .into();
                 });
                 if let Some(row) = queue.items.iter().find(|r| {
-                    !queue.retry_items.contains(&r.id) && matches!(
-                        r.state,
-                        SftpQueueState::Unknown
-                            | SftpQueueState::CleanupRequired
-                            | SftpQueueState::Cancelled
-                    )
+                    !queue.retry_items.contains(&r.id)
+                        && matches!(
+                            r.state,
+                            SftpQueueState::Unknown
+                                | SftpQueueState::CleanupRequired
+                                | SftpQueueState::Cancelled
+                        )
                 }) {
                     return Err(row
                         .receipt

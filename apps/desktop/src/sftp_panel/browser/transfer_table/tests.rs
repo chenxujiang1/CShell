@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use super::super::tests::{click, draw, fixture};
 use super::*;
 use crate::ui_layout_gate::{bounds, check_window, context};
@@ -32,12 +39,13 @@ fn row(state: SftpQueueState, name: &str) -> SftpQueueItem {
 }
 #[test]
 fn completed_rows_distinguish_transfer_from_full_verification() {
-    let view=SftpView::default();let mut item=row(SftpQueueState::Succeeded,"done.bin");
-    assert_eq!(status(&item,&view),"已校验");
-    item.draft.verification=Some(cshell_domain::SftpVerification::Standard);
-    assert_eq!(status(&item,&view),"已传输");
-    item.draft.verification=Some(cshell_domain::SftpVerification::Full);
-    assert_eq!(status(&item,&view),"已校验");
+    let view = SftpView::default();
+    let mut item = row(SftpQueueState::Succeeded, "done.bin");
+    assert_eq!(status(&item, &view), "已校验");
+    item.draft.verification = Some(cshell_domain::SftpVerification::Standard);
+    assert_eq!(status(&item, &view), "已传输");
+    item.draft.verification = Some(cshell_domain::SftpVerification::Full);
+    assert_eq!(status(&item, &view), "已校验");
 }
 #[test]
 fn filters_and_batch_selection_do_not_include_hidden_tasks() {
@@ -266,15 +274,35 @@ fn unready_drop_shows_queue_recovery_then_submits_once_after_refresh() {
     }
     let (tree, command) = draw(&ctx, &mut panel, &view, size, vec![]);
     assert!(command.is_none());
-    assert!(tree.nodes.iter().any(|(_, n)| n.label().or(n.value()) == Some("队列未就绪，请刷新队列")),
-        "visible text: {:?}", tree.nodes.iter().map(|(_, n)| (n.role(), n.label(), n.value())).collect::<Vec<_>>());
-    assert!(!tree.nodes.iter().any(|(_, n)| n.label().or(n.value()) == Some("等待队列确认")));
-    assert!(matches!(click(&ctx, &mut panel, &view, size, "刷新队列"), Some(SftpClientCommand::QueueGet(id)) if id == session));
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label().or(n.value()) == Some("队列未就绪，请刷新队列")),
+        "visible text: {:?}",
+        tree.nodes
+            .iter()
+            .map(|(_, n)| (n.role(), n.label(), n.value()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label().or(n.value()) == Some("等待队列确认"))
+    );
+    assert!(
+        matches!(click(&ctx, &mut panel, &view, size, "刷新队列"), Some(SftpClientCommand::QueueGet(id)) if id == session)
+    );
     view.queue_writable = true;
     view.generation += 1;
     let (_, command) = draw(&ctx, &mut panel, &view, size, vec![]);
-    assert!(matches!(command, Some(SftpClientCommand::TransferBatch(id, drafts, 1, true)) if id == session && drafts == vec![draft]));
-    assert!(draw(&ctx, &mut panel, &view, size, vec![]).1.is_none(), "never replay a submitted upload");
+    assert!(
+        matches!(command, Some(SftpClientCommand::TransferBatch(id, drafts, 1, true)) if id == session && drafts == vec![draft])
+    );
+    assert!(
+        draw(&ctx, &mut panel, &view, size, vec![]).1.is_none(),
+        "never replay a submitted upload"
+    );
 }
 
 #[test]
@@ -286,21 +314,47 @@ fn uncertain_drop_stops_waiting_and_refresh_reconciles_already_added_file() {
     panel.browser.staged.push(draft.clone());
     panel.browser.auto_submit = true;
     let (_, command) = draw(&ctx, &mut panel, &view, size, vec![]);
-    assert!(matches!(command, Some(SftpClientCommand::TransferBatch(..))));
+    assert!(matches!(
+        command,
+        Some(SftpClientCommand::TransferBatch(..))
+    ));
     view.queue_busy = true;
     let (tree, _) = draw(&ctx, &mut panel, &view, size, vec![]);
-    assert!(tree.nodes.iter().any(|(_, n)| n.label().or(n.value()) == Some("等待队列确认")),
-        "visible text: {:?}", tree.nodes.iter().map(|(_, n)| (n.role(), n.label(), n.value())).collect::<Vec<_>>());
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label().or(n.value()) == Some("等待队列确认")),
+        "visible text: {:?}",
+        tree.nodes
+            .iter()
+            .map(|(_, n)| (n.role(), n.label(), n.value()))
+            .collect::<Vec<_>>()
+    );
     view.queue_busy = false;
     view.queue_writable = false;
     view.generation += 1;
     view.error = Some("reply timed out".into());
     let (tree, command) = draw(&ctx, &mut panel, &view, size, vec![]);
     assert!(command.is_none());
-    assert!(tree.nodes.iter().any(|(_, n)| n.label().or(n.value()) == Some("需核对")));
-    assert!(tree.nodes.iter().any(|(_, n)| n.label().or(n.value()) == Some("结果未确认，请刷新队列")));
-    assert!(!tree.nodes.iter().any(|(_, n)| n.label().or(n.value()) == Some("等待队列确认")));
-    assert!(matches!(click(&ctx, &mut panel, &view, size, "刷新队列"), Some(SftpClientCommand::QueueGet(id)) if id == session));
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label().or(n.value()) == Some("需核对"))
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(_, n)| n.label().or(n.value()) == Some("结果未确认，请刷新队列"))
+    );
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label().or(n.value()) == Some("等待队列确认"))
+    );
+    assert!(
+        matches!(click(&ctx, &mut panel, &view, size, "刷新队列"), Some(SftpClientCommand::QueueGet(id)) if id == session)
+    );
     let mut confirmed = row(SftpQueueState::Succeeded, "uncertain.txt");
     confirmed.draft = draft;
     let queue = std::sync::Arc::make_mut(view.queue.as_mut().unwrap());
@@ -311,32 +365,60 @@ fn uncertain_drop_stops_waiting_and_refresh_reconciles_already_added_file() {
     view.generation += 1;
     assert!(draw(&ctx, &mut panel, &view, size, vec![]).1.is_none());
     assert!(panel.browser.submitted_drafts.is_empty());
-    assert!(panel.browser.staged.is_empty(), "already accepted upload must not become a retry draft");
+    assert!(
+        panel.browser.staged.is_empty(),
+        "already accepted upload must not become a retry draft"
+    );
     assert!(draw(&ctx, &mut panel, &view, size, vec![]).1.is_none());
 }
 
 #[test]
 fn uploaded_file_shows_verification_phase_progress_instead_of_stalled_commit() {
-    use cshell_ipc::{SftpTransfer,SftpTransferPhase as Phase};
-    let ctx=context();let (mut panel,mut view,_)=fixture();
-    let size=egui::vec2(900.0,600.0);
-    let mut item=row(SftpQueueState::Running,"large.bin");
-    item.verified.as_mut().unwrap().verified=true;
-    let transfer=item.transfer_id.unwrap();
-    std::sync::Arc::make_mut(view.queue.as_mut().unwrap()).items.push(item.clone());
-    view.queue_transfers.insert(transfer,SftpTransfer {
-        transfer_id:transfer.as_uuid().as_bytes().to_vec(),bytes_transferred:4096,total_bytes:Some(4096),
-        phase:Phase::CheckingPublished as i32,phase_bytes:2048,phase_total:Some(8192),
-        ..Default::default()
-    });
-    for _ in 0..3 {draw(&ctx,&mut panel,&view,size,vec![]);}
-    let (tree,_)=draw(&ctx,&mut panel,&view,size,vec![]);
-    assert_eq!(status(&item,&view),"核验目标");
-    assert!(tree.nodes.iter().any(|(_,n)|n.label().or(n.value()).is_some_and(|s|s.contains("校验 25%"))));
-    for (phase,label) in [(Phase::Verifying,"校验文件"),(Phase::Publishing,"发布文件"),(Phase::Cleaning,"清理中"),(Phase::ServerChecksum,"服务器校验")] {
-        view.queue_transfers.get_mut(&transfer).unwrap().phase=phase as i32;
-        assert_eq!(status(&item,&view),label);
+    use cshell_ipc::{SftpTransfer, SftpTransferPhase as Phase};
+    let ctx = context();
+    let (mut panel, mut view, _) = fixture();
+    let size = egui::vec2(900.0, 600.0);
+    let mut item = row(SftpQueueState::Running, "large.bin");
+    item.verified.as_mut().unwrap().verified = true;
+    let transfer = item.transfer_id.unwrap();
+    std::sync::Arc::make_mut(view.queue.as_mut().unwrap())
+        .items
+        .push(item.clone());
+    view.queue_transfers.insert(
+        transfer,
+        SftpTransfer {
+            transfer_id: transfer.as_uuid().as_bytes().to_vec(),
+            bytes_transferred: 4096,
+            total_bytes: Some(4096),
+            phase: Phase::CheckingPublished as i32,
+            phase_bytes: 2048,
+            phase_total: Some(8192),
+            ..Default::default()
+        },
+    );
+    for _ in 0..3 {
+        draw(&ctx, &mut panel, &view, size, vec![]);
     }
-    let (tree,_)=draw(&ctx,&mut panel,&view,size,vec![]);
-    assert!(tree.nodes.iter().any(|(_,n)|n.label().or(n.value()).is_some_and(|s|s.contains("服务器计算 SHA-256"))));
+    let (tree, _) = draw(&ctx, &mut panel, &view, size, vec![]);
+    assert_eq!(status(&item, &view), "核验目标");
+    assert!(tree.nodes.iter().any(|(_, n)| {
+        n.label()
+            .or(n.value())
+            .is_some_and(|s| s.contains("校验 25%"))
+    }));
+    for (phase, label) in [
+        (Phase::Verifying, "校验文件"),
+        (Phase::Publishing, "发布文件"),
+        (Phase::Cleaning, "清理中"),
+        (Phase::ServerChecksum, "服务器校验"),
+    ] {
+        view.queue_transfers.get_mut(&transfer).unwrap().phase = phase as i32;
+        assert_eq!(status(&item, &view), label);
+    }
+    let (tree, _) = draw(&ctx, &mut panel, &view, size, vec![]);
+    assert!(tree.nodes.iter().any(|(_, n)| {
+        n.label()
+            .or(n.value())
+            .is_some_and(|s| s.contains("服务器计算 SHA-256"))
+    }));
 }

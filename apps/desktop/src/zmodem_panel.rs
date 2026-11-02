@@ -39,9 +39,18 @@ struct Picked {
     paths: Option<Vec<String>>,
 }
 impl Panel {
-    pub fn sync_security(&mut self,view:&crate::profile_connection::DesktopProfileView){self.security.response=view.vault.clone();self.security.error=view.vault_error.clone();self.security.set_operation_state(view.vault_mutations_pending>0,view.vault_notice.clone());}
-    pub fn take_security_request(&mut self)->Option<cshell_ipc::VaultRequest>{self.security_request.take()}
-    pub fn clear_secrets(&mut self){self.security.clear();}
+    pub fn sync_security(&mut self, view: &crate::profile_connection::DesktopProfileView) {
+        self.security.response = view.vault.clone();
+        self.security.error = view.vault_error.clone();
+        self.security
+            .set_operation_state(view.vault_mutations_pending > 0, view.vault_notice.clone());
+    }
+    pub fn take_security_request(&mut self) -> Option<cshell_ipc::VaultRequest> {
+        self.security_request.take()
+    }
+    pub fn clear_secrets(&mut self) {
+        self.security.clear();
+    }
     pub fn poll(&mut self, config: Option<&DesktopConnectionConfig>) -> bool {
         if self.connection.is_none()
             && let Some(config) = config
@@ -88,10 +97,10 @@ impl Panel {
         };
         if self.connection.as_ref().is_some_and(|c| c.request(request)) {
             self.error = None;
-            if operation == 2 {
-                if let Some(path) = request_path {
-                    self.destinations.insert(s.transfer_id, path);
-                }
+            if operation == 2
+                && let Some(path) = request_path
+            {
+                self.destinations.insert(s.transfer_id, path);
             }
             true
         } else {
@@ -340,7 +349,7 @@ impl Panel {
                     });
             });
         self.open = open;
-        self.draw_global_settings(ctx,catalog);
+        self.draw_global_settings(ctx, catalog);
         if self.picker.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -375,6 +384,11 @@ fn format_bytes(bytes: u64) -> String {
     format!("{bytes} B")
 }
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
@@ -421,6 +435,11 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod layout_tests {
     use super::*;
     #[test]
@@ -446,7 +465,7 @@ mod layout_tests {
             };
             panel.destinations.insert(1, "D:/Downloads".into());
             let size = egui::vec2(720.0, 480.0);
-            let mut draw = |ctx: &egui::Context| panel.draw(ctx, None, &[id.clone()]);
+            let mut draw = |ctx: &egui::Context| panel.draw(ctx, None, std::slice::from_ref(&id));
             for _ in 0..3 {
                 crate::ui_layout_gate::frame(&context, size, &mut draw);
             }

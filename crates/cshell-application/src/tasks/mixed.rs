@@ -142,15 +142,14 @@ impl MixedTaskDefinition {
                         return Err(TaskError::Invalid);
                     }
                 }
-                MixedTaskAction::Download { definition } => {
+                MixedTaskAction::Download { definition }
                     // Host UUID prefix is fixed per target, so directory/basename must be distinct.
                     if !downloads.insert((
                         std::path::PathBuf::from(&definition.local_directory),
                         definition.local_name.to_ascii_lowercase(),
-                    )) {
+                    )) => {
                         return Err(TaskError::Invalid);
                     }
-                }
                 _ => {}
             }
         }

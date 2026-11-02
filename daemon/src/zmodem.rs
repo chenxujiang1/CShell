@@ -84,7 +84,9 @@ impl Transfer {
     pub fn needs_service(&self) -> bool {
         self.busy() || !self.outgoing.is_empty() || !self.candidate.is_empty()
     }
-    pub fn buffered_bytes(&self)->usize {self.incoming.len()}
+    pub fn buffered_bytes(&self) -> usize {
+        self.incoming.len()
+    }
 
     /// Returns only ordinary terminal bytes. Verify the complete hex header,
     /// including CRC, before recognizing a remote transfer request.
@@ -137,11 +139,12 @@ impl Transfer {
     }
 
     pub fn flush_candidate(&mut self) -> Vec<u8> {
-        let timeout=if self.candidate.len()>=4{Duration::from_secs(2)}else{Duration::from_millis(250)};
-        if self
-            .candidate_since
-            .is_some_and(|t| t.elapsed() >= timeout)
-        {
+        let timeout = if self.candidate.len() >= 4 {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(250)
+        };
+        if self.candidate_since.is_some_and(|t| t.elapsed() >= timeout) {
             self.candidate_since = None;
             return std::mem::take(&mut self.candidate);
         }
@@ -279,7 +282,7 @@ impl Transfer {
                     let n = bytes.len();
                     self.outgoing.extend_from_slice(bytes);
                     protocol.written(n);
-                    self.last_activity=Some(Instant::now());
+                    self.last_activity = Some(Instant::now());
                 }
                 Action::ReadFile { offset, max_len } => {
                     let file = self.source.as_mut().ok_or("上传文件未打开")?;
@@ -307,7 +310,7 @@ impl Transfer {
                         }
                         file.write_all(bytes).map_err(|e| e.to_string())?;
                         s.bytes += n as u64;
-                        self.last_activity=Some(Instant::now());
+                        self.last_activity = Some(Instant::now());
                     }
                     if let Protocol::Receive(receiver) = protocol {
                         receiver.file_written(n).map_err(|e| e.to_string())?;

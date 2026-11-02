@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::*;
 #[tokio::test]
 async fn shared_ssh_create_sends_only_source_and_rejects_original_or_unverified_replies() {

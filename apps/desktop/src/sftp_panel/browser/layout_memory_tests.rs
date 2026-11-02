@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::tests::{draw, fixture};
 use super::*;
 use crate::ui_layout_gate::{check_window, context};

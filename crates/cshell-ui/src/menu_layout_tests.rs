@@ -1,3 +1,4 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::*;
 use crate::tests::{button_center, classic_context};
 
@@ -266,22 +267,44 @@ fn disconnected_ssh_is_visible_in_tab_banner_and_status_and_reconnect_targets_th
     }
 }
 
-
 #[test]
 fn toolbar_keeps_core_actions_in_bounds_at_supported_widths_and_scales() {
     for scale in [1.0, 1.25, 1.5, 2.0] {
-        for width in [720.0,900.0,1280.0] {
-            let context = classic_context(); context.enable_accesskit(); context.set_pixels_per_point(scale);
-            let size=egui::vec2(width,600.0);
-            let mut model=WorkbenchViewModel::default();
-            for _ in 0..3 { frame(&context,&mut model,size,vec![]); }
-            let tree=frame(&context,&mut model,size,vec![]);
-            let mut previous=0.0;
-            for label in ["＋ 新建","会话管理","连接","断开","重新连接","SFTP","分屏","更多"] {
-                let node=&tree.nodes.iter().find(|(_,n)|n.role()==egui::accesskit::Role::Button && n.label()==Some(label)).unwrap().1;
-                let b=node.bounds().unwrap();
-                assert!(b.x0>=previous && b.x1<=f64::from(width)+1.0,"{label} overlaps or leaves {width} at {scale}: {b:?}");
-                previous=b.x1;
+        for width in [720.0, 900.0, 1280.0] {
+            let context = classic_context();
+            context.enable_accesskit();
+            context.set_pixels_per_point(scale);
+            let size = egui::vec2(width, 600.0);
+            let mut model = WorkbenchViewModel::default();
+            for _ in 0..3 {
+                frame(&context, &mut model, size, vec![]);
+            }
+            let tree = frame(&context, &mut model, size, vec![]);
+            let mut previous = 0.0;
+            for label in [
+                "＋ 新建",
+                "会话管理",
+                "连接",
+                "断开",
+                "重新连接",
+                "SFTP",
+                "分屏",
+                "更多",
+            ] {
+                let node = &tree
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| {
+                        n.role() == egui::accesskit::Role::Button && n.label() == Some(label)
+                    })
+                    .unwrap()
+                    .1;
+                let b = node.bounds().unwrap();
+                assert!(
+                    b.x0 >= previous && b.x1 <= f64::from(width) + 1.0,
+                    "{label} overlaps or leaves {width} at {scale}: {b:?}"
+                );
+                previous = b.x1;
             }
         }
     }
@@ -289,74 +312,211 @@ fn toolbar_keeps_core_actions_in_bounds_at_supported_widths_and_scales() {
 
 #[test]
 fn wide_toolbar_and_compact_more_copy_the_current_authenticated_channel() {
-    for width in [720.0,1280.0] {
-        let context=classic_context();context.enable_accesskit();let size=egui::vec2(width,600.0);
-        let tab=cshell_domain::TabId::new();let session=cshell_domain::SessionId::new();
-        let mut model=WorkbenchViewModel{selected_tab:Some(tab),tabs:vec![WorkspaceTabViewModel{id:tab,title:"SSH".into(),session_id:Some(session)}],reusable_ssh_sessions:vec![session],..Default::default()};
-        for _ in 0..2 {frame(&context,&mut model,size,vec![]);}
-        let mut tree=frame(&context,&mut model,size,vec![]);
-        let label=if width<1080.0 {
-            let pos=button_center(&tree,"更多");click(&context,&mut model,size,pos);
-            for _ in 0..2 {tree=frame(&context,&mut model,size,vec![]);}
+    for width in [720.0, 1280.0] {
+        let context = classic_context();
+        context.enable_accesskit();
+        let size = egui::vec2(width, 600.0);
+        let tab = cshell_domain::TabId::new();
+        let session = cshell_domain::SessionId::new();
+        let mut model = WorkbenchViewModel {
+            selected_tab: Some(tab),
+            tabs: vec![WorkspaceTabViewModel {
+                id: tab,
+                title: "SSH".into(),
+                session_id: Some(session),
+            }],
+            reusable_ssh_sessions: vec![session],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            frame(&context, &mut model, size, vec![]);
+        }
+        let mut tree = frame(&context, &mut model, size, vec![]);
+        let label = if width < 1080.0 {
+            let pos = button_center(&tree, "更多");
+            click(&context, &mut model, size, pos);
+            for _ in 0..2 {
+                tree = frame(&context, &mut model, size, vec![]);
+            }
             "复制 SSH 渠道"
-        }else{"复制渠道"};
-        let pos=button_center(&tree,label);click(&context,&mut model,size,pos);
-        assert_eq!(model.menu_command,Some(WorkbenchMenuCommand::CloneSshChannel(tab)));
+        } else {
+            "复制渠道"
+        };
+        let pos = button_center(&tree, label);
+        click(&context, &mut model, size, pos);
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::CloneSshChannel(tab))
+        );
     }
 }
 
 #[test]
 fn each_split_identity_follows_its_own_binding_not_sidebar_selection() {
     use cshell_domain::*;
-    let context=classic_context();context.enable_accesskit();let size=egui::vec2(1280.0,800.0);
-    let mut doc=WorkspaceDocument::default();let original=doc.tab_groups[0].id;
-    let other=TabGroupId::new();let first=PaneId::new();let second=PaneId::new();
-    doc.panes[0].content=WorkspacePaneContent::Split{axis:SplitAxis::Horizontal,ratio_permille:500,first,second};
-    doc.panes.extend([WorkspacePane{id:first,content:WorkspacePaneContent::Tabs{group_id:original}},WorkspacePane{id:second,content:WorkspacePaneContent::Tabs{group_id:other}}]);
-    doc.tab_groups.push(WorkspaceTabGroup{id:other,tabs:vec![],active_tab:None});
-    let mut model=WorkbenchViewModel::default();
-    for (index,target) in ["deploy@first.example:22","admin@[2001:db8::2]:2222"].into_iter().enumerate() {
-        let tab=TabId::new();let profile=ProfileId::new();
-        doc.bindings.push(WorkspaceBinding{tab_id:tab,profile_id:Some(profile),title:format!("server-{index}")});
-        doc.tab_groups[index].tabs.push(tab);doc.tab_groups[index].active_tab=Some(tab);
-        model.saved_ssh_profiles.push(SavedSshProfileViewModel{id:profile,name:format!("server-{index}"),target:target.into(),favorite:false,folder_id:None,kind:ProfileKind::Ssh});
-        model.ssh_tab_states.insert(tab,SshConnectionState::Connected);
-        if index==0 {
-            model.selected_tab=Some(tab);model.tabs.push(WorkspaceTabViewModel{id:tab,title:"server-0".into(),session_id:Some(SessionId::new())});
-        }else{model.selected_profile=Some(profile);}
+    let context = classic_context();
+    context.enable_accesskit();
+    let size = egui::vec2(1280.0, 800.0);
+    let mut doc = WorkspaceDocument::default();
+    let original = doc.tab_groups[0].id;
+    let other = TabGroupId::new();
+    let first = PaneId::new();
+    let second = PaneId::new();
+    doc.panes[0].content = WorkspacePaneContent::Split {
+        axis: SplitAxis::Horizontal,
+        ratio_permille: 500,
+        first,
+        second,
+    };
+    doc.panes.extend([
+        WorkspacePane {
+            id: first,
+            content: WorkspacePaneContent::Tabs { group_id: original },
+        },
+        WorkspacePane {
+            id: second,
+            content: WorkspacePaneContent::Tabs { group_id: other },
+        },
+    ]);
+    doc.tab_groups.push(WorkspaceTabGroup {
+        id: other,
+        tabs: vec![],
+        active_tab: None,
+    });
+    let mut model = WorkbenchViewModel::default();
+    for (index, target) in ["deploy@first.example:22", "admin@[2001:db8::2]:2222"]
+        .into_iter()
+        .enumerate()
+    {
+        let tab = TabId::new();
+        let profile = ProfileId::new();
+        doc.bindings.push(WorkspaceBinding {
+            tab_id: tab,
+            profile_id: Some(profile),
+            title: format!("server-{index}"),
+        });
+        doc.tab_groups[index].tabs.push(tab);
+        doc.tab_groups[index].active_tab = Some(tab);
+        model.saved_ssh_profiles.push(SavedSshProfileViewModel {
+            id: profile,
+            name: format!("server-{index}"),
+            target: target.into(),
+            favorite: false,
+            folder_id: None,
+            kind: ProfileKind::Ssh,
+        });
+        model
+            .ssh_tab_states
+            .insert(tab, SshConnectionState::Connected);
+        if index == 0 {
+            model.selected_tab = Some(tab);
+            model.tabs.push(WorkspaceTabViewModel {
+                id: tab,
+                title: "server-0".into(),
+                session_id: Some(SessionId::new()),
+            });
+        } else {
+            model.selected_profile = Some(profile);
+        }
     }
-    model.workspace_window_id=Some(doc.windows[0].id);model.workspace_document=Some(doc);
-    for _ in 0..2 {frame(&context,&mut model,size,vec![]);}
-    let tree=frame(&context,&mut model,size,vec![]);
-    let text=tree.nodes.iter().map(|(_,n)|format!("{} {}",n.label().unwrap_or(""),n.value().unwrap_or(""))).collect::<Vec<_>>().join("\n");
-    for target in ["配置：deploy@first.example:22","配置：admin@[2001:db8::2]:2222"] {assert!(text.contains(target),"missing {target}: {text}");}
-    assert!(text.contains("当前输入"));assert_eq!(model.pane_views.len(),2);
+    model.workspace_window_id = Some(doc.windows[0].id);
+    model.workspace_document = Some(doc);
+    for _ in 0..2 {
+        frame(&context, &mut model, size, vec![]);
+    }
+    let tree = frame(&context, &mut model, size, vec![]);
+    let text = tree
+        .nodes
+        .iter()
+        .map(|(_, n)| format!("{} {}", n.label().unwrap_or(""), n.value().unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for target in [
+        "配置：deploy@first.example:22",
+        "配置：admin@[2001:db8::2]:2222",
+    ] {
+        assert!(text.contains(target), "missing {target}: {text}");
+    }
+    assert!(text.contains("当前输入"));
+    assert_eq!(model.pane_views.len(), 2);
     for pane in &model.pane_views {
-        assert!(pane.rect.width()>100.0 && pane.rect.height()>100.0);
-        let target=if pane.tab_id==model.selected_tab {"配置：deploy@first.example:22"}else{"配置：admin@[2001:db8::2]:2222"};
-        let b=tree.nodes.iter().find(|(_,n)|n.value()==Some(target)||n.label()==Some(target)).unwrap().1.bounds().unwrap();
-        assert!(b.x0>=f64::from(pane.rect.min.x)-1.0 && b.x1<=f64::from(pane.rect.max.x)+1.0);
-        assert!(b.y1<=f64::from(pane.rect.min.y)+1.0,"host identity must not cover GPU terminal");
+        assert!(pane.rect.width() > 100.0 && pane.rect.height() > 100.0);
+        let target = if pane.tab_id == model.selected_tab {
+            "配置：deploy@first.example:22"
+        } else {
+            "配置：admin@[2001:db8::2]:2222"
+        };
+        let b = tree
+            .nodes
+            .iter()
+            .find(|(_, n)| n.value() == Some(target) || n.label() == Some(target))
+            .unwrap()
+            .1
+            .bounds()
+            .unwrap();
+        assert!(
+            b.x0 >= f64::from(pane.rect.min.x) - 1.0 && b.x1 <= f64::from(pane.rect.max.x) + 1.0
+        );
+        assert!(
+            b.y1 <= f64::from(pane.rect.min.y) + 1.0,
+            "host identity must not cover GPU terminal"
+        );
     }
 }
 
-
 #[test]
 fn ssh_chrome_leaves_the_gpu_terminal_canvas_transparent() {
-    let context=classic_context();let tab=cshell_domain::TabId::new();
-    let mut doc=cshell_domain::WorkspaceDocument::default();
-    doc.tab_groups[0].tabs.push(tab);doc.tab_groups[0].active_tab=Some(tab);
-    doc.bindings.push(cshell_domain::WorkspaceBinding{tab_id:tab,profile_id:None,title:"GPU terminal".into()});
-    let mut model=WorkbenchViewModel{workspace_window_id:Some(doc.windows[0].id),workspace_document:Some(doc),selected_tab:Some(tab),..Default::default()};
-    model.ssh_tab_states.insert(tab,SshConnectionState::Connected);
-    let mut output=context.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1280.0,800.0))),..Default::default()},|ui|{let _=draw_workbench(ui,&mut model);});
-    output.textures_delta.clear();let body=model.pane_views[0].rect;
-    fn check(shape:&egui::Shape,body:egui::Rect) {
+    let context = classic_context();
+    let tab = cshell_domain::TabId::new();
+    let mut doc = cshell_domain::WorkspaceDocument::default();
+    doc.tab_groups[0].tabs.push(tab);
+    doc.tab_groups[0].active_tab = Some(tab);
+    doc.bindings.push(cshell_domain::WorkspaceBinding {
+        tab_id: tab,
+        profile_id: None,
+        title: "GPU terminal".into(),
+    });
+    let mut model = WorkbenchViewModel {
+        workspace_window_id: Some(doc.windows[0].id),
+        workspace_document: Some(doc),
+        selected_tab: Some(tab),
+        ..Default::default()
+    };
+    model
+        .ssh_tab_states
+        .insert(tab, SshConnectionState::Connected);
+    let mut output = context.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        },
+        |ui| {
+            let _ = draw_workbench(ui, &mut model);
+        },
+    );
+    output.textures_delta.clear();
+    let body = model.pane_views[0].rect;
+    fn check(shape: &egui::Shape, body: egui::Rect) {
         match shape {
-            egui::Shape::Rect(rect)=>assert!(!(rect.fill.a()>0 && rect.rect.contains(body.center()) && rect.rect.width()>=body.width()*0.8 && rect.rect.height()>=body.height()*0.8),"opaque workbench layer would hide the GPU terminal"),
-            egui::Shape::Vec(shapes)=>for shape in shapes {check(shape,body);},
-            _=>{}
+            egui::Shape::Rect(rect) => assert!(
+                !(rect.fill.a() > 0
+                    && rect.rect.contains(body.center())
+                    && rect.rect.width() >= body.width() * 0.8
+                    && rect.rect.height() >= body.height() * 0.8),
+                "opaque workbench layer would hide the GPU terminal"
+            ),
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    check(shape, body);
+                }
+            }
+            _ => {}
         }
     }
-    for shape in &output.shapes {check(&shape.shape,body);}
+    for shape in &output.shapes {
+        check(&shape.shape, body);
+    }
 }

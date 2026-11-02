@@ -5,8 +5,8 @@ use prost::{Enumeration, Message};
 #[derive(Clone, PartialEq, Message)]
 #[prost(skip_debug)]
 pub struct TerminalContextLaunchRequest {
-    #[prost(bool,tag="5")]
-    pub connection_diagnostics:bool,
+    #[prost(bool, tag = "5")]
+    pub connection_diagnostics: bool,
     #[prost(bytes = "vec", tag = "1")]
     pub report_json: Vec<u8>,
     #[prost(uint32, tag = "2")]

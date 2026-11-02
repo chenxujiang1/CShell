@@ -3,12 +3,7 @@ use cshell_application::*;
 use cshell_domain::SftpQueueItemId;
 use cshell_ipc::RuntimePaths;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeSet,
-    fs::OpenOptions,
-    io::{Read, Write},
-    path::Path,
-};
+use std::{collections::BTreeSet, fs::OpenOptions, io::Read};
 #[derive(Clone, Debug, Default)]
 pub(super) struct Queues {
     locks: Arc<Mutex<BTreeMap<SessionId, Arc<tokio::sync::Mutex<()>>>>>,
@@ -346,7 +341,9 @@ impl SftpIpcService {
                 {
                     return Err(SftpStatus::InvalidRequest);
                 }
-                let live = sessions.get_sftp(session).map_err(|_| SftpStatus::Unavailable)?;
+                let live = sessions
+                    .get_sftp(session)
+                    .map_err(|_| SftpStatus::Unavailable)?;
                 let peer = live.clipboard_trust().cloned();
                 if snapshot.peer.is_some() && snapshot.peer != peer {
                     return Err(SftpStatus::Conflict);
@@ -399,7 +396,9 @@ impl SftpIpcService {
                 }
             }
             SftpOperation::QueueConfigure => {
-                let live = sessions.get_sftp(session).map_err(|_| SftpStatus::Unavailable)?;
+                let live = sessions
+                    .get_sftp(session)
+                    .map_err(|_| SftpStatus::Unavailable)?;
                 let peer = live
                     .clipboard_trust()
                     .cloned()
@@ -441,7 +440,9 @@ impl SftpIpcService {
                 {
                     return Err(SftpStatus::Conflict);
                 }
-                let target = sessions.get_sftp(session).map_err(|_| SftpStatus::Unavailable)?;
+                let target = sessions
+                    .get_sftp(session)
+                    .map_err(|_| SftpStatus::Unavailable)?;
                 if !target.running() {
                     return Err(SftpStatus::Unavailable);
                 }
@@ -556,7 +557,9 @@ impl SftpIpcService {
                 {
                     return Err(SftpStatus::Conflict);
                 }
-                let target = sessions.get_sftp(session).map_err(|_| SftpStatus::Unavailable)?;
+                let target = sessions
+                    .get_sftp(session)
+                    .map_err(|_| SftpStatus::Unavailable)?;
                 if !target.running() {
                     return Err(SftpStatus::Unavailable);
                 }
@@ -602,7 +605,9 @@ impl SftpIpcService {
                 if !allowed {
                     return Err(SftpStatus::Conflict);
                 }
-                let target = sessions.get_sftp(session).map_err(|_| SftpStatus::Unavailable)?;
+                let target = sessions
+                    .get_sftp(session)
+                    .map_err(|_| SftpStatus::Unavailable)?;
                 if !target.running() {
                     return Err(SftpStatus::Unavailable);
                 }
@@ -779,16 +784,15 @@ impl SftpIpcService {
             // and release of its ownership lease. Recheck after dropping the lease.
             if let Ok(lock) = service.queues.lock(session) {
                 let _guard = lock.lock().await;
-                if let Ok(saved) = Queues::load_async(session).await {
-                    if !saved.paused
-                        && (!saved.retry_items.is_empty()
-                            || saved
-                                .items
-                                .iter()
-                                .any(|item| item.state == SftpQueueState::Pending))
-                    {
-                        let _ = service.ensure_queue_runner(session, target);
-                    }
+                if let Ok(saved) = Queues::load_async(session).await
+                    && !saved.paused
+                    && (!saved.retry_items.is_empty()
+                        || saved
+                            .items
+                            .iter()
+                            .any(|item| item.state == SftpQueueState::Pending))
+                {
+                    let _ = service.ensure_queue_runner(session, target);
                 }
             }
         });
@@ -1067,7 +1071,7 @@ impl SftpIpcService {
                     .to_str()
                     .ok_or("Local path is not UTF-8")?
                     .to_owned();
-                let mut kind = if meta.file_type().is_symlink() {
+                let kind = if meta.file_type().is_symlink() {
                     3
                 } else if meta.is_dir() {
                     2
@@ -1077,12 +1081,14 @@ impl SftpIpcService {
                     4
                 };
                 #[cfg(windows)]
-                {
+                let kind = {
                     use std::os::windows::fs::MetadataExt;
                     if meta.file_attributes() & 0x400 != 0 {
-                        kind = 3;
+                        3
+                    } else {
+                        kind
                     }
-                }
+                };
                 if !valid_path(&path) || !valid_path(&name) {
                     return Err("Local entry exceeds path limit");
                 }
@@ -1122,10 +1128,14 @@ impl SftpIpcService {
 }
 
 impl SftpIpcService {
-    pub(crate) async fn suspend_session_queue(&self,session:SessionId)->Result<(),SftpStatus> {
-        let guard=self.queues.lock(session)?.lock_owned().await;
-        let mut snapshot=Queues::load_async(session).await?;
-        if !snapshot.paused {snapshot.paused=true;snapshot.changed().map_err(|_|SftpStatus::InvalidRequest)?;Queues::save_owned(&snapshot,guard).await?;}
+    pub(crate) async fn suspend_session_queue(&self, session: SessionId) -> Result<(), SftpStatus> {
+        let guard = self.queues.lock(session)?.lock_owned().await;
+        let mut snapshot = Queues::load_async(session).await?;
+        if !snapshot.paused {
+            snapshot.paused = true;
+            snapshot.changed().map_err(|_| SftpStatus::InvalidRequest)?;
+            Queues::save_owned(&snapshot, guard).await?;
+        }
         Ok(())
     }
 }

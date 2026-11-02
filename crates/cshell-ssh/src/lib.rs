@@ -7,16 +7,16 @@ use std::time::Duration;
 use thiserror::Error;
 pub mod connection_progress;
 
-mod working_directory;
-mod managed_keys;
 mod file_checksum;
+mod managed_keys;
 mod ordered_auth;
-pub use ordered_auth::{OrderedAuthentication,OrderedAuthStep,LoginResponder,PasswordResponder};
+mod working_directory;
+pub use ordered_auth::{LoginResponder, OrderedAuthStep, OrderedAuthentication, PasswordResponder};
 
 mod forwarding;
+mod legacy_pem;
 mod ppk;
 mod rsa_signer;
-mod legacy_pem;
 pub use legacy_pem::LegacyPemError;
 pub use managed_keys::PrivateKeyImportError;
 pub use rsa_signer::RsaKeyError;
@@ -95,7 +95,13 @@ pub trait SshProvider: std::fmt::Debug + Send + Sync {
         authentication: SshAuthentication,
         verifier: KnownHostsVerifier,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<SshConnection, SshError>> + Send + 'a>> {
-        self.connect_configured(stream, username, authentication, verifier, Default::default())
+        self.connect_configured(
+            stream,
+            username,
+            authentication,
+            verifier,
+            Default::default(),
+        )
     }
     fn connect_configured<'a>(
         &'a self,
@@ -173,12 +179,26 @@ impl SshProvider for RusshProvider {
             let mut requirements = provider::authentication_requirements(&authentication);
             requirements.algorithm_policy = self.algorithm_policy;
             select_ssh_provider(&requirements)?;
-            let identity=match &authentication {SshAuthentication::Ordered(ordered)=>Some(ordered.identity.clone()),_=>None};
-            let fallback_username=username.clone();
-            let client =
-                RusshClient::connect_known_hosts_stream_configured(stream, username, authentication, verifier, options)
-                    .await?;
-            let username=identity.map(|id|id.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()).unwrap_or(fallback_username);
+            let identity = match &authentication {
+                SshAuthentication::Ordered(ordered) => Some(ordered.identity.clone()),
+                _ => None,
+            };
+            let fallback_username = username.clone();
+            let client = RusshClient::connect_known_hosts_stream_configured(
+                stream,
+                username,
+                authentication,
+                verifier,
+                options,
+            )
+            .await?;
+            let username = identity
+                .map(|id| {
+                    id.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                })
+                .unwrap_or(fallback_username);
             Ok(SshConnection::from_russh(client).with_authenticated_username(username))
         })
     }
@@ -351,7 +371,7 @@ impl From<KnownHostsVerifier> for HostKeyPolicy {
 
 #[derive(Debug)]
 struct VerifiedClient {
-    progress:Option<connection_progress::Observer>,
+    progress: Option<connection_progress::Observer>,
     verified_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
     host_key: HostKeyPolicy,
     forward_routes: ForwardRoutes,
@@ -438,7 +458,9 @@ impl russh::client::Handler for VerifiedClient {
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        if let Some(observer)=self.progress.take(){observer.stage(cshell_domain::ConnectionStage::HostKey);}
+        if let Some(observer) = self.progress.take() {
+            observer.stage(cshell_domain::ConnectionStage::HostKey);
+        }
         let check = match &self.host_key {
             HostKeyPolicy::Pinned(pinned) => {
                 if server_public_key
@@ -752,10 +774,12 @@ impl SshTerminalReader {
 struct OpeningTerminalChannel(Option<russh::Channel<russh::client::Msg>>);
 impl Drop for OpeningTerminalChannel {
     fn drop(&mut self) {
-        if let Some(channel)=self.0.take() {
-            if let Ok(runtime)=tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {let _=tokio::time::timeout(Duration::from_secs(2),channel.close()).await;});
-            }
+        if let Some(channel) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(2), channel.close()).await;
+            });
         }
     }
 }
@@ -950,7 +974,14 @@ impl RusshClient {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        Self::connect_known_hosts_stream_configured(stream, username, authentication, known_hosts, Default::default()).await
+        Self::connect_known_hosts_stream_configured(
+            stream,
+            username,
+            authentication,
+            known_hosts,
+            Default::default(),
+        )
+        .await
     }
 
     pub async fn connect_known_hosts_stream_configured<S>(
@@ -967,7 +998,9 @@ impl RusshClient {
             connect_verified_stream_configured(stream, known_hosts, &options).await?;
         connection_progress::stage(cshell_domain::ConnectionStage::Authentication);
         match authentication {
-            SshAuthentication::Ordered(mut ordered) => {ordered_auth::authenticate(&mut session,username,&mut ordered).await?;}
+            SshAuthentication::Ordered(mut ordered) => {
+                ordered_auth::authenticate(&mut session, username, &mut ordered).await?;
+            }
             SshAuthentication::KeyboardInteractive { mut responder } => {
                 authenticate_keyboard_interactive(&mut session, username, &mut responder).await?;
             }
@@ -1026,11 +1059,18 @@ impl RusshClient {
         cols: u32,
         terminal_type: &str,
     ) -> Result<SshTerminal, SshError> {
-        self.open_terminal_tracked(rows, cols, terminal_type, None).await
+        self.open_terminal_tracked(rows, cols, terminal_type, None)
+            .await
     }
     /// A channel-local environment marker enables passive cwd lookup on Linux.
     /// Servers may ignore it; shell requests and authentication remain unchanged.
-    pub async fn open_terminal_tracked(&self, rows:u32, cols:u32, terminal_type:&str, marker:Option<&str>) -> Result<SshTerminal,SshError> {
+    pub async fn open_terminal_tracked(
+        &self,
+        rows: u32,
+        cols: u32,
+        terminal_type: &str,
+        marker: Option<&str>,
+    ) -> Result<SshTerminal, SshError> {
         if terminal_type.trim().is_empty()
             || terminal_type.len() > 128
             || terminal_type.chars().any(char::is_control)
@@ -1038,10 +1078,14 @@ impl RusshClient {
             return Err(SshError::InvalidTerminalType);
         }
         connection_progress::stage(cshell_domain::ConnectionStage::TerminalChannel);
-        let mut opening=OpeningTerminalChannel(Some(self.session.channel_open_session().await?));
-        let channel=opening.0.as_mut().ok_or(russh::Error::Disconnect)?;
-        if let Some(marker)=marker.filter(|s| !s.is_empty() && s.len()<=64 && s.bytes().all(|c| c.is_ascii_alphanumeric() || c==b'-')) {
-            channel.set_env(false,"LC_CSHELL_SESSION",marker).await?;
+        let mut opening = OpeningTerminalChannel(Some(self.session.channel_open_session().await?));
+        let channel = opening.0.as_mut().ok_or(russh::Error::Disconnect)?;
+        if let Some(marker) = marker.filter(|s| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        }) {
+            channel.set_env(false, "LC_CSHELL_SESSION", marker).await?;
         }
         connection_progress::stage(cshell_domain::ConnectionStage::Pty);
         channel
@@ -1051,7 +1095,7 @@ impl RusshClient {
         connection_progress::stage(cshell_domain::ConnectionStage::Shell);
         channel.request_shell(true).await?;
         await_channel_request(channel, "shell").await?;
-        let channel=opening.0.take().ok_or(russh::Error::Disconnect)?;
+        let channel = opening.0.take().ok_or(russh::Error::Disconnect)?;
         let (reader, writer) = channel.split();
         Ok(SshTerminal {
             reader: SshTerminalReader { channel: reader },
@@ -1516,7 +1560,7 @@ where
             Arc::new(config),
             address,
             VerifiedClient {
-                progress:connection_progress::current(),
+                progress: connection_progress::current(),
                 verified_fingerprint: Arc::clone(&verified_fingerprint),
                 host_key: host_key.into(),
                 forward_routes: Arc::clone(&forward_routes),
@@ -1684,7 +1728,7 @@ where
             Arc::new(config),
             stream,
             VerifiedClient {
-                progress:connection_progress::current(),
+                progress: connection_progress::current(),
                 verified_fingerprint: Arc::clone(&verified_fingerprint),
                 host_key: host_key.into(),
                 forward_routes: Arc::clone(&forward_routes),
@@ -1705,13 +1749,16 @@ fn verified_config() -> russh::client::Config {
     verified_config_with_options(&Default::default())
 }
 
-fn verified_config_with_options(options: &cshell_domain::SshConnectionOptions) -> russh::client::Config {
+fn verified_config_with_options(
+    options: &cshell_domain::SshConnectionOptions,
+) -> russh::client::Config {
     let mut config = RusshProvider::default().client_config();
     // Interactive sessions may legitimately remain idle for a long time.
     // Bound connection establishment externally instead of enabling russh's
     // whole-session inactivity garbage collection.
     config.inactivity_timeout = None;
-    config.keepalive_interval = options.keepalive_enabled
+    config.keepalive_interval = options
+        .keepalive_enabled
         .then(|| Duration::from_secs(u64::from(options.keepalive_interval_secs.max(1))));
     config.keepalive_max = options.keepalive_max.max(1) as usize;
     config
@@ -1719,9 +1766,14 @@ fn verified_config_with_options(options: &cshell_domain::SshConnectionOptions) -
 
 fn ensure_authenticated(result: russh::client::AuthResult) -> Result<(), SshError> {
     match result {
-        russh::client::AuthResult::Success=>Ok(()),
-        russh::client::AuthResult::Failure {remaining_methods,partial_success:true}=>Err(SshError::AuthenticationPartial(remaining_methods.iter().map(String::from).collect())),
-        _=>Err(SshError::AuthenticationRejected),
+        russh::client::AuthResult::Success => Ok(()),
+        russh::client::AuthResult::Failure {
+            remaining_methods,
+            partial_success: true,
+        } => Err(SshError::AuthenticationPartial(
+            remaining_methods.iter().map(String::from).collect(),
+        )),
+        _ => Err(SshError::AuthenticationRejected),
     }
 }
 
@@ -1983,11 +2035,18 @@ mod tests {
         options.keepalive_interval_secs = 37;
         options.keepalive_max = 4;
         let config = super::verified_config_with_options(&options);
-        assert_eq!(config.keepalive_interval, Some(std::time::Duration::from_secs(37)));
+        assert_eq!(
+            config.keepalive_interval,
+            Some(std::time::Duration::from_secs(37))
+        );
         assert_eq!(config.keepalive_max, 4);
         assert!(config.inactivity_timeout.is_none());
         options.keepalive_enabled = false;
-        assert!(super::verified_config_with_options(&options).keepalive_interval.is_none());
+        assert!(
+            super::verified_config_with_options(&options)
+                .keepalive_interval
+                .is_none()
+        );
     }
 
     #[test]

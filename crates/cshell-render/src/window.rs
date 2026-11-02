@@ -35,9 +35,19 @@ const STATIC_ATLAS_HEIGHT: u32 = STATIC_GLYPH_COUNT
 
 #[cfg(test)]
 #[path = "window/chinese_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod chinese_tests;
 #[cfg(test)]
 #[path = "window/paste_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod paste_tests;
 
 #[repr(C)]
@@ -94,7 +104,8 @@ fn checked_physical_glyph(glyph: &cosmic_text::LayoutGlyph, line_y: f32) -> Opti
     // conversion (nor wrap into extreme GPU coordinates in release builds).
     let bounded = |value: f32| value.is_finite() && value.abs() < 1_048_576.0;
     if !(glyph.font_size.is_finite() && glyph.font_size > 0.0 && glyph.font_size <= 256.0)
-        || !bounded(line_y) || !bounded(glyph.w)
+        || !bounded(line_y)
+        || !bounded(glyph.w)
         || !bounded(glyph.x + glyph.font_size * glyph.x_offset)
         || !bounded(glyph.y - glyph.font_size * glyph.y_offset + line_y)
     {
@@ -110,18 +121,26 @@ fn checked_physical_glyph(glyph: &cosmic_text::LayoutGlyph, line_y: f32) -> Opti
 
 fn bundled_fallback_fonts(fonts: &FontSystem) -> FontSystem {
     let mut db = fonts.db().clone();
-    let external: Vec<_> = db.faces()
+    let external: Vec<_> = db
+        .faces()
         .filter(|face| !matches!(face.source, fontdb::Source::Binary(_)))
-        .map(|face| face.id).collect();
-    for id in external { db.remove_face(id); }
+        .map(|face| face.id)
+        .collect();
+    for id in external {
+        db.remove_face(id);
+    }
     // Retain the original face IDs so cached glyphs rasterize through the
     // original font system using the same embedded face data.
     FontSystem::new_with_locale_and_db(fonts.locale().to_owned(), db)
 }
 
 fn shape_checked(
-    fonts: &mut FontSystem, text: &str, attrs: &Attrs<'_>,
-    font_size: f32, cell_height: f32, cell_span: f32,
+    fonts: &mut FontSystem,
+    text: &str,
+    attrs: &Attrs<'_>,
+    font_size: f32,
+    cell_height: f32,
+    cell_span: f32,
 ) -> Option<Vec<ShapedGlyph>> {
     let mut buffer = Buffer::new(fonts, Metrics::new(font_size, cell_height));
     buffer.set_wrap(Wrap::None);
@@ -171,7 +190,10 @@ impl GlyphAtlas {
     }
 
     fn build_at_size(pixels: u16) -> Result<Self, WindowRendererError> {
-        let font_size = f32::from(pixels.clamp(cshell_domain::MIN_TERMINAL_FONT_PIXELS, cshell_domain::MAX_TERMINAL_FONT_PIXELS));
+        let font_size = f32::from(pixels.clamp(
+            cshell_domain::MIN_TERMINAL_FONT_PIXELS,
+            cshell_domain::MAX_TERMINAL_FONT_PIXELS,
+        ));
         let font = FontArc::try_from_slice(epaint_default_fonts::HACK_REGULAR)
             .map_err(|_| WindowRendererError::BundledFont)?;
         let scale = PxScale::from(font_size);
@@ -311,14 +333,26 @@ impl GlyphAtlas {
                 attrs = attrs.style(FontStyle::Italic);
             }
             let cell_span = self.cell_width * f32::from(key.columns);
-            let shaped = shape_checked(&mut self.font_system, &key.text, &attrs,
-                self.font_size, self.cell_height, cell_span)
-                .or_else(|| {
-                    let mut fallback = bundled_fallback_fonts(&self.font_system);
-                    shape_checked(&mut fallback, &key.text, &attrs,
-                        self.font_size, self.cell_height, cell_span)
-                })
-                .unwrap_or_default();
+            let shaped = shape_checked(
+                &mut self.font_system,
+                &key.text,
+                &attrs,
+                self.font_size,
+                self.cell_height,
+                cell_span,
+            )
+            .or_else(|| {
+                let mut fallback = bundled_fallback_fonts(&self.font_system);
+                shape_checked(
+                    &mut fallback,
+                    &key.text,
+                    &attrs,
+                    self.font_size,
+                    self.cell_height,
+                    cell_span,
+                )
+            })
+            .unwrap_or_default();
             if self.shaped_cells.len() >= 4096 {
                 self.shaped_cells.clear();
             }
@@ -1381,13 +1415,27 @@ impl std::fmt::Debug for WindowRenderer {
 impl WindowRenderer {
     /// Re-rasterize the same terminal contents immediately at the requested size.
     pub fn set_font_size(&mut self, pixels: u16) -> Result<bool, WindowRendererError> {
-        let pixels = pixels.clamp(cshell_domain::MIN_TERMINAL_FONT_PIXELS, cshell_domain::MAX_TERMINAL_FONT_PIXELS);
-        if self.atlas.font_size == f32::from(pixels) { return Ok(false); }
+        let pixels = pixels.clamp(
+            cshell_domain::MIN_TERMINAL_FONT_PIXELS,
+            cshell_domain::MAX_TERMINAL_FONT_PIXELS,
+        );
+        if self.atlas.font_size == f32::from(pixels) {
+            return Ok(false);
+        }
         let atlas = GlyphAtlas::build_at_size(pixels)?;
         self.queue.write_texture(
-            self.atlas_texture.as_image_copy(), &atlas.pixels,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(ATLAS_WIDTH * ATLAS_BYTES_PER_PIXEL), rows_per_image: Some(ATLAS_HEIGHT) },
-            wgpu::Extent3d { width: ATLAS_WIDTH, height: ATLAS_HEIGHT, depth_or_array_layers: 1 },
+            self.atlas_texture.as_image_copy(),
+            &atlas.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ATLAS_WIDTH * ATLAS_BYTES_PER_PIXEL),
+                rows_per_image: Some(ATLAS_HEIGHT),
+            },
+            wgpu::Extent3d {
+                width: ATLAS_WIDTH,
+                height: ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
         );
         self.atlas = atlas;
         self.uploaded_atlas_revision = 0;
@@ -1399,7 +1447,9 @@ impl WindowRenderer {
     }
 
     #[must_use]
-    pub fn font_size(&self) -> u16 { self.atlas.font_size as u16 }
+    pub fn font_size(&self) -> u16 {
+        self.atlas.font_size as u16
+    }
 
     pub async fn new(window: Arc<Window>) -> Result<Self, WindowRendererError> {
         Self::new_with_adapter_preference(window, false).await
@@ -1645,7 +1695,9 @@ impl WindowRenderer {
     }
 
     #[must_use]
-    pub fn terminal_cell_size(&self) -> [f32;2] { [self.atlas.cell_width,self.atlas.cell_height] }
+    pub fn terminal_cell_size(&self) -> [f32; 2] {
+        [self.atlas.cell_width, self.atlas.cell_height]
+    }
 
     #[must_use]
     pub fn viewport_rows(&self, viewport: TerminalViewport) -> u16 {
@@ -2489,7 +2541,10 @@ fn build_log_vertices_themed(
             .active_search_match
             .as_ref()
             .filter(|matched| matched.line_id == row.line_id);
-        let active_selection = decorations.selection_ranges.iter().find(|s|s.line_id==row.line_id);
+        let active_selection = decorations
+            .selection_ranges
+            .iter()
+            .find(|s| s.line_id == row.line_id);
         let mut cell_column = visual_row.start_cell;
         let mut style_index = row
             .style_spans
@@ -2560,13 +2615,18 @@ fn build_log_vertices_themed(
                 background = [1.0, 0.72, 0.12, 0.92];
             }
             let span_width = atlas.cell_width * columns as f32;
-            if active_selection.is_some_and(|selected| (selected.byte_range.start as usize) < grapheme_end && byte_index < selected.byte_range.end as usize) {
+            if active_selection.is_some_and(|selected| {
+                (selected.byte_range.start as usize) < grapheme_end
+                    && byte_index < selected.byte_range.end as usize
+            }) {
                 foreground = [0.95, 0.97, 1.0, 1.0];
                 background = [0.18, 0.36, 0.58, 1.0];
             }
             if let Some((snapshot, selection)) = &decorations.selection {
                 let screen_row = relative_row as i32 - frame.first_viewport_row as i32;
-                let screen_col = cell_column.saturating_sub(first_cell).min(u32::from(u16::MAX)) as u16;
+                let screen_col = cell_column
+                    .saturating_sub(first_cell)
+                    .min(u32::from(u16::MAX)) as u16;
                 if screen_row >= 0 && selection.contains(snapshot, screen_row as u16, screen_col) {
                     foreground = [0.95, 0.97, 1.0, 1.0];
                     background = [0.18, 0.36, 0.58, 1.0];
@@ -2751,6 +2811,11 @@ fn srgb_to_linear(value: u8) -> f32 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::{
         ATLAS_BYTES_PER_PIXEL, CachedGlyph, GlyphAtlas, GlyphInfo, TerminalViewport, atlas_pixel,
@@ -3112,11 +3177,24 @@ mod tests {
             last_width = atlas.cell_width;
             for character in '!'..='~' {
                 let glyph = atlas.glyph(character);
-                assert!(glyph.width > 0 && glyph.height > 0, "ASCII {character} disappeared at {size}px");
+                assert!(
+                    glyph.width > 0 && glyph.height > 0,
+                    "ASCII {character} disappeared at {size}px"
+                );
                 assert!(glyph.width + super::GLYPH_PADDING * 2 <= super::GLYPH_TILE);
             }
-            assert!(!atlas.shape_text("中e\u{301}", 3, Default::default()).is_empty());
-            assert!(atlas.shaped_cells.values().flatten().all(|glyph| glyph.cache_key.font_size_bits == f32::from(size).to_bits()));
+            assert!(
+                !atlas
+                    .shape_text("中e\u{301}", 3, Default::default())
+                    .is_empty()
+            );
+            assert!(
+                atlas
+                    .shaped_cells
+                    .values()
+                    .flatten()
+                    .all(|glyph| glyph.cache_key.font_size_bits == f32::from(size).to_bits())
+            );
         }
     }
 
@@ -3324,7 +3402,8 @@ mod tests {
     #[test]
     fn log_rows_generate_only_visible_styled_unicode_geometry() {
         let mut atlas = GlyphAtlas::build().unwrap_or_else(|error| panic!("{error}"));
-        let page = Arc::new(LogPage { first_line_id: 1,
+        let page = Arc::new(LogPage {
+            first_line_id: 1,
             source_id: LogSourceId(4),
             revision: 1,
             anchor_line_id: 9,
@@ -3420,12 +3499,13 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn wrapped_log_geometry_scans_each_visual_text_slice_once() {
-        let page = Arc::new(LogPage { first_line_id: 1,
+        let page = Arc::new(LogPage {
+            first_line_id: 1,
             source_id: LogSourceId(5),
             revision: 1,
             anchor_line_id: 1,
             rows: Arc::from([LogRow {
-            soft_wrap: false,
+                soft_wrap: false,
                 line_id: 1,
                 text: Arc::from("ABCD"),
                 style_spans: Arc::from([]),

@@ -286,9 +286,25 @@ pub fn import_openssh_config(
             })
             .transpose()?;
         let preferred = value("preferredauthentications");
-        let keyboard_interactive=matches!(preferred,Some("keyboard-interactive"|"keyboard-interactive,password"|"password,keyboard-interactive"));
-        let password_auth=preferred==Some("password") || keyboard_interactive;
-        if preferred.is_some_and(|v| !matches!(v, "publickey" | "password" | "keyboard-interactive" | "keyboard-interactive,password" | "password,keyboard-interactive")) {
+        let keyboard_interactive = matches!(
+            preferred,
+            Some(
+                "keyboard-interactive"
+                    | "keyboard-interactive,password"
+                    | "password,keyboard-interactive"
+            )
+        );
+        let password_auth = preferred == Some("password") || keyboard_interactive;
+        if preferred.is_some_and(|v| {
+            !matches!(
+                v,
+                "publickey"
+                    | "password"
+                    | "keyboard-interactive"
+                    | "keyboard-interactive,password"
+                    | "password,keyboard-interactive"
+            )
+        }) {
             return Err(unsupported("preferredauthentications"));
         }
         if password_auth && (key_path.is_some() || certificate_path.is_some()) {
@@ -345,13 +361,16 @@ pub fn import_openssh_config(
                 authentication_order: preferred
                     .filter(|_| keyboard_interactive)
                     .map(|order| {
-                        order.split(',').map(|method| {
-                            if method == "password" {
-                                cshell_domain::SshAuthStep::Password
-                            } else {
-                                cshell_domain::SshAuthStep::KeyboardInteractive
-                            }
-                        }).collect()
+                        order
+                            .split(',')
+                            .map(|method| {
+                                if method == "password" {
+                                    cshell_domain::SshAuthStep::Password
+                                } else {
+                                    cshell_domain::SshAuthStep::KeyboardInteractive
+                                }
+                            })
+                            .collect()
                     })
                     .unwrap_or_default(),
                 ..Default::default()

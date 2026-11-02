@@ -324,9 +324,18 @@ impl PortableVault {
         Ok(self.document.records.contains_key(&reference))
     }
 
-    pub fn references(&self, kind: VaultCredentialKind) -> Result<Vec<VaultCredentialRef>, VaultError> {
+    pub fn references(
+        &self,
+        kind: VaultCredentialKind,
+    ) -> Result<Vec<VaultCredentialRef>, VaultError> {
         self.active_keys()?;
-        Ok(self.document.records.keys().filter(|r| r.kind == kind).copied().collect())
+        Ok(self
+            .document
+            .records
+            .keys()
+            .filter(|r| r.kind == kind)
+            .copied()
+            .collect())
     }
 
     pub fn write(
@@ -407,27 +416,50 @@ impl PortableVault {
     /// Checks the current password without changing unlocked state or writing data.
     pub fn verify_password(&self, password: &Secret) -> Result<(), VaultError> {
         validate_password(password, false)?;
-        let keys=derive(password, &self.document.header.salt)?;
-        let check=decrypt(&keys[32..],&self.document.manifest,&self.document.authenticated_prefix)?;
-        if check.as_slice()!=MANIFEST_CHECK {return Err(VaultError::AuthenticationFailed);}
+        let keys = derive(password, &self.document.header.salt)?;
+        let check = decrypt(
+            &keys[32..],
+            &self.document.manifest,
+            &self.document.authenticated_prefix,
+        )?;
+        if check.as_slice() != MANIFEST_CHECK {
+            return Err(VaultError::AuthenticationFailed);
+        }
         Ok(())
     }
 
     /// Copies every authenticated record into a newly protected, exclusive file.
     /// The source remains unchanged; plaintext never leaves this storage layer.
-    pub fn copy_protected(&self, path: impl AsRef<Path>, password:&Secret) -> Result<Self,VaultError> {
-        let old_keys=self.active_keys()?;
-        let mut target=Self::create(path,password)?;
-        let mut candidate=target.document.clone();
-        candidate.header.revision=next_revision(&self.document.header)?;
-        let new_keys=target.active_keys()?;
-        for (reference,record) in &self.document.records {
-            let plain=decrypt(&old_keys[..32],record,&record_aad(&self.document.header,*reference))?;
-            validate_plaintext(&plain,reference.kind)?;
-            candidate.records.insert(*reference,encrypt(&new_keys[..32],plain,&record_aad(&candidate.header,*reference),random()?)?);
+    pub fn copy_protected(
+        &self,
+        path: impl AsRef<Path>,
+        password: &Secret,
+    ) -> Result<Self, VaultError> {
+        let old_keys = self.active_keys()?;
+        let mut target = Self::create(path, password)?;
+        let mut candidate = target.document.clone();
+        candidate.header.revision = next_revision(&self.document.header)?;
+        let new_keys = target.active_keys()?;
+        for (reference, record) in &self.document.records {
+            let plain = decrypt(
+                &old_keys[..32],
+                record,
+                &record_aad(&self.document.header, *reference),
+            )?;
+            validate_plaintext(&plain, reference.kind)?;
+            candidate.records.insert(
+                *reference,
+                encrypt(
+                    &new_keys[..32],
+                    plain,
+                    &record_aad(&candidate.header, *reference),
+                    random()?,
+                )?,
+            );
         }
-        target.commit(candidate,None)?;
-        target.reload()?;target.unlock(password)?;
+        target.commit(candidate, None)?;
+        target.reload()?;
+        target.unlock(password)?;
         Ok(target)
     }
 

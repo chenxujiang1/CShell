@@ -6,7 +6,7 @@ use cshell_ipc::{
     read_envelope, transport, write_envelope,
 };
 use std::{
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -111,14 +111,12 @@ impl OutputWorkspaceConnection {
         if let Operation::Get(document, _)
         | Operation::Page(document, _)
         | Operation::Export(document, _) = &operation
-        {
-            if view
+            && view
                 .document
                 .as_ref()
                 .is_none_or(|current| !Arc::ptr_eq(current, document))
-            {
-                return false;
-            }
+        {
+            return false;
         }
         if self
             .sender

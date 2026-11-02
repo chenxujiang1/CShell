@@ -26,6 +26,17 @@ members = [
     "vendor/alacritty_terminal",
 ]
 
+exclude = [
+    "vendor/accesskit_atspi_common",
+    "vendor/accesskit_unix",
+    "vendor/atspi-common",
+    "vendor/atspi-proxies",
+    "vendor/secret-service",
+    "vendor/zbus-lockstep",
+    "vendor/zbus-lockstep-macros",
+    "vendor/zbus-secret-service-keyring-store",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -43,7 +54,7 @@ bytemuck = { version = "=1.25.2", features = ["derive"] }
 bytes = "1"
 crc32fast = "1"
 cosmic-text = "=0.19.0"
-crypto-bigint = { version = "=0.7.5", default-features = false, features = ["alloc", "zeroize"] }
+crypto-bigint = { version = "=0.7.10", default-features = false, features = ["alloc", "zeroize"] }
 egui = "=0.36.1"
 egui-wgpu = "=0.36.1"
 egui-winit = "=0.36.1"
@@ -123,3 +134,12 @@ debug = true
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+
+accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
+accesskit_unix = { path = "vendor/accesskit_unix" }
+atspi-common = { path = "vendor/atspi-common" }
+atspi-proxies = { path = "vendor/atspi-proxies" }
+secret-service = { path = "vendor/secret-service" }
+zbus-lockstep = { path = "vendor/zbus-lockstep" }
+zbus-lockstep-macros = { path = "vendor/zbus-lockstep-macros" }
+zbus-secret-service-keyring-store = { path = "vendor/zbus-secret-service-keyring-store" }

@@ -119,6 +119,11 @@ impl std::fmt::Debug for VaultRequest {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
@@ -128,19 +133,35 @@ mod tests {
         request.confirm_rebuild = true;
         request.secret = b"PRIVATE-NEW-MASTER".to_vec();
         request.expected_lock_generation = 45;
-        let envelope = crate::Envelope { payload: Some(crate::envelope::Payload::VaultRequest(request)), ..Default::default() };
-        assert_eq!(crate::Envelope::decode(envelope.encode_to_vec().as_slice()).unwrap(),envelope);
+        let envelope = crate::Envelope {
+            payload: Some(crate::envelope::Payload::VaultRequest(request)),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::Envelope::decode(envelope.encode_to_vec().as_slice()).unwrap(),
+            envelope
+        );
         assert!(!format!("{envelope:?}").contains("PRIVATE"));
     }
     #[test]
     fn managed_key_request_round_trips_without_logging_private_input() {
         let mut request = VaultRequest::new(VaultOperation::GenerateManagedKey);
         request.secret = b"PRIVATE-KEY-PASSPHRASE".to_vec();
-        request.managed_key = Some(ManagedKeyRequest { name: "test".into(), algorithm: "ed25519".into(), ..Default::default() });
+        request.managed_key = Some(ManagedKeyRequest {
+            name: "test".into(),
+            algorithm: "ed25519".into(),
+            ..Default::default()
+        });
         request.expected_vault_revision = 7;
         request.expected_lock_generation = 19;
-        let envelope = crate::Envelope { payload: Some(crate::envelope::Payload::VaultRequest(request)), ..Default::default() };
-        assert_eq!(crate::Envelope::decode(envelope.encode_to_vec().as_slice()).unwrap(), envelope);
+        let envelope = crate::Envelope {
+            payload: Some(crate::envelope::Payload::VaultRequest(request)),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::Envelope::decode(envelope.encode_to_vec().as_slice()).unwrap(),
+            envelope
+        );
         assert!(!format!("{envelope:?}").contains("PRIVATE"));
     }
     #[test]
@@ -218,9 +239,9 @@ pub struct VaultResponse {
     pub session_state: i32,
     #[prost(message, optional, tag = "15")]
     pub auth_challenge: Option<KeyboardAuthChallenge>,
-    #[prost(string,tag="16")]
+    #[prost(string, tag = "16")]
     pub auth_notice: String,
-    #[prost(uint64,tag="17")]
+    #[prost(uint64, tag = "17")]
     pub auth_catalog_revision: u64,
     #[prost(message, repeated, tag = "18")]
     pub managed_keys: Vec<ManagedKeyInfo>,
@@ -337,69 +358,96 @@ impl std::fmt::Debug for CredentialPackageItem {
 #[derive(Clone, PartialEq, Message)]
 #[prost(skip_debug)]
 pub struct KeyboardAuthChallenge {
-    #[prost(bytes="vec", tag="1")]
+    #[prost(bytes = "vec", tag = "1")]
     pub id: Vec<u8>,
-    #[prost(string, tag="2")]
+    #[prost(string, tag = "2")]
     pub target: String,
-    #[prost(string, tag="3")]
+    #[prost(string, tag = "3")]
     pub name: String,
-    #[prost(string, tag="4")]
+    #[prost(string, tag = "4")]
     pub instructions: String,
-    #[prost(message, repeated, tag="5")]
+    #[prost(message, repeated, tag = "5")]
     pub prompts: Vec<KeyboardAuthPrompt>,
-    #[prost(bool,tag="6")]
+    #[prost(bool, tag = "6")]
     pub login: bool,
-    #[prost(string,tag="7")]
+    #[prost(string, tag = "7")]
     pub username: String,
-    #[prost(bool,tag="8")]
+    #[prost(bool, tag = "8")]
     pub username_editable: bool,
-    #[prost(bool,tag="9")]
+    #[prost(bool, tag = "9")]
     pub password_required: bool,
-    #[prost(bool,tag="10")]
+    #[prost(bool, tag = "10")]
     pub rejected: bool,
-    #[prost(bool,tag="11")]
+    #[prost(bool, tag = "11")]
     pub save_credentials: bool,
-    #[prost(bool,tag="12")]
+    #[prost(bool, tag = "12")]
     pub vault_unlock: bool,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct KeyboardAuthPrompt {
-    #[prost(string, tag="1")]
+    #[prost(string, tag = "1")]
     pub text: String,
-    #[prost(bool, tag="2")]
+    #[prost(bool, tag = "2")]
     pub echo: bool,
 }
 #[derive(Clone, PartialEq, Message)]
 #[prost(skip_debug)]
 pub struct KeyboardAuthAnswer {
-    #[prost(bytes="vec", tag="1")]
+    #[prost(bytes = "vec", tag = "1")]
     pub id: Vec<u8>,
-    #[prost(string, repeated, tag="2")]
+    #[prost(string, repeated, tag = "2")]
     pub answers: Vec<String>,
-    #[prost(bool, tag="3")]
+    #[prost(bool, tag = "3")]
     pub cancel: bool,
-    #[prost(string,tag="4")]
+    #[prost(string, tag = "4")]
     pub username: String,
-    #[prost(bool,tag="5")]
+    #[prost(bool, tag = "5")]
     pub save_credentials: bool,
 }
-impl Drop for KeyboardAuthAnswer { fn drop(&mut self){ self.answers.zeroize(); } }
+impl Drop for KeyboardAuthAnswer {
+    fn drop(&mut self) {
+        self.answers.zeroize();
+    }
+}
 impl std::fmt::Debug for KeyboardAuthAnswer {
-    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("KeyboardAuthAnswer([REDACTED])")}
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyboardAuthAnswer([REDACTED])")
+    }
 }
 impl std::fmt::Debug for KeyboardAuthChallenge {
-    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("KeyboardAuthChallenge([REDACTED])")}
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyboardAuthChallenge([REDACTED])")
+    }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod keyboard_auth_tests {
     use super::*;
     #[test]
-    fn keyboard_answers_round_trip_and_debug_redacts_all_secrets(){
-        let mut request=VaultRequest::new(VaultOperation::KeyboardAuthRespond);
-        request.auth_answer=Some(KeyboardAuthAnswer{id:vec![9;16],answers:vec!["PRIVATE-OTP-654321".into(),"PRIVATE-PASSWORD".into()],cancel:false,username:String::new(),save_credentials:false});
-        let envelope=crate::Envelope{payload:Some(crate::envelope::Payload::VaultRequest(request)),..Default::default()};
-        assert_eq!(crate::Envelope::decode(envelope.encode_to_vec().as_slice()).unwrap(),envelope);
-        let debug=format!("{envelope:?}");assert!(!debug.contains("PRIVATE"));assert!(!debug.contains("654321"));
+    fn keyboard_answers_round_trip_and_debug_redacts_all_secrets() {
+        let mut request = VaultRequest::new(VaultOperation::KeyboardAuthRespond);
+        request.auth_answer = Some(KeyboardAuthAnswer {
+            id: vec![9; 16],
+            answers: vec!["PRIVATE-OTP-654321".into(), "PRIVATE-PASSWORD".into()],
+            cancel: false,
+            username: String::new(),
+            save_credentials: false,
+        });
+        let envelope = crate::Envelope {
+            payload: Some(crate::envelope::Payload::VaultRequest(request)),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::Envelope::decode(envelope.encode_to_vec().as_slice()).unwrap(),
+            envelope
+        );
+        let debug = format!("{envelope:?}");
+        assert!(!debug.contains("PRIVATE"));
+        assert!(!debug.contains("654321"));
     }
 }

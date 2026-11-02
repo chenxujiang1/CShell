@@ -40,6 +40,11 @@ pub fn install() {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     #[test]
     fn crash_probe_child() {

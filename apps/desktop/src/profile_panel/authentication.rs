@@ -29,7 +29,14 @@ pub(super) fn draw(
             SshAuthMethod::Agent => vec![Step::Agent],
         };
     }
-    if !draft.ssh_options.authentication_order.iter().any(|m| matches!(m, Step::Password | Step::KeyboardInteractive)) { draft.password.zeroize(); }
+    if !draft
+        .ssh_options
+        .authentication_order
+        .iter()
+        .any(|m| matches!(m, Step::Password | Step::KeyboardInteractive))
+    {
+        draft.password.zeroize();
+    }
     let saved = catalog.ssh_connections.iter().any(|target| {
         target.profile_id == draft.record.id
             && target.host == draft.ssh_host.trim()

@@ -24,8 +24,8 @@ pub enum SftpQueueState {
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SftpQueueDraft {
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub modified_unix_seconds:Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_unix_seconds: Option<u32>,
     /// Missing means the original strict algorithm, including for saved queues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<cshell_domain::SftpVerification>,
@@ -60,7 +60,8 @@ impl std::fmt::Debug for SftpQueueDraft {
 }
 impl SftpQueueDraft {
     pub fn managed(&self) -> bool {
-        self.modified_unix_seconds.is_some() || self.destination_permissions.is_some()
+        self.modified_unix_seconds.is_some()
+            || self.destination_permissions.is_some()
             || self.expected_permissions.is_some()
             || self.publication_policy.is_some()
             || self.expected_source.is_some()
@@ -116,7 +117,7 @@ impl SftpQueueDraft {
 impl Default for SftpQueueDraft {
     fn default() -> Self {
         Self {
-            modified_unix_seconds:None,
+            modified_unix_seconds: None,
             verification: None,
             publication_policy: None,
             destination_permissions: None,
@@ -403,8 +404,7 @@ impl SftpQueueSnapshot {
                     item.state,
                     SftpQueueState::Pending | SftpQueueState::Running
                 ) || self.retry_items.contains(&item.id))
-            {
-                if !item.draft.verified
+                && (!item.draft.verified
                     || !destinations.insert((
                         item.draft.direction == SftpQueueDirection::Upload,
                         if item.draft.direction == SftpQueueDirection::Upload {
@@ -412,12 +412,9 @@ impl SftpQueueSnapshot {
                         } else {
                             &item.draft.local_path
                         },
-                    ))
-                {
-                    return Err(
-                        "parallel queue requires verified entries and distinct destinations",
-                    );
-                }
+                    )))
+            {
+                return Err("parallel queue requires verified entries and distinct destinations");
             }
             if item.draft.verified {
                 item.temporary_path()?;
@@ -467,11 +464,20 @@ impl SftpQueueSnapshot {
                     || (v.intent == SftpVerifiedIntent::Write) != v.write_end.is_some()
                     || v.write_end.is_some_and(|end| {
                         end <= v.bytes
-                            || end - v.bytes > if item.draft.verification.is_some() { MAX_SFTP_CHECKPOINT_BYTES } else { MAX_SFTP_WRITE_BATCH_BYTES }
+                            || end - v.bytes
+                                > if item.draft.verification.is_some() {
+                                    MAX_SFTP_CHECKPOINT_BYTES
+                                } else {
+                                    MAX_SFTP_WRITE_BATCH_BYTES
+                                }
                             || v.content.is_none_or(|c| end > c.size)
                     })
                     || v.temporary_owned && v.prefix_sha256.is_none()
-                    || v.digest_pending && (item.draft.verification.is_none() || v.verified || v.committed || v.content.is_none_or(|c| c.sha256 != [0; 32]))
+                    || v.digest_pending
+                        && (item.draft.verification.is_none()
+                            || v.verified
+                            || v.committed
+                            || v.content.is_none_or(|c| c.sha256 != [0; 32]))
                     || v.bytes > 0 && !v.temporary_owned
                     || v.intent == SftpVerifiedIntent::Create && v.temporary_owned
                     || v.intent == SftpVerifiedIntent::Write
@@ -571,31 +577,74 @@ pub fn decode_sftp_queue(bytes: &[u8]) -> Result<SftpQueueSnapshot, &'static str
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod checkpoint_tests {
     use super::*;
     #[test]
     fn old_documents_keep_their_encoding_and_strict_policy() {
-        let local=if cfg!(windows){"C:/a"}else{"/a"};
-        let old=format!(r#"{{"verified":true,"direction":"upload","remote_path":"/a","local_path":"{local}"}}"#);
-        let draft:SftpQueueDraft=serde_json::from_str(&old).unwrap();draft.validate().unwrap();
-        assert_eq!(draft.verification,None);assert_eq!(serde_json::to_string(&draft).unwrap(),old);
-        let old=r#"{"version":1,"content":null,"intent":"none","bytes":0,"write_end":null,"prefix_sha256":null,"temporary_owned":false,"verified":false,"committed":false,"cleaned":false}"#;
-        let journal:SftpVerifiedTransfer=serde_json::from_str(old).unwrap();
-        assert!(!journal.digest_pending);assert_eq!(serde_json::to_string(&journal).unwrap(),old);
+        let local = if cfg!(windows) { "C:/a" } else { "/a" };
+        let old = format!(
+            r#"{{"verified":true,"direction":"upload","remote_path":"/a","local_path":"{local}"}}"#
+        );
+        let draft: SftpQueueDraft = serde_json::from_str(&old).unwrap();
+        draft.validate().unwrap();
+        assert_eq!(draft.verification, None);
+        assert_eq!(serde_json::to_string(&draft).unwrap(), old);
+        let old = r#"{"version":1,"content":null,"intent":"none","bytes":0,"write_end":null,"prefix_sha256":null,"temporary_owned":false,"verified":false,"committed":false,"cleaned":false}"#;
+        let journal: SftpVerifiedTransfer = serde_json::from_str(old).unwrap();
+        assert!(!journal.digest_pending);
+        assert_eq!(serde_json::to_string(&journal).unwrap(), old);
     }
     #[test]
     fn streaming_write_reservations_are_bounded_and_pending_digests_cannot_publish() {
-        let mut queue=SftpQueueSnapshot::initial(SessionId::new());
-        queue.items.push(SftpQueueItem{
-            id:SftpQueueItemId::new(),state:SftpQueueState::Running,transfer_id:Some(SessionId::new()),receipt:None,
-            draft:SftpQueueDraft{verification:Some(cshell_domain::SftpVerification::Standard),verified:true,local_path:if cfg!(windows){"C:/stream.bin"}else{"/stream.bin"}.into(),remote_path:"/stream.bin".into(),..Default::default()},
-            verified:Some(SftpVerifiedTransfer{digest_pending:true,content:Some(SftpVerifiedContent{size:MAX_SFTP_CHECKPOINT_BYTES*2,sha256:[0;32]}),temporary_owned:true,prefix_sha256:Some([1;32]),intent:SftpVerifiedIntent::Write,write_end:Some(MAX_SFTP_CHECKPOINT_BYTES),..Default::default()}),
+        let mut queue = SftpQueueSnapshot::initial(SessionId::new());
+        queue.items.push(SftpQueueItem {
+            id: SftpQueueItemId::new(),
+            state: SftpQueueState::Running,
+            transfer_id: Some(SessionId::new()),
+            receipt: None,
+            draft: SftpQueueDraft {
+                verification: Some(cshell_domain::SftpVerification::Standard),
+                verified: true,
+                local_path: if cfg!(windows) {
+                    "C:/stream.bin"
+                } else {
+                    "/stream.bin"
+                }
+                .into(),
+                remote_path: "/stream.bin".into(),
+                ..Default::default()
+            },
+            verified: Some(SftpVerifiedTransfer {
+                digest_pending: true,
+                content: Some(SftpVerifiedContent {
+                    size: MAX_SFTP_CHECKPOINT_BYTES * 2,
+                    sha256: [0; 32],
+                }),
+                temporary_owned: true,
+                prefix_sha256: Some([1; 32]),
+                intent: SftpVerifiedIntent::Write,
+                write_end: Some(MAX_SFTP_CHECKPOINT_BYTES),
+                ..Default::default()
+            }),
         });
         queue.validate().unwrap();
-        queue.items[0].verified.as_mut().unwrap().write_end=Some(MAX_SFTP_CHECKPOINT_BYTES+1);assert!(queue.validate().is_err());
-        let v=queue.items[0].verified.as_mut().unwrap();v.write_end=None;v.intent=SftpVerifiedIntent::Publish;v.verified=true;v.bytes=v.content.unwrap().size;v.prefix_sha256=Some([0;32]);
+        queue.items[0].verified.as_mut().unwrap().write_end = Some(MAX_SFTP_CHECKPOINT_BYTES + 1);
+        assert!(queue.validate().is_err());
+        let v = queue.items[0].verified.as_mut().unwrap();
+        v.write_end = None;
+        v.intent = SftpVerifiedIntent::Publish;
+        v.verified = true;
+        v.bytes = v.content.unwrap().size;
+        v.prefix_sha256 = Some([0; 32]);
         assert!(queue.validate().is_err()); // all ordinary completed-byte facts still cannot authorize a pending digest
-        let v=queue.items[0].verified.as_mut().unwrap();v.digest_pending=false;queue.validate().unwrap();
+        let v = queue.items[0].verified.as_mut().unwrap();
+        v.digest_pending = false;
+        queue.validate().unwrap();
     }
     #[test]
     fn recoverable_write_intents_accept_old_and_batched_boundaries_but_stay_bounded() {
@@ -648,6 +697,11 @@ pub struct SftpQueueRetry {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod retry_tests {
     use super::*;
     fn row() -> SftpQueueItem {

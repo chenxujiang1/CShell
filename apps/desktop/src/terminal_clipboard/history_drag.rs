@@ -184,7 +184,8 @@ impl Drag {
             if line > first && (self.block || !continued) {
                 output.push('\n');
             }
-            let (left, right) = self.columns(line)
+            let (left, right) = self
+                .columns(line)
                 .ok_or(TerminalInteractionError::SelectionUnavailable)?;
             let mut column = 0;
             let mut copied = left;
@@ -261,10 +262,10 @@ impl DesktopApp {
             if surface.submit_page(page).is_err() {
                 return false;
             }
-            if let Some(request) = surface.request_reflow(snapshot.cols) {
-                if let Ok(layout) = request.execute() {
-                    surface.submit_reflow(layout);
-                }
+            if let Some(request) = surface.request_reflow(snapshot.cols)
+                && let Ok(layout) = request.execute()
+            {
+                surface.submit_reflow(layout);
             }
             surface.anchor(start, 0);
             self.log_surface = Some(surface);
@@ -298,12 +299,10 @@ impl DesktopApp {
         let Some(drag) = &mut self.terminal_clipboard.cross else {
             return;
         };
-        if extend {
-            if let Err(error) = drag.capture(&frame) {
-                self.terminal_selecting = false;
-                self.view_model.input_warning = Some(error.to_string());
-                return;
-            }
+        if extend && let Err(error) = drag.capture(&frame) {
+            self.terminal_selecting = false;
+            self.view_model.input_warning = Some(error.to_string());
+            return;
         }
         if extend && let Some(point) = point.and_then(|p| Drag::point(&frame, p)) {
             drag.focus = point;
@@ -336,7 +335,9 @@ impl DesktopApp {
             || self.zmodem.blocks_input()
             || self.keyboard_auth.blocks_input()
             || self.sync_blocks_input()
-            || self.terminal_search_open || self.task_panel.open || self.host_panel.open
+            || self.terminal_search_open
+            || self.task_panel.open
+            || self.host_panel.open
         {
             return false;
         }
@@ -395,6 +396,11 @@ impl DesktopApp {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
@@ -528,18 +534,32 @@ mod tests {
     }
     #[test]
     fn stalled_page_loading_does_not_accumulate_autoscroll_requests() {
-        use cshell_terminal::{AlacrittyTerminalEngine,TerminalEngine};
-        let mut engine=AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(2,8));engine.feed(b"one\r\ntwo");
-        let mut snapshot=engine.snapshot();snapshot.screen_start_line=100;
-        let mut app=DesktopApp::default();app.window_active=true;app.viewport_rows=2;
-        app.terminal_viewport=Some(TerminalViewport{x:0,y:0,width:80,height:20});
-        app.cursor_position=Some(winit::dpi::PhysicalPosition::new(20.0,-10.0));
-        app.terminal_surface.submit_snapshot(Arc::new(snapshot));app.begin_clipboard_selection(TerminalCellPoint{row:0,column:1});
-        app.cursor_position=Some(winit::dpi::PhysicalPosition::new(35.0,-10.0));
-        app.update_clipboard_selection(TerminalCellPoint{row:1,column:2});
-        let mut requests=0;
-        for _ in 0..32 {app.terminal_clipboard.auto_at=Some(std::time::Instant::now()-std::time::Duration::from_secs(1));requests+=usize::from(app.tick_selection_autoscroll());}
-        assert_eq!(requests,1);
+        use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
+        let mut engine = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(2, 8));
+        engine.feed(b"one\r\ntwo");
+        let mut snapshot = engine.snapshot();
+        snapshot.screen_start_line = 100;
+        let mut app = DesktopApp::default();
+        app.window_active = true;
+        app.viewport_rows = 2;
+        app.terminal_viewport = Some(TerminalViewport {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        });
+        app.cursor_position = Some(winit::dpi::PhysicalPosition::new(20.0, -10.0));
+        app.terminal_surface.submit_snapshot(Arc::new(snapshot));
+        app.begin_clipboard_selection(TerminalCellPoint { row: 0, column: 1 });
+        app.cursor_position = Some(winit::dpi::PhysicalPosition::new(35.0, -10.0));
+        app.update_clipboard_selection(TerminalCellPoint { row: 1, column: 2 });
+        let mut requests = 0;
+        for _ in 0..32 {
+            app.terminal_clipboard.auto_at =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            requests += usize::from(app.tick_selection_autoscroll());
+        }
+        assert_eq!(requests, 1);
         assert!(app.terminal_clipboard.cross.is_some());
     }
 }

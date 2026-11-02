@@ -12,11 +12,20 @@ mod review;
 
 /// Standalone paste uses the same bounded preview without changing command drafts.
 #[derive(Default)]
-pub(crate) struct PasteReview { editor: ComposePanel, target: Option<SyncInputTarget> }
-pub(crate) enum PasteReviewDecision { Stay, Cancel, Send }
+pub(crate) struct PasteReview {
+    editor: ComposePanel,
+    target: Option<SyncInputTarget>,
+}
+pub(crate) enum PasteReviewDecision {
+    Stay,
+    Cancel,
+    Send,
+}
 impl PasteReview {
     pub(crate) fn is_valid(&self) -> bool {
-        self.editor.review_started.is_some_and(|at| at.elapsed() < SYNC_INPUT_REVIEW_LIFETIME)
+        self.editor
+            .review_started
+            .is_some_and(|at| at.elapsed() < SYNC_INPUT_REVIEW_LIFETIME)
     }
     pub(crate) fn reset(&mut self) {
         let serial = self.editor.review_serial.wrapping_add(1);
@@ -26,18 +35,57 @@ impl PasteReview {
         self.editor.review_started = Some(std::time::Instant::now());
         self.editor.review_focus_requested = true;
     }
-    pub(crate) fn show(&mut self, ctx: &egui::Context, window: WorkspaceWindowId, tab: TabId,
-        session: cshell_domain::SessionId, title: &str, endpoint: Option<&str>, remote: bool, text: &str) -> PasteReviewDecision {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
+    pub(crate) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        window: WorkspaceWindowId,
+        tab: TabId,
+        session: cshell_domain::SessionId,
+        title: &str,
+        endpoint: Option<&str>,
+        remote: bool,
+        text: &str,
+    ) -> PasteReviewDecision {
         if self.target.is_none() {
-            self.target = Some(SyncInputTarget { tab_id: tab, session_id: session, title: title.into(), kind: if remote { SyncInputTargetKind::Ssh } else { SyncInputTargetKind::Local } });
-            if let Some(endpoint) = endpoint { self.editor.review_endpoints.insert(tab, endpoint.into()); }
+            self.target = Some(SyncInputTarget {
+                tab_id: tab,
+                session_id: session,
+                title: title.into(),
+                kind: if remote {
+                    SyncInputTargetKind::Ssh
+                } else {
+                    SyncInputTargetKind::Local
+                },
+            });
+            if let Some(endpoint) = endpoint {
+                self.editor.review_endpoints.insert(tab, endpoint.into());
+            }
         }
-        let action = InputAction::Paste { text: text.into(), bracketed: true };
-        let risk = SyncInputRisk { multiline: text.contains(['\n', '\r']), control_characters: text.chars().any(char::is_control), destructive_command: false };
+        let action = InputAction::Paste {
+            text: text.into(),
+            bracketed: true,
+        };
+        let risk = SyncInputRisk {
+            multiline: text.contains(['\n', '\r']),
+            control_characters: text.chars().any(char::is_control),
+            destructive_command: false,
+        };
         let Some(target) = self.target.as_ref() else {
             return PasteReviewDecision::Cancel;
         };
-        match review::show(ctx, window, &mut self.editor, &action, std::slice::from_ref(target), risk, text.len()) {
+        match review::show(
+            ctx,
+            window,
+            &mut self.editor,
+            &action,
+            std::slice::from_ref(target),
+            risk,
+            text.len(),
+        ) {
             review::Decision::Stay => PasteReviewDecision::Stay,
             review::Decision::Edit => PasteReviewDecision::Cancel,
             review::Decision::Send => PasteReviewDecision::Send,
@@ -114,27 +162,76 @@ impl DesktopSyncInput {
         self.compose.review_serial = self.compose.review_serial.wrapping_add(1);
         self.compose.review_started = Some(std::time::Instant::now());
         self.compose.review_focus_requested = true;
-        self.compose.review_endpoints = self.pending.as_ref().map(|p| p.snapshot().targets().iter().filter_map(|target| {
-            let entry = self.controller.port().targets.get(&target.tab_id)?;
-            (entry.opened.session_id == target.session_id).then(|| entry.configured_endpoint.as_ref().map(|endpoint| (target.tab_id, endpoint.clone()))).flatten()
-        }).collect()).unwrap_or_default();
+        self.compose.review_endpoints = self
+            .pending
+            .as_ref()
+            .map(|p| {
+                p.snapshot()
+                    .targets()
+                    .iter()
+                    .filter_map(|target| {
+                        let entry = self.controller.port().targets.get(&target.tab_id)?;
+                        (entry.opened.session_id == target.session_id)
+                            .then(|| {
+                                entry
+                                    .configured_endpoint
+                                    .as_ref()
+                                    .map(|endpoint| (target.tab_id, endpoint.clone()))
+                            })
+                            .flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     }
     pub(super) fn draw_paste_review(&mut self, context: &egui::Context, window: WorkspaceWindowId) {
-        if self.source.and_then(|tab| self.controller.port().targets.get(&tab)).is_none_or(|entry| entry.opened.window_id != window) { return; }
-        let Some(prepared) = self.pending.as_ref().filter(|p| matches!(p.action_for_review(), InputAction::Paste { .. })) else { return; };
-        match review::show(context, window, &mut self.compose, prepared.action_for_review(), prepared.snapshot().targets(), prepared.risk(), prepared.bytes()) {
-            review::Decision::Edit => { self.pending = None; self.return_focus_requested = true; }
+        if self
+            .source
+            .and_then(|tab| self.controller.port().targets.get(&tab))
+            .is_none_or(|entry| entry.opened.window_id != window)
+        {
+            return;
+        }
+        let Some(prepared) = self
+            .pending
+            .as_ref()
+            .filter(|p| matches!(p.action_for_review(), InputAction::Paste { .. }))
+        else {
+            return;
+        };
+        match review::show(
+            context,
+            window,
+            &mut self.compose,
+            prepared.action_for_review(),
+            prepared.snapshot().targets(),
+            prepared.risk(),
+            prepared.bytes(),
+        ) {
+            review::Decision::Edit => {
+                self.pending = None;
+                self.return_focus_requested = true;
+            }
             review::Decision::Send => {
-                if let Some(prepared) = self.pending.take() { self.dispatch(prepared, SyncInputApproval::Confirmed); }
+                if let Some(prepared) = self.pending.take() {
+                    self.dispatch(prepared, SyncInputApproval::Confirmed);
+                }
                 self.return_focus_requested = true;
             }
             review::Decision::Stay => {}
         }
     }
-    pub(crate) fn edit_clipboard(&mut self, window: WorkspaceWindowId, source: TabId, text: String) -> bool {
+    pub(crate) fn edit_clipboard(
+        &mut self,
+        window: WorkspaceWindowId,
+        source: TabId,
+        text: String,
+    ) -> bool {
         if !self.compose.text.is_empty() {
             self.status = "命令栏已有草稿，请先发送或清空，再载入剪贴板".into();
-            if self.compose.owner == Some(window) { self.hidden_command_bars.remove(&window); }
+            if self.compose.owner == Some(window) {
+                self.hidden_command_bars.remove(&window);
+            }
             self.compose.focus_requested = true;
             return false;
         }
@@ -181,38 +278,111 @@ impl DesktopSyncInput {
         };
         self.source = source;
     }
-    pub(crate) fn compose_open(&self, window: WorkspaceWindowId) -> bool {self.compose.owner == Some(window)}
+    pub(crate) fn compose_open(&self, window: WorkspaceWindowId) -> bool {
+        self.compose.owner == Some(window)
+    }
     pub(crate) fn open_quick_commands(&mut self, window: WorkspaceWindowId, source: Option<TabId>) {
-        if !self.compose_open(window) {self.open_compose(window, source);}
-        self.compose.page=1;
+        if !self.compose_open(window) {
+            self.open_compose(window, source);
+        }
+        self.compose.page = 1;
     }
-    pub(crate) fn palette_commands(&self)->Vec<(QuickCommandId,String)>{
-        self.quick_commands.as_ref().and_then(|c|c.view().snapshot).map(|s|s.catalog.commands.iter().map(|c|(c.id,c.name.clone())).collect()).unwrap_or_default()
+    pub(crate) fn palette_commands(&self) -> Vec<(QuickCommandId, String)> {
+        self.quick_commands
+            .as_ref()
+            .and_then(|c| c.view().snapshot)
+            .map(|s| {
+                s.catalog
+                    .commands
+                    .iter()
+                    .map(|c| (c.id, c.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
-    pub(crate) fn load_history_command(&mut self,window:WorkspaceWindowId,source:Option<TabId>,text:String)->bool {
-        if !self.compose.text.is_empty() || self.compose.task_editor.is_some() || source.is_none() || text.len()>4096{return false;}
-        if !self.compose_open(window){self.open_compose(window,source);}
-        self.compose.text=Zeroizing::new(text);self.compose.multiline=self.compose.text.contains(['\n','\r']);self.compose.page=0;self.compose.focus_requested=true;true
+    pub(crate) fn load_history_command(
+        &mut self,
+        window: WorkspaceWindowId,
+        source: Option<TabId>,
+        text: String,
+    ) -> bool {
+        if !self.compose.text.is_empty()
+            || self.compose.task_editor.is_some()
+            || source.is_none()
+            || text.len() > 4096
+        {
+            return false;
+        }
+        if !self.compose_open(window) {
+            self.open_compose(window, source);
+        }
+        self.compose.text = Zeroizing::new(text);
+        self.compose.multiline = self.compose.text.contains(['\n', '\r']);
+        self.compose.page = 0;
+        self.compose.focus_requested = true;
+        true
     }
-    pub(crate) fn load_palette_command(&mut self,window:WorkspaceWindowId,source:Option<TabId>,id:QuickCommandId)->bool {
-        if !self.compose.text.is_empty()||self.compose.task_editor.is_some(){self.status="命令栏已有草稿，请先处理草稿后再载入快捷命令".into();return false;}
-        let command=self.quick_commands.as_ref().and_then(|c|c.view().snapshot).and_then(|s|s.catalog.commands.iter().find(|c|c.id==id).cloned());
-        let Some(command)=command else{self.status="快捷命令已变化，请刷新后重新选择".into();return false;};
-        self.open_compose(window,source);self.load_command(&command);true
+    pub(crate) fn load_palette_command(
+        &mut self,
+        window: WorkspaceWindowId,
+        source: Option<TabId>,
+        id: QuickCommandId,
+    ) -> bool {
+        if !self.compose.text.is_empty() || self.compose.task_editor.is_some() {
+            self.status = "命令栏已有草稿，请先处理草稿后再载入快捷命令".into();
+            return false;
+        }
+        let command = self
+            .quick_commands
+            .as_ref()
+            .and_then(|c| c.view().snapshot)
+            .and_then(|s| s.catalog.commands.iter().find(|c| c.id == id).cloned());
+        let Some(command) = command else {
+            self.status = "快捷命令已变化，请刷新后重新选择".into();
+            return false;
+        };
+        self.open_compose(window, source);
+        self.load_command(&command);
+        true
     }
-    pub(crate) fn take_focus_return(&mut self) -> bool {std::mem::take(&mut self.return_focus_requested)}
-    pub(super) fn open_command_targets(&mut self,window:WorkspaceWindowId,active:Option<TabId>){
-        if !self.compose_open(window){self.open_compose(window,active);}
-        self.compose.page=0;self.compose.armed=true;self.compose.focus_requested=true;
+    pub(crate) fn take_focus_return(&mut self) -> bool {
+        std::mem::take(&mut self.return_focus_requested)
     }
-    pub(super) fn compose_uses_targets(&self)->bool {self.compose.armed}
-    pub(super) fn compose_can_send(&self)->bool {!self.compose.text.is_empty() && self.compose.text.len()<=MAX_QUICK_COMMAND_BODY_BYTES}
-    pub(super) fn prepare_compose_draft(&mut self,source:TabId){self.prepare_compose(source,self.compose.text.to_string(),self.compose.append_enter,self.compose.armed);}
-    pub(super) fn finish_command_send(&mut self){self.compose.text.zeroize();self.compose.risk_ack=false;self.compose.focus_requested=true;}
+    pub(super) fn open_command_targets(
+        &mut self,
+        window: WorkspaceWindowId,
+        active: Option<TabId>,
+    ) {
+        if !self.compose_open(window) {
+            self.open_compose(window, active);
+        }
+        self.compose.page = 0;
+        self.compose.armed = true;
+        self.compose.focus_requested = true;
+    }
+    pub(super) fn compose_uses_targets(&self) -> bool {
+        self.compose.armed
+    }
+    pub(super) fn compose_can_send(&self) -> bool {
+        !self.compose.text.is_empty() && self.compose.text.len() <= MAX_QUICK_COMMAND_BODY_BYTES
+    }
+    pub(super) fn prepare_compose_draft(&mut self, source: TabId) {
+        self.prepare_compose(
+            source,
+            self.compose.text.to_string(),
+            self.compose.append_enter,
+            self.compose.armed,
+        );
+    }
+    pub(super) fn finish_command_send(&mut self) {
+        self.compose.text.zeroize();
+        self.compose.risk_ack = false;
+        self.compose.focus_requested = true;
+    }
     fn load_command(&mut self, command: &QuickCommandRecord) {
         let draft = &mut self.compose;
-        draft.page=0;
-        draft.focus_requested=true;
+        draft.page = 0;
+        draft.focus_requested = true;
         draft.text.zeroize();
         draft.task_editor = None;
         draft.selection_json.zeroize();
@@ -292,7 +462,9 @@ impl DesktopSyncInput {
         self.compose.review_started = Some(std::time::Instant::now());
         self.compose.review_focus_requested = true;
         self.compose.review_endpoints.clear();
-        if !self.command_only || armed || !self.is_armed(){self.source=Some(source);}
+        if !self.command_only || armed || !self.is_armed() {
+            self.source = Some(source);
+        }
         let action = InputAction::Compose { text, append_enter };
         if armed {
             match self.controller.prepare_input(
@@ -314,30 +486,53 @@ impl DesktopSyncInput {
                 Err(error) => self.status = error.to_string(),
             }
         }
-        let review_targets: Vec<_> = self.pending.as_ref().map(|p| p.snapshot().targets().to_vec())
-            .or_else(|| self.pending_current.as_ref().map(|p| vec![p.target().clone()])).unwrap_or_default();
-        self.compose.review_endpoints = review_targets.iter().filter_map(|target| {
-            let entry = self.controller.port().targets.get(&target.tab_id)?;
-            (entry.opened.session_id == target.session_id).then(|| entry.configured_endpoint.as_ref().map(|endpoint| (target.tab_id, endpoint.clone()))).flatten()
-        }).collect();
+        let review_targets: Vec<_> = self
+            .pending
+            .as_ref()
+            .map(|p| p.snapshot().targets().to_vec())
+            .or_else(|| {
+                self.pending_current
+                    .as_ref()
+                    .map(|p| vec![p.target().clone()])
+            })
+            .unwrap_or_default();
+        self.compose.review_endpoints = review_targets
+            .iter()
+            .filter_map(|target| {
+                let entry = self.controller.port().targets.get(&target.tab_id)?;
+                (entry.opened.session_id == target.session_id)
+                    .then(|| {
+                        entry
+                            .configured_endpoint
+                            .as_ref()
+                            .map(|endpoint| (target.tab_id, endpoint.clone()))
+                    })
+                    .flatten()
+            })
+            .collect();
     }
     pub(super) fn dispatch_current(&mut self, prepared: PreparedCurrentInput) -> bool {
-        self.dispatch_current_with_approval(prepared,SyncInputApproval::Confirmed)
+        self.dispatch_current_with_approval(prepared, SyncInputApproval::Confirmed)
     }
-    pub(super) fn dispatch_current_with_approval(&mut self, prepared: PreparedCurrentInput, approval:SyncInputApproval) -> bool {
+    pub(super) fn dispatch_current_with_approval(
+        &mut self,
+        prepared: PreparedCurrentInput,
+        approval: SyncInputApproval,
+    ) -> bool {
         let body = match prepared.action_for_review() {
             InputAction::Compose { text, .. } => Some(Zeroizing::new(text.clone())),
             _ => None,
         };
-        match self
-            .controller
-            .dispatch_current(prepared, approval)
-        {
+        match self.controller.dispatch_current(prepared, approval) {
             Ok(receipt) => {
                 if receipt.delivery == SyncInputDelivery::QueueAccepted {
-                    if let Some(body) = body { self.history.record(&body); }
+                    if let Some(body) = body {
+                        self.history.record(&body);
+                    }
                     self.status = "已入队 1/1".into();
-                } else { self.status = format!("未发送：{:?}", receipt.delivery); }
+                } else {
+                    self.status = format!("未发送：{:?}", receipt.delivery);
+                }
                 if !receipt.audit_complete {
                     self.disarm(SyncInputDisarmReason::AuditFailure);
                     self.status.push_str("；派发审计未完成，已退出同步输入");
@@ -376,22 +571,47 @@ impl DesktopSyncInput {
         window: WorkspaceWindowId,
         active: Option<TabId>,
     ) {
-        let context=root.ctx().clone();
+        let context = root.ctx().clone();
         if self.compose.owner != Some(window) {
             return;
         }
         if active != self.compose.source {
-            if let Some(tab) = active { self.source_changed(tab); }
-            else { self.close_compose(); return; }
+            if let Some(tab) = active {
+                self.source_changed(tab);
+            } else {
+                self.close_compose();
+                return;
+            }
         }
-        let mut ime_event=false;
-        context.input(|input|{for event in &input.events {if let egui::Event::Ime(event)=event {
-            ime_event=true;
-            #[allow(deprecated)]
-            match event {egui::ImeEvent::Preedit{text,..}=>self.compose.ime_active=!text.is_empty(),egui::ImeEvent::Commit(_)|egui::ImeEvent::Disabled=>self.compose.ime_active=false,_=>{}}
-        }}});
-        if self.pending.is_none() && self.pending_current.is_none() && !self.modal_blocked && (self.compose.focus_active || self.compose.focus_requested || self.compose.page != 0) && !self.panel_open && self.arm_review.is_none() && !egui::Popup::is_any_open(&context) && context.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)) {
-            self.hide_command_bar();return;
+        let mut ime_event = false;
+        context.input(|input| {
+            for event in &input.events {
+                if let egui::Event::Ime(event) = event {
+                    ime_event = true;
+                    #[allow(deprecated)]
+                    match event {
+                        egui::ImeEvent::Preedit { text, .. } => {
+                            self.compose.ime_active = !text.is_empty()
+                        }
+                        egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => {
+                            self.compose.ime_active = false
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+        if self.pending.is_none()
+            && self.pending_current.is_none()
+            && !self.modal_blocked
+            && (self.compose.focus_active || self.compose.focus_requested || self.compose.page != 0)
+            && !self.panel_open
+            && self.arm_review.is_none()
+            && !egui::Popup::is_any_open(&context)
+            && context.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.hide_command_bar();
+            return;
         }
         let selected = self
             .pending
@@ -415,7 +635,15 @@ impl DesktopSyncInput {
             } else {
                 return;
             };
-            let decision = review::show(&context, window, &mut self.compose, action, targets, risk, bytes);
+            let decision = review::show(
+                &context,
+                window,
+                &mut self.compose,
+                action,
+                targets,
+                risk,
+                bytes,
+            );
             match decision {
                 review::Decision::Edit => {
                     self.pending = None;
@@ -429,9 +657,14 @@ impl DesktopSyncInput {
                         self.dispatch_current(review)
                     } else if let Some(review) = self.pending.take() {
                         self.dispatch(review, SyncInputApproval::Confirmed)
-                    } else { false };
-                    if accepted { self.finish_command_send(); }
-                    else { self.compose.focus_requested = true; }
+                    } else {
+                        false
+                    };
+                    if accepted {
+                        self.finish_command_send();
+                    } else {
+                        self.compose.focus_requested = true;
+                    }
                 }
                 review::Decision::Stay => {}
             }
@@ -460,10 +693,13 @@ impl DesktopSyncInput {
         let mut run = None;
         let mut change = None;
         let mut reload = false;
-        let height=if self.compose.page==0 && self.compose.action_kind<2 && !self.compose.multiline {
-            160.0_f32.min(root.available_height()*0.4).max(120.0)
-        }else{(root.available_height()*0.38).clamp(120.0,260.0)};
-        let choosing_targets=self.modal_blocked || self.panel_open || self.arm_review.is_some();
+        let height =
+            if self.compose.page == 0 && self.compose.action_kind < 2 && !self.compose.multiline {
+                160.0_f32.min(root.available_height() * 0.4).max(120.0)
+            } else {
+                (root.available_height() * 0.38).clamp(120.0, 260.0)
+            };
+        let choosing_targets = self.modal_blocked || self.panel_open || self.arm_review.is_some();
         egui::Panel::bottom("terminal-compose-dock").exact_size(height)
             .frame(cshell_ui::form::utility_bar()).show(root, |ui| {
                 if choosing_targets {ui.disable();}
@@ -782,8 +1018,12 @@ impl DesktopSyncInput {
         if let Some(command) = load {
             let scope = self.compose.armed;
             self.load_command(command);
-            if edit_library { self.compose.page = 2; }
-            else { self.compose.armed = scope; self.history.reset_cursor(); }
+            if edit_library {
+                self.compose.page = 2;
+            } else {
+                self.compose.armed = scope;
+                self.history.reset_cursor();
+            }
         }
         if let Some(command) = run {
             self.load_command(command);
@@ -835,7 +1075,7 @@ impl DesktopSyncInput {
             && !self.compose.text.is_empty()
             && let Some(source) = active
         {
-            self.request_compose_send(source,preview);
+            self.request_compose_send(source, preview);
         }
     }
 }
@@ -963,14 +1203,16 @@ mod tests {
     use super::*;
     #[test]
     fn history_load_keeps_a_draft_and_never_submits_or_overwrites() {
-        let mut sync=DesktopSyncInput::with_audit(DesktopSyncAudit::unavailable());
-        let window=WorkspaceWindowId::new();let source=Some(TabId::new());
-        assert!(!sync.load_history_command(window,None,"echo nope".into()));
-        assert!(sync.load_history_command(window,source,"echo first\necho second".into()));
-        assert_eq!(sync.compose.text.as_str(),"echo first\necho second");assert!(sync.compose.multiline);
-        assert!(sync.pending.is_none()&&sync.pending_current.is_none()&&!sync.is_armed());
-        assert!(!sync.load_history_command(window,source,"replacement".into()));
-        assert_eq!(sync.compose.text.as_str(),"echo first\necho second");
+        let mut sync = DesktopSyncInput::with_audit(DesktopSyncAudit::unavailable());
+        let window = WorkspaceWindowId::new();
+        let source = Some(TabId::new());
+        assert!(!sync.load_history_command(window, None, "echo nope".into()));
+        assert!(sync.load_history_command(window, source, "echo first\necho second".into()));
+        assert_eq!(sync.compose.text.as_str(), "echo first\necho second");
+        assert!(sync.compose.multiline);
+        assert!(sync.pending.is_none() && sync.pending_current.is_none() && !sync.is_armed());
+        assert!(!sync.load_history_command(window, source, "replacement".into()));
+        assert_eq!(sync.compose.text.as_str(), "echo first\necho second");
     }
     #[test]
     fn preview_shows_newlines_escape_bidi_and_template_body_is_not_in_debug() {

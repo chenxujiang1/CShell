@@ -24,7 +24,9 @@ pub(super) fn tooltip(
     let mut text = title.to_owned();
     if let Some(profile) = profile(model, tab) {
         text.push_str(&format!("\n配置目标：{}", profile.target));
-        if let Some(env)=model.profile_environments.get(&profile.id){text.push_str(&format!("\n环境：{}",env.label()));}
+        if let Some(env) = model.profile_environments.get(&profile.id) {
+            text.push_str(&format!("\n环境：{}", env.label()));
+        }
     }
     if let Some(state) = model.ssh_tab_states.get(&tab) {
         text.push_str(&format!("\nSSH {}", state.label()));
@@ -32,9 +34,15 @@ pub(super) fn tooltip(
         text.push_str("\n尚未连接");
     }
     if let Some(realtime) = model.input_target_tabs.get(&tab) {
-        text.push_str(if *realtime { "\n接收实时键盘同步" } else { "\n命令栏接收目标" });
+        text.push_str(if *realtime {
+            "\n接收实时键盘同步"
+        } else {
+            "\n命令栏接收目标"
+        });
     }
-    if model.unread_output_tabs.contains(&tab) { text.push_str("\n有未查看的新输出"); }
+    if model.unread_output_tabs.contains(&tab) {
+        text.push_str("\n有未查看的新输出");
+    }
     text.push_str("\n右键：复制、分屏、移动");
     text
 }
@@ -166,8 +174,18 @@ pub(super) fn identity(
     row.set_clip_rect(bar);
     row.spacing_mut().item_spacing.x = 6.0;
     row.horizontal(|ui| {
-        if let Some(env)=profile(model,tab).and_then(|p|model.profile_environments.get(&p.id)) {
-            ui.add_sized([42.0f32.min((bar.width()*0.22).max(1.0)),22.0],egui::Label::new(RichText::new(env.label()).size(12.0).strong().color(env.color())).truncate()).on_hover_text(format!("环境标记：{}",env.label()));
+        if let Some(env) = profile(model, tab).and_then(|p| model.profile_environments.get(&p.id)) {
+            ui.add_sized(
+                [42.0f32.min((bar.width() * 0.22).max(1.0)), 22.0],
+                egui::Label::new(
+                    RichText::new(env.label())
+                        .size(12.0)
+                        .strong()
+                        .color(env.color()),
+                )
+                .truncate(),
+            )
+            .on_hover_text(format!("环境标记：{}", env.label()));
         }
         let state_width = (ui.available_width() * 0.32).min(76.0);
         ui.add_sized(

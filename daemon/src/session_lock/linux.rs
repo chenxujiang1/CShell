@@ -16,9 +16,7 @@ use std::{
     time::Duration,
 };
 use zbus::{
-    Connection, Proxy,
-    proxy::CacheProperties,
-    zvariant::{OwnedObjectPath, OwnedValue},
+    Connection, OwnedObjectPath, OwnedVariant as OwnedValue, Proxy, proxy::CacheProperties,
 };
 
 const SERVICE: &str = "org.freedesktop.login1";
@@ -99,11 +97,8 @@ async fn proxy<'a>(
 ) -> ReadResult<Proxy<'a>> {
     zbus::proxy::Builder::<Proxy<'a>>::new(connection)
         .destination(destination)
-        .map_err(|_| ())?
         .path(path)
-        .map_err(|_| ())?
         .interface(interface)
-        .map_err(|_| ())?
         .cache_properties(CacheProperties::No)
         .build()
         .await
@@ -248,8 +243,7 @@ async fn attempt(
     // redirect credential authorization to an arbitrary user-controlled bus.
     let connection = bounded(async {
         zbus::connection::Builder::address("unix:path=/run/dbus/system_bus_socket")
-            .map_err(|_| ())?
-            .max_queued(16)
+            .max_queued(std::num::NonZeroUsize::new(16).ok_or(())?)
             .build()
             .await
             .map_err(|_| ())

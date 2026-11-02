@@ -19,7 +19,7 @@ fn frame_has(session: &SshSession, marker: &str, size: TerminalSize) -> bool {
 }
 
 async fn probe(fixtures: &mut [Fixture], round: usize) -> (u64, f64) {
-    let size = if round % 2 == 0 {
+    let size = if round.is_multiple_of(2) {
         TerminalSize::cells(24, 80)
     } else {
         TerminalSize::cells(30, 100)

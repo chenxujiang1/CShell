@@ -118,7 +118,7 @@ fn decode(bytes: &[u8]) -> Result<Zeroizing<String>, XshellImportError> {
     }
     let mut text = Zeroizing::new(String::new());
     if bytes.starts_with(&[0xff, 0xfe]) {
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return Err(XshellImportError::Encoding);
         }
         let words = Zeroizing::new(

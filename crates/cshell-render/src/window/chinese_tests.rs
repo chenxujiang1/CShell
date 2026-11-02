@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used)]
 use super::*;
 use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
 

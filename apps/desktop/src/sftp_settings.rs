@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Settings {
     #[serde(default)]
-    sync_presets:Vec<SyncPreset>,
+    sync_presets: Vec<SyncPreset>,
     #[serde(default)]
     local_directory: String,
     #[serde(default)]
@@ -13,26 +13,80 @@ struct Settings {
     #[serde(default)]
     window: Option<WindowPlacement>,
 }
-#[derive(Clone,serde::Serialize,serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SyncPreset {
-    pub id:cshell_domain::SessionId,pub name:String,pub peer:cshell_domain::ClipboardTrust,
-    pub local:String,pub remote:String,pub direction:cshell_application::SftpQueueDirection,
-    pub excludes:Vec<String>,pub compare_content:bool,pub preserve_modified:bool,
+    pub id: cshell_domain::SessionId,
+    pub name: String,
+    pub peer: cshell_domain::ClipboardTrust,
+    pub local: String,
+    pub remote: String,
+    pub direction: cshell_application::SftpQueueDirection,
+    pub excludes: Vec<String>,
+    pub compare_content: bool,
+    pub preserve_modified: bool,
 }
 impl SyncPreset {
-    fn valid(&self)->bool{!self.id.as_uuid().is_nil()&&!self.name.trim().is_empty()&&self.name.len()<=64&&!self.name.chars().any(char::is_control)
-        && self.local.len()<=4096&&Path::new(&self.local).is_absolute()&&!self.local.chars().any(char::is_control)
-        && cshell_application::sftp_remote_path(&self.remote,true)&&cshell_application::valid_sftp_exclusions(&self.excludes)}
+    fn valid(&self) -> bool {
+        !self.id.as_uuid().is_nil()
+            && !self.name.trim().is_empty()
+            && self.name.len() <= 64
+            && !self.name.chars().any(char::is_control)
+            && self.local.len() <= 4096
+            && Path::new(&self.local).is_absolute()
+            && !self.local.chars().any(char::is_control)
+            && cshell_application::sftp_remote_path(&self.remote, true)
+            && cshell_application::valid_sftp_exclusions(&self.excludes)
+    }
 }
-pub(crate) fn sync_presets()->Vec<SyncPreset>{path().map(|p|load(&p).sync_presets.into_iter().filter(SyncPreset::valid).take(32).collect()).unwrap_or_default()}
-pub(crate) fn save_sync_preset(value:SyncPreset)->Result<Vec<SyncPreset>,String>{let path=path().ok_or("无法定位 SFTP 设置")?;update_sync_preset(&path,Some(value),None).map_err(|_|"方案未保存：检查名称、规则与目录，最多保存 32 个方案".into())}
-pub(crate) fn delete_sync_preset(id:cshell_domain::SessionId)->Result<Vec<SyncPreset>,String>{let path=path().ok_or("无法定位 SFTP 设置")?;update_sync_preset(&path,None,Some(id)).map_err(|_|"方案未删除，请检查设置目录权限".into())}
-fn update_sync_preset(path:&Path,value:Option<SyncPreset>,remove:Option<cshell_domain::SessionId>)->std::io::Result<Vec<SyncPreset>>{
-    let _guard=WRITE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);let mut settings=load(path);
-    if let Some(value)=value {if !value.valid(){return Err(std::io::ErrorKind::InvalidInput.into());}settings.sync_presets.retain(|p|p.id!=value.id);if settings.sync_presets.len()>=32{return Err(std::io::Error::other("preset limit"));}settings.sync_presets.push(value);}
-    if let Some(id)=remove{settings.sync_presets.retain(|p|p.id!=id);}
-    write(path,&settings)?;Ok(settings.sync_presets)
+#[cfg(not(test))]
+pub(crate) fn sync_presets() -> Vec<SyncPreset> {
+    path()
+        .map(|p| {
+            load(&p)
+                .sync_presets
+                .into_iter()
+                .filter(SyncPreset::valid)
+                .take(32)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+#[cfg(not(test))]
+pub(crate) fn save_sync_preset(value: SyncPreset) -> Result<Vec<SyncPreset>, String> {
+    let path = path().ok_or("无法定位 SFTP 设置")?;
+    update_sync_preset(&path, Some(value), None)
+        .map_err(|_| "方案未保存：检查名称、规则与目录，最多保存 32 个方案".into())
+}
+#[cfg(not(test))]
+pub(crate) fn delete_sync_preset(id: cshell_domain::SessionId) -> Result<Vec<SyncPreset>, String> {
+    let path = path().ok_or("无法定位 SFTP 设置")?;
+    update_sync_preset(&path, None, Some(id)).map_err(|_| "方案未删除，请检查设置目录权限".into())
+}
+fn update_sync_preset(
+    path: &Path,
+    value: Option<SyncPreset>,
+    remove: Option<cshell_domain::SessionId>,
+) -> std::io::Result<Vec<SyncPreset>> {
+    let _guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut settings = load(path);
+    if let Some(value) = value {
+        if !value.valid() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        settings.sync_presets.retain(|p| p.id != value.id);
+        if settings.sync_presets.len() >= 32 {
+            return Err(std::io::Error::other("preset limit"));
+        }
+        settings.sync_presets.push(value);
+    }
+    if let Some(id) = remove {
+        settings.sync_presets.retain(|p| p.id != id);
+    }
+    write(path, &settings)?;
+    Ok(settings.sync_presets)
 }
 
 /// Sizes are logical pixels; ratios adapt to a resized window without changing saved preferences.
@@ -260,6 +314,11 @@ fn write(path: &Path, settings: &Settings) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]
@@ -294,6 +353,11 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod favorite_tests {
     use super::*;
     #[test]
@@ -358,18 +422,66 @@ mod favorite_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod layout_tests {
     use super::*;
     #[test]
     fn sync_presets_roundtrip_preserves_layout_and_refuses_invalid_updates() {
-        let root=tempfile::tempdir().unwrap();let path=root.path().join("sftp-settings.json");
-        save(&path,root.path().to_str().unwrap()).unwrap();let layout=Layout{left_ratio:0.6,..Default::default()};update_layout(&path,&layout).unwrap();
-        let preset=SyncPreset{id:cshell_domain::SessionId::new(),name:"Deploy".into(),peer:cshell_domain::ClipboardTrust{host:cshell_domain::ClipboardHost::new("server.test",22).unwrap(),username:"operator".into(),host_key_sha256:"test-key".into(),route:"direct".into()},local:root.path().to_string_lossy().into(),remote:"/srv/app".into(),direction:cshell_application::SftpQueueDirection::Upload,excludes:vec![".git/**".into()],compare_content:true,preserve_modified:true};
-        update_sync_preset(&path,Some(preset.clone()),None).unwrap();
-        let mut other=preset.clone();other.id=cshell_domain::SessionId::new();other.peer.username="root".into();update_sync_preset(&path,Some(other),None).unwrap();
-        let before=std::fs::read(&path).unwrap();let mut invalid=preset.clone();invalid.excludes=vec!["../escape".into()];assert!(update_sync_preset(&path,Some(invalid),None).is_err());assert_eq!(std::fs::read(&path).unwrap(),before);
-        let restored=load(&path);assert_eq!(restored.layout.left_ratio,0.6);assert_eq!(restored.local_directory,root.path().to_str().unwrap());assert_eq!(restored.sync_presets.iter().filter(|p|p.peer==preset.peer).count(),1);
-        assert_eq!(update_sync_preset(&path,None,Some(preset.id)).unwrap().len(),1);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("sftp-settings.json");
+        save(&path, root.path().to_str().unwrap()).unwrap();
+        let layout = Layout {
+            left_ratio: 0.6,
+            ..Default::default()
+        };
+        update_layout(&path, &layout).unwrap();
+        let preset = SyncPreset {
+            id: cshell_domain::SessionId::new(),
+            name: "Deploy".into(),
+            peer: cshell_domain::ClipboardTrust {
+                host: cshell_domain::ClipboardHost::new("server.test", 22).unwrap(),
+                username: "operator".into(),
+                host_key_sha256: "test-key".into(),
+                route: "direct".into(),
+            },
+            local: root.path().to_string_lossy().into(),
+            remote: "/srv/app".into(),
+            direction: cshell_application::SftpQueueDirection::Upload,
+            excludes: vec![".git/**".into()],
+            compare_content: true,
+            preserve_modified: true,
+        };
+        update_sync_preset(&path, Some(preset.clone()), None).unwrap();
+        let mut other = preset.clone();
+        other.id = cshell_domain::SessionId::new();
+        other.peer.username = "root".into();
+        update_sync_preset(&path, Some(other), None).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut invalid = preset.clone();
+        invalid.excludes = vec!["../escape".into()];
+        assert!(update_sync_preset(&path, Some(invalid), None).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let restored = load(&path);
+        assert_eq!(restored.layout.left_ratio, 0.6);
+        assert_eq!(restored.local_directory, root.path().to_str().unwrap());
+        assert_eq!(
+            restored
+                .sync_presets
+                .iter()
+                .filter(|p| p.peer == preset.peer)
+                .count(),
+            1
+        );
+        assert_eq!(
+            update_sync_preset(&path, None, Some(preset.id))
+                .unwrap()
+                .len(),
+            1
+        );
     }
     #[test]
     fn layout_window_default_folder_and_favorites_merge_and_round_trip() {

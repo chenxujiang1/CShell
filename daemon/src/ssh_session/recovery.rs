@@ -30,6 +30,10 @@ impl std::fmt::Debug for RecoveryPlan {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+)]
 pub(super) async fn restore(
     recovery: &RecoveryPlan,
     active: &RwLock<ActiveTransport>,
@@ -108,7 +112,7 @@ pub(super) async fn restore(
                 })?;
             let (reader, writer) = terminal.split();
             let lease = crate::shared_ssh::TransportLease::new(connected);
-            let writer=Arc::new(writer);
+            let writer = Arc::new(writer);
             lease.register_writer(writer.clone());
             Ok::<_, crate::session_ipc::SshLaunchFailure>((
                 reader,

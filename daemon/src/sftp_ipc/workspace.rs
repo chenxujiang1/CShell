@@ -2,8 +2,8 @@ use super::*;
 use cshell_application::*;
 use std::collections::BTreeSet;
 mod editing;
-mod review;
 mod files;
+mod review;
 #[derive(Clone, Debug, Default)]
 pub(super) struct Workspace {
     locks: Arc<Mutex<BTreeMap<SessionId, Arc<tokio::sync::Mutex<()>>>>>,
@@ -110,7 +110,10 @@ impl SftpIpcService {
         sessions: &SshSessionRegistry,
     ) -> SftpResponse {
         let result = match operation {
-            SftpOperation::EditReview|SftpOperation::EditRebase=>self.edit_review(&request,session,operation,sessions).await,
+            SftpOperation::EditReview | SftpOperation::EditRebase => {
+                self.edit_review(&request, session, operation, sessions)
+                    .await
+            }
             SftpOperation::QueueAddMany | SftpOperation::QueueEnqueueAndStart => {
                 self.queue_many(&request, session, sessions).await
             }
@@ -255,11 +258,7 @@ impl SftpIpcService {
         queue.peer = Some(peer);
         // Immediate browser transfers use three workers; explicit settings remain authoritative.
         queue.concurrency.get_or_insert(3);
-        if !start {
-            queue.paused = true;
-        } else {
-            queue.paused = false;
-        }
+        queue.paused = !start;
         for draft in drafts {
             queue.items.push(SftpQueueItem {
                 verified: None,

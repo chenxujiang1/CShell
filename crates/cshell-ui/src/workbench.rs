@@ -9,7 +9,9 @@ use egui::{Align, Color32, FontId, Frame, Layout, RichText, Stroke, TextStyle};
 const TAB_BAR: Color32 = theme::BACKGROUND;
 const TAB_ACTIVE: Color32 = theme::RAISED;
 const SIDEBAR_MIN_WIDTH: f32 = 120.0;
-pub fn searchable_window_tabs(model:&WorkbenchViewModel)->Vec<(TabId,String,String)>{tab_navigation::searchable_tabs(model)}
+pub fn searchable_window_tabs(model: &WorkbenchViewModel) -> Vec<(TabId, String, String)> {
+    tab_navigation::searchable_tabs(model)
+}
 
 pub fn install_workbench_style(context: &egui::Context) {
     let mut style = (*context.style_of(egui::Theme::Dark)).clone();
@@ -213,7 +215,9 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
         )
         .show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                let(rect,_)=ui.allocate_exact_size(egui::vec2(22.0,22.0),egui::Sense::hover());crate::brand::paint(ui.painter(),rect);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                crate::brand::paint(ui.painter(), rect);
                 ui.menu_button("文件", |ui| {
                     crate::form::menu_body(ui, |ui| {
                         action(
@@ -271,7 +275,9 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                             model.sidebar_hidden = !visible;
                         }
                         let mut toolbar = !model.toolbar_hidden;
-                        if ui.checkbox(&mut toolbar,"连接工具栏").changed(){model.toolbar_hidden=!toolbar;}
+                        if ui.checkbox(&mut toolbar, "连接工具栏").changed() {
+                            model.toolbar_hidden = !toolbar;
+                        }
                         ui.separator();
                         action(ui, model, "终端工作台", WorkbenchMenuCommand::TerminalView);
                         if ui
@@ -298,14 +304,23 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                                 .iter()
                                 .any(|t| t.id == tab && t.session_id.is_some());
                             if ui
-                                .add_enabled(running, egui::Button::new(if is_ssh_tab(model,tab) {"复制 SSH 会话"} else {"复制为新会话"}))
+                                .add_enabled(
+                                    running,
+                                    egui::Button::new(if is_ssh_tab(model, tab) {
+                                        "复制 SSH 会话"
+                                    } else {
+                                        "复制为新会话"
+                                    }),
+                                )
                                 .clicked()
                             {
                                 model.menu_command =
                                     Some(WorkbenchMenuCommand::CloneWorkspaceSession(tab));
                                 ui.close();
                             }
-                            if is_ssh_tab(model,tab) { duplicate_channel_action(ui,model,tab); }
+                            if is_ssh_tab(model, tab) {
+                                duplicate_channel_action(ui, model, tab);
+                            }
                             action(
                                 ui,
                                 model,
@@ -357,13 +372,38 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                 });
                 ui.menu_button("工具", |ui| {
                     crate::form::menu_body(ui, |ui| {
-                        action(ui, model, "快捷操作…    Ctrl+Shift+K", WorkbenchMenuCommand::CommandCenter);
-                        action(ui, model, "键盘快捷键…", WorkbenchMenuCommand::KeyboardSettings);
+                        action(
+                            ui,
+                            model,
+                            "快捷操作…    Ctrl+Shift+K",
+                            WorkbenchMenuCommand::CommandCenter,
+                        );
+                        action(
+                            ui,
+                            model,
+                            "键盘快捷键…",
+                            WorkbenchMenuCommand::KeyboardSettings,
+                        );
                         ui.separator();
-                        action(ui, model, "全局默认设置…", WorkbenchMenuCommand::GlobalSettings);
+                        action(
+                            ui,
+                            model,
+                            "全局默认设置…",
+                            WorkbenchMenuCommand::GlobalSettings,
+                        );
                         action(ui, model, "凭据管理…", WorkbenchMenuCommand::Credentials);
-                        action(ui, model, "终端上传任务…", WorkbenchMenuCommand::TerminalUploads);
-                        action(ui, model, "ZMODEM 传输…", WorkbenchMenuCommand::ZmodemTransfers);
+                        action(
+                            ui,
+                            model,
+                            "终端上传任务…",
+                            WorkbenchMenuCommand::TerminalUploads,
+                        );
+                        action(
+                            ui,
+                            model,
+                            "ZMODEM 传输…",
+                            WorkbenchMenuCommand::ZmodemTransfers,
+                        );
                         ui.separator();
                         action(ui, model, "主机与主机组…", WorkbenchMenuCommand::Hosts);
                         action(ui, model, "批量命令任务", WorkbenchMenuCommand::Tasks);
@@ -399,8 +439,18 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                                     WorkbenchMenuCommand::ClipboardPolicy,
                                 );
                                 ui.separator();
-                                action(ui, model, "工作区恢复…", WorkbenchMenuCommand::WorkspaceRecovery);
-                                action(ui, model, "重试未打开的窗口", WorkbenchMenuCommand::RetryWorkspaceWindows);
+                                action(
+                                    ui,
+                                    model,
+                                    "工作区恢复…",
+                                    WorkbenchMenuCommand::WorkspaceRecovery,
+                                );
+                                action(
+                                    ui,
+                                    model,
+                                    "重试未打开的窗口",
+                                    WorkbenchMenuCommand::RetryWorkspaceWindows,
+                                );
                             })
                         });
                     })
@@ -415,37 +465,86 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                 });
                 if ui.available_width() > 150.0 {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.available_width()>260.0 && ui.small_button("快捷操作    Ctrl+Shift+K").on_hover_text("搜索并执行当前窗口的功能").clicked(){model.menu_command=Some(WorkbenchMenuCommand::CommandCenter);}
+                        if ui.available_width() > 260.0
+                            && ui
+                                .small_button("快捷操作    Ctrl+Shift+K")
+                                .on_hover_text("搜索并执行当前窗口的功能")
+                                .clicked()
+                        {
+                            model.menu_command = Some(WorkbenchMenuCommand::CommandCenter);
+                        }
                         ui.label(RichText::new("CShell").monospace().size(11.0).color(MUTED));
                     });
                 }
             });
         });
-    if !model.toolbar_hidden {egui::Panel::top("classic-toolbar")
-        .exact_size(38.0)
-        .frame(
-            Frame::NONE
-                .fill(PANEL)
-                .stroke(Stroke::new(1.0, LINE))
-                .inner_margin(egui::Margin::symmetric(10, 4)),
-        )
-        .show(ui, |ui| {
-            ssh_chrome::toolbar(ui, model);
-        });}
-    if let Some(warning)=model.input_warning.clone() {
-        let feedback=crate::feedback::explain(&warning);
-        egui::Panel::top("workbench-notice").frame(crate::form::utility_bar()).show(ui,|ui|{
-            ui.horizontal_wrapped(|ui|{
-                ui.colored_label(theme::WARNING,feedback.title);
-                let reserved=if model.can_reconnect_ssh {280.0}else{190.0};
-                ui.add_sized([(ui.available_width()-reserved).max(80.0),24.0],egui::Label::new(if feedback.guidance.is_empty(){compact(&warning,64)}else{feedback.guidance.into()}).truncate()).on_hover_text(&warning);
-                ui.menu_button("详情",|ui|{crate::form::menu_body(ui,|ui|{ui.label(&warning);if ui.button("复制详情").clicked(){ui.ctx().copy_text(warning.clone());ui.close();}});});
-                if feedback.action==crate::feedback::Action::Reconnect && model.can_restart_ssh && !model.ssh_control_busy && ui.small_button("重新连接").clicked(){model.menu_command=Some(WorkbenchMenuCommand::ReconnectSsh);}
-                if feedback.action==crate::feedback::Action::Unlock && ui.small_button("解锁凭据库").clicked(){model.menu_command=Some(WorkbenchMenuCommand::VaultSettings);}
-                if feedback.action==crate::feedback::Action::InspectFiles && model.can_sftp && ui.small_button("查看文件").clicked(){model.menu_command=Some(WorkbenchMenuCommand::SftpFiles);}
-                if ui.small_button("关闭提示").clicked(){model.input_warning=None;}
+    if !model.toolbar_hidden {
+        egui::Panel::top("classic-toolbar")
+            .exact_size(38.0)
+            .frame(
+                Frame::NONE
+                    .fill(PANEL)
+                    .stroke(Stroke::new(1.0, LINE))
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
+            )
+            .show(ui, |ui| {
+                ssh_chrome::toolbar(ui, model);
             });
-        });
+    }
+    if let Some(warning) = model.input_warning.clone() {
+        let feedback = crate::feedback::explain(&warning);
+        egui::Panel::top("workbench-notice")
+            .frame(crate::form::utility_bar())
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(theme::WARNING, feedback.title);
+                    let reserved = if model.can_reconnect_ssh {
+                        280.0
+                    } else {
+                        190.0
+                    };
+                    ui.add_sized(
+                        [(ui.available_width() - reserved).max(80.0), 24.0],
+                        egui::Label::new(if feedback.guidance.is_empty() {
+                            compact(&warning, 64)
+                        } else {
+                            feedback.guidance.into()
+                        })
+                        .truncate(),
+                    )
+                    .on_hover_text(&warning);
+                    ui.menu_button("详情", |ui| {
+                        crate::form::menu_body(ui, |ui| {
+                            ui.label(&warning);
+                            if ui.button("复制详情").clicked() {
+                                ui.ctx().copy_text(warning.clone());
+                                ui.close();
+                            }
+                        });
+                    });
+                    if feedback.action == crate::feedback::Action::Reconnect
+                        && model.can_restart_ssh
+                        && !model.ssh_control_busy
+                        && ui.small_button("重新连接").clicked()
+                    {
+                        model.menu_command = Some(WorkbenchMenuCommand::ReconnectSsh);
+                    }
+                    if feedback.action == crate::feedback::Action::Unlock
+                        && ui.small_button("解锁凭据库").clicked()
+                    {
+                        model.menu_command = Some(WorkbenchMenuCommand::VaultSettings);
+                    }
+                    if feedback.action == crate::feedback::Action::InspectFiles
+                        && model.can_sftp
+                        && ui.small_button("查看文件").clicked()
+                    {
+                        model.menu_command = Some(WorkbenchMenuCommand::SftpFiles);
+                    }
+                    if ui.small_button("关闭提示").clicked() {
+                        model.input_warning = None;
+                    }
+                });
+            });
     }
     egui::Panel::bottom("classic-status")
         .exact_size(24.0)
@@ -457,12 +556,26 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let state = model.selected_tab.and_then(|tab| model.ssh_tab_states.get(&tab).copied());
-                if model.sidebar_hidden && sidebar_icon_button(ui, "›", "展开会话管理器").clicked() {
+                let state = model
+                    .selected_tab
+                    .and_then(|tab| model.ssh_tab_states.get(&tab).copied());
+                if model.sidebar_hidden && sidebar_icon_button(ui, "›", "展开会话管理器").clicked()
+                {
                     model.sidebar_hidden = false;
                 }
                 let (status, color) = if let Some(state) = state {
-                    (format!("{} SSH {}", if state == SshConnectionState::Connected { "●" } else { "○" }, state.label()), ssh_state_color(state))
+                    (
+                        format!(
+                            "{} SSH {}",
+                            if state == SshConnectionState::Connected {
+                                "●"
+                            } else {
+                                "○"
+                            },
+                            state.label()
+                        ),
+                        ssh_state_color(state),
+                    )
                 } else if model.daemon_connected {
                     ("● 已连接".into(), theme::SUCCESS)
                 } else {
@@ -482,26 +595,54 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().interact_size.y = 18.0;
                     ui.spacing_mut().button_padding.y = 1.0;
-                    if ui.available_width() > 220.0 && let Some(reading) = &model.terminal_reading_status {
+                    if ui.available_width() > 220.0
+                        && let Some(reading) = &model.terminal_reading_status
+                    {
                         ui.label(RichText::new(reading).size(12.0).color(MUTED));
                         ui.separator();
                     }
-                    if state.is_some() && ui.selectable_label(model.connection_diagnostics_open, "连接诊断").clicked() {
+                    if state.is_some()
+                        && ui
+                            .selectable_label(model.connection_diagnostics_open, "连接诊断")
+                            .clicked()
+                    {
                         model.connection_diagnostics_open = !model.connection_diagnostics_open;
                     }
-                    if ui.available_width()>250.0 && let Some(status)=&model.vault_status {
-                        if ui.small_button(status).on_hover_text("打开全局凭据库设置；连接会按需解锁，无需提前操作").clicked(){model.menu_command=Some(WorkbenchMenuCommand::VaultSettings);}
+                    if ui.available_width() > 250.0
+                        && let Some(status) = &model.vault_status
+                    {
+                        if ui
+                            .small_button(status)
+                            .on_hover_text("打开全局凭据库设置；连接会按需解锁，无需提前操作")
+                            .clicked()
+                        {
+                            model.menu_command = Some(WorkbenchMenuCommand::VaultSettings);
+                        }
                         ui.separator();
                     }
-                    if let Some(zoom)=model.terminal_zoom_pixels {
-                        if ui.small_button(format!("{zoom} px · 临时 ↺")).on_hover_text("当前窗口临时字号，点击或 Ctrl+0 恢复全局默认").clicked(){model.terminal_zoom_pixels=None;}
+                    if let Some(zoom) = model.terminal_zoom_pixels {
+                        if ui
+                            .small_button(format!("{zoom} px · 临时 ↺"))
+                            .on_hover_text("当前窗口临时字号，点击或 Ctrl+0 恢复全局默认")
+                            .clicked()
+                        {
+                            model.terminal_zoom_pixels = None;
+                        }
                     } else {
-                    let pixels = model.terminal_font_pixels.get_or_insert(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS);
-                    ui.add(egui::DragValue::new(pixels)
-                        .range(cshell_domain::MIN_TERMINAL_FONT_PIXELS..=cshell_domain::MAX_TERMINAL_FONT_PIXELS)
-                        .speed(1.0).suffix(" px"))
+                        let pixels = model
+                            .terminal_font_pixels
+                            .get_or_insert(cshell_domain::DEFAULT_TERMINAL_FONT_PIXELS);
+                        ui.add(
+                            egui::DragValue::new(pixels)
+                                .range(
+                                    cshell_domain::MIN_TERMINAL_FONT_PIXELS
+                                        ..=cshell_domain::MAX_TERMINAL_FONT_PIXELS,
+                                )
+                                .speed(1.0)
+                                .suffix(" px"),
+                        )
                         .on_hover_text("终端字号：拖动或点击输入数值，立即生效并保存");
-                    ui.small("字号");
+                        ui.small("字号");
                     }
                     ui.separator();
                     if model.layout_paused {
@@ -525,13 +666,23 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
 fn matches_profile(profile: &SavedSshProfileViewModel, search: &str) -> bool {
     tab_navigation::search_matches(search, &[&profile.name, &profile.target])
 }
-fn matches_profile_or_folder(profile: &SavedSshProfileViewModel, folders: &[ProfileFolder], search: &str) -> bool {
-    if matches_profile(profile, search) {return true;}
-    let mut current=profile.folder_id;
+fn matches_profile_or_folder(
+    profile: &SavedSshProfileViewModel,
+    folders: &[ProfileFolder],
+    search: &str,
+) -> bool {
+    if matches_profile(profile, search) {
+        return true;
+    }
+    let mut current = profile.folder_id;
     for _ in 0..16 {
-        let Some(folder)=current.and_then(|id|folders.iter().find(|f|f.id==id)) else {return false;};
-        if tab_navigation::search_matches(search,&[&folder.name]) {return true;}
-        current=folder.parent_id;
+        let Some(folder) = current.and_then(|id| folders.iter().find(|f| f.id == id)) else {
+            return false;
+        };
+        if tab_navigation::search_matches(search, &[&folder.name]) {
+            return true;
+        }
+        current = folder.parent_id;
     }
     false
 }
@@ -649,7 +800,12 @@ fn profile_row(
                     WorkbenchMenuCommand::OpenSavedProfile(profile.id),
                 );
                 if profile.kind == ProfileKind::Ssh {
-                    action(ui,model,"打开 SFTP",WorkbenchMenuCommand::OpenSavedSftp(profile.id));
+                    action(
+                        ui,
+                        model,
+                        "打开 SFTP",
+                        WorkbenchMenuCommand::OpenSavedSftp(profile.id),
+                    );
                 }
                 action(
                     ui,
@@ -717,17 +873,28 @@ fn folder_rows(
     }
 }
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod sidebar_tests {
     fn sidebar_frame(
         context: &egui::Context,
         model: &mut super::WorkbenchViewModel,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        let mut output = context.run_ui(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 760.0))),
-            events,
-            ..Default::default()
-        }, |ui| super::draw_sidebar(ui, model));
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 760.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| super::draw_sidebar(ui, model),
+        );
         output.textures_delta.clear();
         output
     }
@@ -735,7 +902,11 @@ mod sidebar_tests {
     fn text_shapes<'a>(shape: &'a egui::Shape, result: &mut Vec<&'a egui::epaint::TextShape>) {
         match shape {
             egui::Shape::Text(text) => result.push(text),
-            egui::Shape::Vec(shapes) => for shape in shapes { text_shapes(shape, result); },
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    text_shapes(shape, result);
+                }
+            }
             _ => {}
         }
     }
@@ -753,57 +924,136 @@ mod sidebar_tests {
         for _ in 0..6 {
             let id = FolderId::new();
             model.profile_folders.push(ProfileFolder {
-                id, name: folder_name.clone(), parent_id: parent, terminal: Default::default(),
+                id,
+                name: folder_name.clone(),
+                parent_id: parent,
+                terminal: Default::default(),
             });
             parent = Some(id);
         }
         for folder_id in [None, parent] {
             model.saved_ssh_profiles.push(SavedSshProfileViewModel {
-                id: ProfileId::new(), name: profile_name.into(), target: target.into(),
-                favorite: false, folder_id, kind: ProfileKind::Ssh,
+                id: ProfileId::new(),
+                name: profile_name.into(),
+                target: target.into(),
+                favorite: false,
+                folder_id,
+                kind: ProfileKind::Ssh,
             });
         }
-        for _ in 0..3 { sidebar_frame(&context, &mut model, vec![]); }
-        let width = || egui::containers::panel::PanelState::load(&context, egui::Id::new("classic-session-tree")).unwrap().size().x;
+        for _ in 0..3 {
+            sidebar_frame(&context, &mut model, vec![]);
+        }
+        let width = || {
+            egui::containers::panel::PanelState::load(
+                &context,
+                egui::Id::new("classic-session-tree"),
+            )
+            .unwrap()
+            .size()
+            .x
+        };
         let edge = egui::pos2(width(), 350.0);
-        sidebar_frame(&context, &mut model, vec![egui::Event::PointerMoved(edge), egui::Event::PointerButton {
-            pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
-        }]);
+        sidebar_frame(
+            &context,
+            &mut model,
+            vec![
+                egui::Event::PointerMoved(edge),
+                egui::Event::PointerButton {
+                    pos: edge,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
         let end = egui::pos2(120.0, 350.0);
-        for _ in 0..2 { sidebar_frame(&context, &mut model, vec![egui::Event::PointerMoved(end)]); }
-        sidebar_frame(&context, &mut model, vec![egui::Event::PointerButton {
-            pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE,
-        }, egui::Event::PointerMoved(egui::pos2(1000.0, 500.0))]);
+        for _ in 0..2 {
+            sidebar_frame(&context, &mut model, vec![egui::Event::PointerMoved(end)]);
+        }
+        sidebar_frame(
+            &context,
+            &mut model,
+            vec![
+                egui::Event::PointerButton {
+                    pos: end,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerMoved(egui::pos2(1000.0, 500.0)),
+            ],
+        );
         for _ in 0..120 {
             sidebar_frame(&context, &mut model, vec![]);
-            assert!((width() - 120.0).abs() <= 1.0, "narrow sidebar expanded: {}", width());
+            assert!(
+                (width() - 120.0).abs() <= 1.0,
+                "narrow sidebar expanded: {}",
+                width()
+            );
         }
         let output = sidebar_frame(&context, &mut model, vec![]);
         let mut texts = Vec::new();
-        for shape in &output.shapes { text_shapes(&shape.shape, &mut texts); }
+        for shape in &output.shapes {
+            text_shapes(&shape.shape, &mut texts);
+        }
         for source in [&folder_name, profile_name, target] {
-            let matches: Vec<_> = texts.iter().filter(|text| text.galley.text() == source).collect();
-            assert!(matches.len() >= 2, "nested and root text should remain visible: {source}");
+            let matches: Vec<_> = texts
+                .iter()
+                .filter(|text| text.galley.text() == source)
+                .collect();
+            assert!(
+                matches.len() >= 2,
+                "nested and root text should remain visible: {source}"
+            );
             for text in matches {
                 assert!(text.galley.elided, "text should be elided: {source}");
-                let rendered: String = text.galley.rows.iter().flat_map(|row| row.glyphs.iter()).map(|glyph| glyph.chr).collect();
+                let rendered: String = text
+                    .galley
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.glyphs.iter())
+                    .map(|glyph| glyph.chr)
+                    .collect();
                 assert!(rendered.ends_with('…'), "missing ellipsis: {rendered}");
-                assert!(rendered.starts_with(source.chars().next().unwrap()), "prefix lost: {rendered}");
-                assert!(text.pos.x + text.galley.size().x <= 111.0, "text extends past sidebar: {rendered}");
+                assert!(
+                    rendered.starts_with(source.chars().next().unwrap()),
+                    "prefix lost: {rendered}"
+                );
+                assert!(
+                    text.pos.x + text.galley.size().x <= 111.0,
+                    "text extends past sidebar: {rendered}"
+                );
             }
         }
         let tree = output.platform_output.accesskit_update.unwrap();
         for label in ["收起会话管理器", "自动适应侧栏宽度", "新建 SSH 会话"] {
             let center = crate::tests::button_center(&tree, label);
-            assert!(center.x > 0.0 && center.x < 120.0, "control outside narrow sidebar: {label} {center:?}");
+            assert!(
+                center.x > 0.0 && center.x < 120.0,
+                "control outside narrow sidebar: {label} {center:?}"
+            );
         }
         let new = crate::tests::button_center(&tree, "新建 SSH 会话");
         for pressed in [true, false] {
-            sidebar_frame(&context, &mut model, vec![egui::Event::PointerMoved(new), egui::Event::PointerButton {
-                pos: new, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
-            }]);
+            sidebar_frame(
+                &context,
+                &mut model,
+                vec![
+                    egui::Event::PointerMoved(new),
+                    egui::Event::PointerButton {
+                        pos: new,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
         }
-        assert_eq!(model.menu_command, Some(WorkbenchMenuCommand::NewSshProfile));
+        assert_eq!(
+            model.menu_command,
+            Some(WorkbenchMenuCommand::NewSshProfile)
+        );
     }
 
     #[test]
@@ -812,14 +1062,30 @@ mod sidebar_tests {
         context.enable_accesskit();
         let mut model = super::WorkbenchViewModel::default();
         for _ in 0..2 {
-            let mut output = context.run_ui(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 760.0))),
-                ..Default::default()
-            }, |ui| super::draw_sidebar(ui, &mut model));
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 760.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| super::draw_sidebar(ui, &mut model),
+            );
             output.textures_delta.clear();
             let tree = output.platform_output.accesskit_update.unwrap();
-            assert!(tree.nodes.iter().any(|(_, node)| node.label() == Some("会话管理器") || node.value() == Some("会话管理器")));
-            assert!(!tree.nodes.iter().any(|(_, node)| node.label() == Some("本地终端")));
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some("会话管理器")
+                        || node.value() == Some("会话管理器"))
+            );
+            assert!(
+                !tree
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some("本地终端"))
+            );
             assert!(model.menu_command.is_none());
         }
     }
@@ -851,13 +1117,24 @@ fn sidebar_auto_width(ui: &egui::Ui, model: &WorkbenchViewModel) -> f32 {
     let depth = |mut parent: Option<FolderId>| {
         let mut depth = 0;
         while let Some(id) = parent {
-            if depth == 16 { break; }
+            if depth == 16 {
+                break;
+            }
             depth += 1;
-            parent = model.profile_folders.iter().find(|folder| folder.id == id).and_then(|folder| folder.parent_id);
+            parent = model
+                .profile_folders
+                .iter()
+                .find(|folder| folder.id == id)
+                .and_then(|folder| folder.parent_id);
         }
         depth as f32 * 18.0
     };
-    let measure = |text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_owned(), font, INK).size().x;
+    let measure = |text: &str, font: FontId| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), font, INK)
+            .size()
+            .x
+    };
     let mut width = 244.0_f32;
     for profile in &model.saved_ssh_profiles {
         let indent = depth(profile.folder_id);
@@ -865,7 +1142,9 @@ fn sidebar_auto_width(ui: &egui::Ui, model: &WorkbenchViewModel) -> f32 {
         width = width.max(measure(&profile.target, FontId::monospace(11.0)) + indent + 70.0);
     }
     for folder in &model.profile_folders {
-        width = width.max(measure(&folder.name, FontId::proportional(13.0)) + depth(folder.parent_id) + 70.0);
+        width = width.max(
+            measure(&folder.name, FontId::proportional(13.0)) + depth(folder.parent_id) + 70.0,
+        );
     }
     for session in &model.sessions {
         width = width.max(measure(&session.title, FontId::proportional(13.0)) + 80.0);
@@ -881,12 +1160,17 @@ fn draw_sidebar(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) {
     let resize_id = panel_id.with("__resize");
     let max_width = (ui.available_width() * 0.6).clamp(SIDEBAR_MIN_WIDTH, 640.0);
     if let Some(response) = ui.read_response(resize_id) {
-        let release_position = ui.input(|input| input.raw.events.iter().rev().find_map(|event| {
-            match event {
-                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => Some(*pos),
+        let release_position = ui.input(|input| {
+            input.raw.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } => Some(*pos),
                 _ => None,
-            }
-        }));
+            })
+        });
         let position = if response.drag_stopped() {
             // Use the actual release event, not a later pointer position in the
             // same frame or a stale drag-stopped response on the next frame.
@@ -897,11 +1181,16 @@ fn draw_sidebar(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) {
             None
         };
         if let Some(position) = position {
-            model.sidebar_width = Some((position.x - ui.available_rect_before_wrap().left()).clamp(SIDEBAR_MIN_WIDTH, max_width));
+            model.sidebar_width = Some(
+                (position.x - ui.available_rect_before_wrap().left())
+                    .clamp(SIDEBAR_MIN_WIDTH, max_width),
+            );
         }
     }
     let auto_width = sidebar_auto_width(ui, model);
-    let width = model.sidebar_width.map_or(auto_width, |width| width.clamp(SIDEBAR_MIN_WIDTH, max_width));
+    let width = model.sidebar_width.map_or(auto_width, |width| {
+        width.clamp(SIDEBAR_MIN_WIDTH, max_width)
+    });
     let folders = model.profile_folders.clone();
     let profiles = model.saved_ssh_profiles.clone();
     egui::Panel::left("classic-session-tree")
@@ -1059,31 +1348,58 @@ fn draw_sidebar(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) {
                     }
                 });
         });
-    if ui.read_response(resize_id).is_some_and(|response| response.hovered() || response.dragged()) {
+    if ui
+        .read_response(resize_id)
+        .is_some_and(|response| response.hovered() || response.dragged())
+    {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
 }
 
-fn is_ssh_tab(model:&WorkbenchViewModel,tab:TabId)->bool {
-    model.ssh_tab_states.contains_key(&tab) || model.tabs.iter().find(|t|t.id==tab).and_then(|t|t.session_id).is_some_and(|id|model.reusable_ssh_sessions.contains(&id))
+fn is_ssh_tab(model: &WorkbenchViewModel, tab: TabId) -> bool {
+    model.ssh_tab_states.contains_key(&tab)
+        || model
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .and_then(|t| t.session_id)
+            .is_some_and(|id| model.reusable_ssh_sessions.contains(&id))
 }
-fn duplicate_channel_action(ui:&mut egui::Ui,model:&mut WorkbenchViewModel,tab:TabId) {
-    let available=!model.ssh_control_busy && !model.layout_paused && model.tabs.iter().find(|t|t.id==tab).and_then(|t|t.session_id).is_some_and(|id|model.reusable_ssh_sessions.contains(&id));
-    if ui.add_enabled(available,egui::Button::new("复制 SSH 渠道")).on_hover_text("复用已认证的连接，打开独立 Shell；无需动态码，连接断开会影响共享渠道").clicked() {
-        model.menu_command=Some(WorkbenchMenuCommand::CloneSshChannel(tab)); ui.close();
+fn duplicate_channel_action(ui: &mut egui::Ui, model: &mut WorkbenchViewModel, tab: TabId) {
+    let available = !model.ssh_control_busy
+        && !model.layout_paused
+        && model
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .and_then(|t| t.session_id)
+            .is_some_and(|id| model.reusable_ssh_sessions.contains(&id));
+    if ui
+        .add_enabled(available, egui::Button::new("复制 SSH 渠道"))
+        .on_hover_text("复用已认证的连接，打开独立 Shell；无需动态码，连接断开会影响共享渠道")
+        .clicked()
+    {
+        model.menu_command = Some(WorkbenchMenuCommand::CloneSshChannel(tab));
+        ui.close();
     }
 }
 
 fn tab_context(ui: &mut egui::Ui, model: &mut WorkbenchViewModel, tab: TabId, started: bool) {
-    let ssh=is_ssh_tab(model,tab);
+    let _ssh = is_ssh_tab(model, tab);
     if started {
         action(
             ui,
             model,
-            if is_ssh_tab(model,tab) {"复制 SSH 会话"} else {"复制为新会话"},
+            if is_ssh_tab(model, tab) {
+                "复制 SSH 会话"
+            } else {
+                "复制为新会话"
+            },
             WorkbenchMenuCommand::CloneWorkspaceSession(tab),
         );
-        if is_ssh_tab(model,tab) {duplicate_channel_action(ui,model,tab);}
+        if is_ssh_tab(model, tab) {
+            duplicate_channel_action(ui, model, tab);
+        }
     } else {
         action(
             ui,
@@ -1198,11 +1514,15 @@ fn tab_strip(
     id: egui::Id,
 ) {
     ui.painter().rect_filled(header, 0.0, TAB_BAR);
-    let header=tab_navigation::header(ui,model,header,id);
-    let reveal_key=id.with("last-visible-tab");
-    let previous=ui.ctx().data(|data|data.get_temp::<(Option<TabId>,f32)>(reveal_key));
-    let reveal=previous.is_none_or(|(last,width)|last!=active || (width-header.width()).abs()>1.0);
-    ui.ctx().data_mut(|data|data.insert_temp(reveal_key,(active,header.width())));
+    let header = tab_navigation::header(ui, model, header, id);
+    let reveal_key = id.with("last-visible-tab");
+    let previous = ui
+        .ctx()
+        .data(|data| data.get_temp::<(Option<TabId>, f32)>(reveal_key));
+    let reveal =
+        previous.is_none_or(|(last, width)| last != active || (width - header.width()).abs() > 1.0);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(reveal_key, (active, header.width())));
     let mut row = ui.new_child(
         egui::UiBuilder::new()
             .id_salt(id)
@@ -1265,14 +1585,35 @@ fn tab_strip(
                                     paint_icon(
                                         ui.painter(),
                                         icon_rect.center(),
-                                        if ssh_state == Some(SshConnectionState::Disconnected) { Icon::Disconnect } else { Icon::Terminal },
-                                        if ssh_state.is_some() { state_color } else if selected { ACCENT } else { MUTED },
+                                        if ssh_state == Some(SshConnectionState::Disconnected) {
+                                            Icon::Disconnect
+                                        } else {
+                                            Icon::Terminal
+                                        },
+                                        if ssh_state.is_some() {
+                                            state_color
+                                        } else if selected {
+                                            ACCENT
+                                        } else {
+                                            MUTED
+                                        },
                                     );
-                                     if model.unread_output_tabs.contains(tab) {
-                                         ui.painter().circle_filled(icon_rect.right_top() + egui::vec2(-1.0, 5.0), 3.0, theme::DANGER);
-                                         icon_response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "有新输出"));
-                                         icon_response.on_hover_text("有未查看的新输出，查看此标签后清除");
-                                     }
+                                    if model.unread_output_tabs.contains(tab) {
+                                        ui.painter().circle_filled(
+                                            icon_rect.right_top() + egui::vec2(-1.0, 5.0),
+                                            3.0,
+                                            theme::DANGER,
+                                        );
+                                        icon_response.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Label,
+                                                true,
+                                                "有新输出",
+                                            )
+                                        });
+                                        icon_response
+                                            .on_hover_text("有未查看的新输出，查看此标签后清除");
+                                    }
                                     let response = ui
                                         .add_sized(
                                             [124.0, 28.0],
@@ -1283,16 +1624,46 @@ fn tab_strip(
                                             .frame(false)
                                             .truncate(),
                                         )
-                                        .on_hover_text(ssh_chrome::tooltip(model, *tab, &title, started));
-                                    if let Some(state) = ssh_state.filter(|state| *state != SshConnectionState::Connected) {
-                                        ui.label(RichText::new(state.label()).size(11.0).strong().color(state_color))
-                                            .on_hover_text(format!("SSH {}", state.label()));
+                                        .on_hover_text(ssh_chrome::tooltip(
+                                            model, *tab, &title, started,
+                                        ));
+                                    if let Some(state) = ssh_state
+                                        .filter(|state| *state != SshConnectionState::Connected)
+                                    {
+                                        ui.label(
+                                            RichText::new(state.label())
+                                                .size(11.0)
+                                                .strong()
+                                                .color(state_color),
+                                        )
+                                        .on_hover_text(format!("SSH {}", state.label()));
                                     }
-                                     if let Some(realtime) = model.input_target_tabs.get(tab) {
-                                         ui.add(egui::Label::new(RichText::new(if *realtime { "同步" } else { "命令" }).size(11.0).strong()
-                                             .color(if *realtime { theme::WARNING } else { ACCENT })).wrap_mode(egui::TextWrapMode::Extend))
-                                             .on_hover_text(if *realtime { "接收实时键盘同步" } else { "已选为命令栏接收目标；与当前查看的标签分别标识" });
-                                     }
+                                    if let Some(realtime) = model.input_target_tabs.get(tab) {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(if *realtime {
+                                                    "同步"
+                                                } else {
+                                                    "命令"
+                                                })
+                                                .size(11.0)
+                                                .strong()
+                                                .color(if *realtime {
+                                                    theme::WARNING
+                                                } else {
+                                                    ACCENT
+                                                }),
+                                            )
+                                            .wrap_mode(egui::TextWrapMode::Extend),
+                                        )
+                                        .on_hover_text(
+                                            if *realtime {
+                                                "接收实时键盘同步"
+                                            } else {
+                                                "已选为命令栏接收目标；与当前查看的标签分别标识"
+                                            },
+                                        );
+                                    }
                                     if response.clicked() {
                                         model.selected_tab = Some(*tab);
                                     }
@@ -1306,7 +1677,10 @@ fn tab_strip(
                                             tab_context(ui, model, *tab, started)
                                         });
                                     });
-                                    if ui.small_button("×").on_hover_text("关闭标签并终止、移除对应会话").clicked()
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("关闭标签并终止、移除对应会话")
+                                        .clicked()
                                     {
                                         model.menu_command =
                                             Some(WorkbenchMenuCommand::CloseWorkspaceTab(*tab));
@@ -1314,7 +1688,9 @@ fn tab_strip(
                                 });
                             });
                         if selected {
-                            if reveal {tab_frame.response.scroll_to_me(Some(Align::Center));}
+                            if reveal {
+                                tab_frame.response.scroll_to_me(Some(Align::Center));
+                            }
                             let rect = tab_frame.response.rect;
                             ui.painter().line_segment(
                                 [
@@ -1344,13 +1720,24 @@ fn pane_body(
     );
     tab_strip(ui, model, tabs, active, header, id);
     let content = egui::Rect::from_min_max(egui::pos2(rect.min.x, header.max.y), rect.max);
-    let content = active.map_or(content, |tab| ssh_chrome::identity(ui, model, content, tab, id));
+    let content = active.map_or(content, |tab| {
+        ssh_chrome::identity(ui, model, content, tab, id)
+    });
     let mut top = content.min.y;
-    let ssh_notice = active.and_then(|tab| model.ssh_tab_states.get(&tab).copied().map(|state| (tab, state)))
+    let ssh_notice = active
+        .and_then(|tab| {
+            model
+                .ssh_tab_states
+                .get(&tab)
+                .copied()
+                .map(|state| (tab, state))
+        })
         .filter(|(_, state)| *state != SshConnectionState::Connected);
     if let Some((tab, state)) = ssh_notice {
-        let notice = egui::Rect::from_min_max(egui::pos2(rect.min.x, top),
-            egui::pos2(rect.max.x, (top + 64.0).min(rect.max.y)));
+        let notice = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x, top),
+            egui::pos2(rect.max.x, (top + 64.0).min(rect.max.y)),
+        );
         let color = ssh_state_color(state);
         let fill = match state {
             SshConnectionState::Disconnected => Color32::from_rgb(48, 40, 28),
@@ -1358,30 +1745,64 @@ fn pane_body(
             _ => PANEL,
         };
         ui.painter().rect_filled(notice, 0.0, fill);
-        ui.painter().rect_filled(egui::Rect::from_min_max(notice.min, egui::pos2((notice.min.x + 4.0).min(notice.max.x), notice.max.y)), 0.0, color);
-        let mut row = ui.new_child(egui::UiBuilder::new().id_salt((id, "ssh-status-notice"))
-            .max_rect(notice.shrink2(egui::vec2(12.0, 6.0))).layout(Layout::top_down(Align::Min)));
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                notice.min,
+                egui::pos2((notice.min.x + 4.0).min(notice.max.x), notice.max.y),
+            ),
+            0.0,
+            color,
+        );
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt((id, "ssh-status-notice"))
+                .max_rect(notice.shrink2(egui::vec2(12.0, 6.0)))
+                .layout(Layout::top_down(Align::Min)),
+        );
         row.set_clip_rect(notice);
         let (heading, detail, retry) = match state {
-            SshConnectionState::Disconnected => ("SSH 已断开", "连接已关闭，以下为终端历史记录，输入不会发送到服务器。", true),
-            SshConnectionState::Disconnecting => ("正在断开 SSH 连接…", "正在等待后台确认，请稍候。", false),
-            SshConnectionState::Reconnecting => ("正在重新连接 SSH…", "正在使用此标签的连接配置重新建立连接，请稍候。", false),
+            SshConnectionState::Disconnected => (
+                "SSH 已断开",
+                "连接已关闭，以下为终端历史记录，输入不会发送到服务器。",
+                true,
+            ),
+            SshConnectionState::Disconnecting => {
+                ("正在断开 SSH 连接…", "正在等待后台确认，请稍候。", false)
+            }
+            SshConnectionState::Reconnecting => (
+                "正在重新连接 SSH…",
+                "正在使用此标签的连接配置重新建立连接，请稍候。",
+                false,
+            ),
             SshConnectionState::Connecting => ("正在连接 SSH…", "正在建立连接，请稍候。", false),
-            _ => ("SSH 状态待确认", "尚未确认连接状态，请检查错误信息后重试。", true),
+            _ => (
+                "SSH 状态待确认",
+                "尚未确认连接状态，请检查错误信息后重试。",
+                true,
+            ),
         };
         row.horizontal(|ui| {
-            if !retry { ui.spinner(); }
+            if !retry {
+                ui.spinner();
+            }
             ui.label(RichText::new(heading).strong().color(color));
             if retry {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add_enabled(!model.ssh_control_busy && !model.layout_paused,
-                        egui::Button::new(RichText::new("重新连接").color(ACCENT)).fill(theme::ACCENT_FILL)).clicked() {
+                    if ui
+                        .add_enabled(
+                            !model.ssh_control_busy && !model.layout_paused,
+                            egui::Button::new(RichText::new("重新连接").color(ACCENT))
+                                .fill(theme::ACCENT_FILL),
+                        )
+                        .clicked()
+                    {
                         model.menu_command = Some(WorkbenchMenuCommand::ReconnectSshTab(tab));
                     }
                 });
             }
         });
-        row.add(egui::Label::new(RichText::new(detail).size(12.0).color(MUTED)).truncate()).on_hover_text(detail);
+        row.add(egui::Label::new(RichText::new(detail).size(12.0).color(MUTED)).truncate())
+            .on_hover_text(detail);
         top = notice.max.y;
     } else {
         if let Some(tab) = active
@@ -1401,8 +1822,17 @@ fn pane_body(
             );
             row.set_clip_rect(notice);
             row.painter().rect_filled(notice, 0.0, theme::PANEL);
-            row.small(if model.ssh_control_busy && model.selected_tab == Some(tab.id) { "正在处理连接…" } else { "会话未连接" });
-            if row.add_enabled(!model.ssh_control_busy, egui::Button::new("连接此会话")).clicked() {
+            row.small(
+                if model.ssh_control_busy && model.selected_tab == Some(tab.id) {
+                    "正在处理连接…"
+                } else {
+                    "会话未连接"
+                },
+            );
+            if row
+                .add_enabled(!model.ssh_control_busy, egui::Button::new("连接此会话"))
+                .clicked()
+            {
                 model.menu_command = Some(WorkbenchMenuCommand::OpenWorkspaceTab(tab.id));
             }
             top = notice.max.y;
@@ -1438,15 +1868,29 @@ pub(super) fn draw_pane(
                 egui::Id::new(group_id),
             );
             // Only paint the inset edge: an opaque egui body would cover the GPU terminal.
-            ui.painter().rect_stroke(body, 0.0, Stroke::new(1.0, TAB_BAR), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(
+                body,
+                0.0,
+                Stroke::new(1.0, TAB_BAR),
+                egui::StrokeKind::Inside,
+            );
             let focused = group.active_tab.is_some() && group.active_tab == model.selected_tab;
             if focused && document.tab_groups.len() > 1 {
-                ui.painter().rect_stroke(rect.shrink(0.5), 0.0, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(
+                    rect.shrink(0.5),
+                    0.0,
+                    Stroke::new(1.0, ACCENT),
+                    egui::StrokeKind::Inside,
+                );
             }
             model.pane_views.push(WorkspacePaneView {
                 group_id,
                 tab_id: group.active_tab,
-                rect: body.shrink(1.0_f32.min(body.width().max(0.0) / 2.0).min(body.height().max(0.0) / 2.0)),
+                rect: body.shrink(
+                    1.0_f32
+                        .min(body.width().max(0.0) / 2.0)
+                        .min(body.height().max(0.0) / 2.0),
+                ),
             });
         }
         WorkspacePaneContent::Split {
@@ -1619,4 +2063,9 @@ fn draw_dialogs(context: &egui::Context, model: &mut WorkbenchViewModel) {
 
 #[cfg(test)]
 #[path = "workbench_mouse_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod mouse_tests;

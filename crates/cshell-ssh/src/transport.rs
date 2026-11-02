@@ -19,19 +19,26 @@ pub async fn open_tcp_stream(host: &str, port: u16) -> Result<SshTransport, SshE
         return Err(SshError::ProxyRejected("invalid transport endpoint"));
     }
     let stream = tokio::time::timeout(SSH_CONNECT_TIMEOUT, async {
-        if let Ok(ip)=host.parse::<IpAddr>() {
-            crate::connection_progress::at(cshell_domain::ConnectionStage::Tcp,host,port);
-            return TcpStream::connect(std::net::SocketAddr::new(ip,port)).await;
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            crate::connection_progress::at(cshell_domain::ConnectionStage::Tcp, host, port);
+            return TcpStream::connect(std::net::SocketAddr::new(ip, port)).await;
         }
-        crate::connection_progress::at(cshell_domain::ConnectionStage::Resolving,host,port);
-        let addresses=tokio::net::lookup_host((host,port)).await?.collect::<Vec<_>>();
-        if addresses.is_empty(){return Err(std::io::Error::new(std::io::ErrorKind::NotFound,"DNS returned no address"));}
-        crate::connection_progress::at(cshell_domain::ConnectionStage::Tcp,host,port);
+        crate::connection_progress::at(cshell_domain::ConnectionStage::Resolving, host, port);
+        let addresses = tokio::net::lookup_host((host, port))
+            .await?
+            .collect::<Vec<_>>();
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "DNS returned no address",
+            ));
+        }
+        crate::connection_progress::at(cshell_domain::ConnectionStage::Tcp, host, port);
         TcpStream::connect(addresses.as_slice()).await
     })
-        .await
-        .map_err(|_| SshError::ConnectionTimeout)?
-        .map_err(|error| SshError::Protocol(russh::Error::IO(error)))?;
+    .await
+    .map_err(|_| SshError::ConnectionTimeout)?
+    .map_err(|error| SshError::Protocol(russh::Error::IO(error)))?;
     Ok(Box::new(stream))
 }
 
@@ -43,7 +50,7 @@ pub async fn open_proxy_stream(
     port: u16,
 ) -> Result<SshTransport, SshError> {
     let mut stream = open_tcp_stream(proxy_host, proxy_port).await?;
-    crate::connection_progress::at(cshell_domain::ConnectionStage::Proxy,host,port);
+    crate::connection_progress::at(cshell_domain::ConnectionStage::Proxy, host, port);
     tokio::time::timeout(SSH_CONNECT_TIMEOUT, async {
         match protocol {
             ProxyProtocol::Socks5 => socks5(&mut stream, host, port).await,
@@ -180,15 +187,45 @@ async fn http_connect<S: AsyncRead + AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn observed_transport_separates_local_dns_from_tcp_and_reports_refused_port(){
-        use crate::connection_progress::{Event,Observer};use cshell_domain::ConnectionStage as Stage;
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();
-        let events=std::sync::Arc::new(std::sync::Mutex::new(vec![]));let capture=events.clone();let observer=Observer::new(move|e|capture.lock().unwrap().push(e));
-        let connected=crate::connection_progress::scope(observer.clone(),open_tcp_stream("localhost",port)).await.unwrap();drop(connected);
-        let stages=events.lock().unwrap().iter().filter_map(|e|match e{Event::At{stage,..}=>Some(*stage),_=>None}).collect::<Vec<_>>();assert_eq!(stages,vec![Stage::Resolving,Stage::Tcp]);
-        drop(listener);events.lock().unwrap().clear();
-        assert!(crate::connection_progress::scope(observer,open_tcp_stream("127.0.0.1",port)).await.is_err());
-        let events=events.lock().unwrap();assert_eq!(events.len(),1);assert!(matches!(events[0],Event::At{stage:Stage::Tcp,..}));
+    async fn observed_transport_separates_local_dns_from_tcp_and_reports_refused_port() {
+        use crate::connection_progress::{Event, Observer};
+        use cshell_domain::ConnectionStage as Stage;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let capture = events.clone();
+        let observer = Observer::new(move |e| capture.lock().unwrap().push(e));
+        let connected =
+            crate::connection_progress::scope(observer.clone(), open_tcp_stream("localhost", port))
+                .await
+                .unwrap();
+        drop(connected);
+        let stages = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Event::At { stage, .. } => Some(*stage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stages, vec![Stage::Resolving, Stage::Tcp]);
+        drop(listener);
+        events.lock().unwrap().clear();
+        assert!(
+            crate::connection_progress::scope(observer, open_tcp_stream("127.0.0.1", port))
+                .await
+                .is_err()
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::At {
+                stage: Stage::Tcp,
+                ..
+            }
+        ));
     }
     #[tokio::test]
     async fn socks5_fragmented_replies_preserve_the_tunnel_banner_for_all_address_types() {

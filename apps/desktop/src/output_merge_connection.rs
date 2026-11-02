@@ -154,7 +154,7 @@ fn render(page: &OutputMergePage, body: &[u8]) -> Arc<LogPage> {
                 }
             }
             rows.push(LogRow {
-            soft_wrap: false,
+                soft_wrap: false,
                 line_id: rows.len() as u64 + 1,
                 text: text.into(),
                 style_spans: Arc::from([]),
@@ -171,7 +171,8 @@ fn render(page: &OutputMergePage, body: &[u8]) -> Arc<LogPage> {
             truncated: false,
         });
     }
-    Arc::new(LogPage { first_line_id: 1,
+    Arc::new(LogPage {
+        first_line_id: 1,
         source_id: LogSourceId(0),
         revision: 0,
         anchor_line_id: 1,

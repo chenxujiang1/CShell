@@ -32,6 +32,11 @@ pub(crate) fn save(path: &Path, layout: &Layout) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     #[test]

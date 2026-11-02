@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 use cshell_application::{CatalogChange, ProfileService};
 use cshell_domain::{
     InputAction, ProfileId, ProfileKind, ProfileRecord, SshAuthMethod, SshConnectionRecord,
@@ -249,7 +256,8 @@ async fn exchange(service: &SessionIpcService, payload: envelope::Payload) -> En
 async fn create(service: &SessionIpcService, id: ProfileId) -> SessionCreateResponse {
     let result = exchange(
         service,
-        envelope::Payload::SessionCreateRequest(SessionCreateRequest {connection_diagnostics:false,
+        envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            connection_diagnostics: false,
             source_ssh_session_id: None,
             local_launch: None,
             rows: 24,
@@ -263,20 +271,49 @@ async fn create(service: &SessionIpcService, id: ProfileId) -> SessionCreateResp
     };
     created
 }
-async fn create_observed(service:&SessionIpcService,id:ProfileId)->(SessionCreateResponse,cshell_domain::ConnectionDiagnostic){
-    let(mut client,mut server)=tokio::io::duplex(128*1024);
-    let request=async {
-        write_envelope(&mut client,&Envelope{request_id:7,payload:Some(envelope::Payload::SessionCreateRequest(SessionCreateRequest{connection_diagnostics:true,profile_id:Some(id.as_uuid().as_bytes().to_vec()),rows:24,cols:80,..Default::default()})),..Default::default()}).await.unwrap();
-        let mut trace=None;
+async fn create_observed(
+    service: &SessionIpcService,
+    id: ProfileId,
+) -> (SessionCreateResponse, cshell_domain::ConnectionDiagnostic) {
+    let (mut client, mut server) = tokio::io::duplex(128 * 1024);
+    let request = async {
+        write_envelope(
+            &mut client,
+            &Envelope {
+                request_id: 7,
+                payload: Some(envelope::Payload::SessionCreateRequest(
+                    SessionCreateRequest {
+                        connection_diagnostics: true,
+                        profile_id: Some(id.as_uuid().as_bytes().to_vec()),
+                        rows: 24,
+                        cols: 80,
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut trace = None;
         loop {
-            let reply=read_envelope(&mut client).await.unwrap();assert_eq!(reply.request_id,7);
-            match reply.payload.unwrap(){
-                envelope::Payload::ConnectionDiagnosticUpdate(update)=>{let value:cshell_domain::ConnectionDiagnostic=serde_json::from_slice(&update.document_json).unwrap();assert!(value.validate());trace=Some(value);},
-                envelope::Payload::SessionCreateResponse(reply)=>return(reply,trace.unwrap()),_=>panic!("unexpected connection response")
+            let reply = read_envelope(&mut client).await.unwrap();
+            assert_eq!(reply.request_id, 7);
+            match reply.payload.unwrap() {
+                envelope::Payload::ConnectionDiagnosticUpdate(update) => {
+                    let value: cshell_domain::ConnectionDiagnostic =
+                        serde_json::from_slice(&update.document_json).unwrap();
+                    assert!(value.validate());
+                    trace = Some(value);
+                }
+                envelope::Payload::SessionCreateResponse(reply) => return (reply, trace.unwrap()),
+                _ => panic!("unexpected connection response"),
             }
         }
     };
-    let(served,result)=tokio::join!(service.serve_one(&mut server),request);served.unwrap();result
+    let (served, result) = tokio::join!(service.serve_one(&mut server), request);
+    served.unwrap();
+    result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -633,14 +670,32 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
                 .unwrap()
                 .contains(&format!("[{TARGET}]:{PORT} {target_public}"))
         );
-        let (created,trace) = create_observed(&service, target_id).await;
-        assert_eq!(trace.outcome,cshell_domain::ConnectionOutcome::Succeeded);
-        if mode<2 {
-            assert!(trace.steps.iter().any(|s|s.stage==cshell_domain::ConnectionStage::Proxy));
-        }else{
-            assert!(trace.steps.iter().any(|s|s.hop==1&&s.stage==cshell_domain::ConnectionStage::Authentication));
-            assert!(trace.steps.iter().any(|s|s.hop==0&&s.stage==cshell_domain::ConnectionStage::JumpChannel));
-            assert!(trace.steps.iter().any(|s|s.hop==0&&s.stage==cshell_domain::ConnectionStage::Authentication));
+        let (created, trace) = create_observed(&service, target_id).await;
+        assert_eq!(trace.outcome, cshell_domain::ConnectionOutcome::Succeeded);
+        if mode < 2 {
+            assert!(
+                trace
+                    .steps
+                    .iter()
+                    .any(|s| s.stage == cshell_domain::ConnectionStage::Proxy)
+            );
+        } else {
+            assert!(
+                trace.steps.iter().any(
+                    |s| s.hop == 1 && s.stage == cshell_domain::ConnectionStage::Authentication
+                )
+            );
+            assert!(
+                trace
+                    .steps
+                    .iter()
+                    .any(|s| s.hop == 0 && s.stage == cshell_domain::ConnectionStage::JumpChannel)
+            );
+            assert!(
+                trace.steps.iter().any(
+                    |s| s.hop == 0 && s.stage == cshell_domain::ConnectionStage::Authentication
+                )
+            );
         }
         let session = created
             .session
@@ -800,7 +855,11 @@ async fn saved_routes_preview_confirm_and_connect_without_direct_fallback_or_tar
                 "{}",
                 changed.detail
             );
-            assert!(changed.detail.starts_with("Jump hop 1:"), "{}", changed.detail);
+            assert!(
+                changed.detail.starts_with("Jump hop 1:"),
+                "{}",
+                changed.detail
+            );
             assert_eq!(jump_auth.load(Ordering::SeqCst), before);
         }
         tokio::time::timeout(Duration::from_secs(10), async {

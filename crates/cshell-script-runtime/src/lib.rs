@@ -227,6 +227,10 @@ pub struct HostReply {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 pub enum HostFrame {
     Start { start: WorkerStart },
     Reply { reply: HostReply },

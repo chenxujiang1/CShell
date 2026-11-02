@@ -4,8 +4,8 @@ use crate::sftp_connection::WorkspaceCommand;
 use cshell_application::*;
 mod editor_workspace;
 pub(super) struct AdvancedSftp {
-    review:editor_review::ReviewPanel,
-    documents:editor_workspace::Documents,
+    review: editor_review::ReviewPanel,
+    documents: editor_workspace::Documents,
     pub follow_links: bool,
     pub policy: Option<FilePublicationPolicy>,
     pub rate: String,
@@ -40,14 +40,14 @@ pub(super) struct AdvancedSftp {
     discard_private: bool,
     editor_target: Option<String>,
     editor_notice: Option<String>,
-    save_pending: Option<(SessionId,u64,u64)>,
+    save_pending: Option<(SessionId, u64, u64)>,
     discard_draft_confirm: bool,
 }
 impl Default for AdvancedSftp {
     fn default() -> Self {
         Self {
-            review:Default::default(),
-            documents:Default::default(),
+            review: Default::default(),
+            documents: Default::default(),
             follow_links: false,
             policy: None,
             rate: String::new(),
@@ -121,26 +121,51 @@ fn hex(content: SftpVerifiedContent) -> String {
     content.sha256.iter().map(|b| format!("{b:02x}")).collect()
 }
 impl AdvancedSftp {
-    pub(super) fn editor_request_rejected(&mut self){self.save_pending=None;self.editor_target=None;self.editor_notice=Some("请求未提交，修改仍保留。请检查连接后重试。".into());}
-    pub(super) fn prepare_editor(&mut self,path:&str,session:SessionId)->bool {
-        if self.documents.entries.len()>=8 && !self.documents.entries.values().any(|d|d.path==path&&d.session==session) {self.editor_notice=Some("最多同时编辑 8 个文件，请先关闭不再使用的文件。".into());return false;}
-        if self.edit_buffer.len()>MAX_SFTP_INLINE_EDIT_BYTES {self.editor_notice=Some("当前草稿超过内置编辑上限，请先缩减或保存到外部编辑器。".into());return false;}
-        self.remember_document();
-        self.editor_target=Some(path.into());self.editor_notice=None;true
+    pub(super) fn editor_request_rejected(&mut self) {
+        self.save_pending = None;
+        self.editor_target = None;
+        self.editor_notice = Some("请求未提交，修改仍保留。请检查连接后重试。".into());
     }
-    pub(super) fn existing_document(&self,path:&str,session:SessionId)->Option<SessionId>{self.documents.entries.iter().find(|(_,d)|d.path==path&&d.session==session).map(|(id,_)|*id)}
+    pub(super) fn prepare_editor(&mut self, path: &str, session: SessionId) -> bool {
+        if self.documents.entries.len() >= 8
+            && !self
+                .documents
+                .entries
+                .values()
+                .any(|d| d.path == path && d.session == session)
+        {
+            self.editor_notice = Some("最多同时编辑 8 个文件，请先关闭不再使用的文件。".into());
+            return false;
+        }
+        if self.edit_buffer.len() > MAX_SFTP_INLINE_EDIT_BYTES {
+            self.editor_notice =
+                Some("当前草稿超过内置编辑上限，请先缩减或保存到外部编辑器。".into());
+            return false;
+        }
+        self.remember_document();
+        self.editor_target = Some(path.into());
+        self.editor_notice = None;
+        true
+    }
+    pub(super) fn existing_document(&self, path: &str, session: SessionId) -> Option<SessionId> {
+        self.documents
+            .entries
+            .iter()
+            .find(|(_, d)| d.path == path && d.session == session)
+            .map(|(id, _)| *id)
+    }
     pub(super) fn reset(&mut self) {
         self.keep_unsaved_documents();
         let executable = std::mem::take(&mut self.editor_executable);
         let arguments = std::mem::take(&mut self.editor_arguments);
-        let documents=std::mem::take(&mut self.documents);
+        let documents = std::mem::take(&mut self.documents);
         let draft = self
             .edit_dirty
             .then(|| (std::mem::take(&mut self.edit_buffer), self.edit_stamp));
         *self = Self::default();
         self.editor_executable = executable;
         self.editor_arguments = arguments;
-        self.documents=documents;
+        self.documents = documents;
         if let Some((text, stamp)) = draft {
             self.edit_buffer = text;
             self.edit_stamp = stamp;
@@ -170,7 +195,11 @@ impl AdvancedSftp {
             return Err("请确认独占修改目标并保留原文件备份");
         }
         let draft = SftpQueueDraft {
-            verification: Some(if self.policy.is_some(){cshell_domain::SftpVerification::Full}else{verification}),
+            verification: Some(if self.policy.is_some() {
+                cshell_domain::SftpVerification::Full
+            } else {
+                verification
+            }),
             verified: true,
             direction,
             local_path: local,
@@ -749,18 +778,32 @@ impl AdvancedSftp {
     ) {
         egui::Frame::NONE.show(ui, |ui| {
             ui.heading("远程编辑");
-            if let Some(notice)=&self.editor_notice {ui.colored_label(cshell_ui::theme::WARNING,notice);}
-            if let Some(target)=&self.editor_target {
-                if view.edit.as_ref().is_some_and(|e|e.remote_path==*target && e.session==session) {self.editor_target=None;}
-                else if view.error.is_some() && !view.workspace_busy {self.editor_target=None;}
-                else {ui.horizontal(|ui|{ui.spinner();ui.label(format!("正在打开 {target}…"));});return;}
+            if let Some(notice) = &self.editor_notice {
+                ui.colored_label(cshell_ui::theme::WARNING, notice);
             }
-            if (view.edit.is_none() || view.edit.as_ref().is_some_and(|e|e.closed)) && ui
-                .add_enabled(
-                    !view.workspace_busy && !self.edit_dirty && sftp_remote_path(remote, false),
-                    egui::Button::new("编辑所选文件"),
-                )
-                .clicked()
+            if let Some(target) = &self.editor_target {
+                if view
+                    .edit
+                    .as_ref()
+                    .is_some_and(|e| e.remote_path == *target && e.session == session)
+                    || view.error.is_some() && !view.workspace_busy
+                {
+                    self.editor_target = None;
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("正在打开 {target}…"));
+                    });
+                    return;
+                }
+            }
+            if (view.edit.is_none() || view.edit.as_ref().is_some_and(|e| e.closed))
+                && ui
+                    .add_enabled(
+                        !view.workspace_busy && !self.edit_dirty && sftp_remote_path(remote, false),
+                        egui::Button::new("编辑所选文件"),
+                    )
+                    .clicked()
             {
                 *command = Some(workspace(
                     session,
@@ -783,9 +826,19 @@ impl AdvancedSftp {
             let Some(edit) = &view.edit else {
                 return;
             };
-            self.activate_document(edit,view);
-            if self.document_tabs(ui,session,view,command) {return;}
-            if self.save_pending.is_some_and(|(id,revision,generation)|id!=edit.id || revision!=edit.revision || (view.generation!=generation && !view.workspace_busy && view.error.is_some())) {self.save_pending=None;}
+            self.activate_document(edit, view);
+            if self.document_tabs(ui, session, view, command) {
+                return;
+            }
+            if self.save_pending.is_some_and(|(id, revision, generation)| {
+                id != edit.id
+                    || revision != edit.revision
+                    || (view.generation != generation
+                        && !view.workspace_busy
+                        && view.error.is_some())
+            }) {
+                self.save_pending = None;
+            }
             if self.edit_control_stamp != Some((edit.id, edit.revision)) {
                 self.edit_control_stamp = Some((edit.id, edit.revision));
                 self.save_confirm = false;
@@ -807,18 +860,30 @@ impl AdvancedSftp {
                     native.as_uuid().as_bytes().to_vec(),
                 ));
             }
-            ui.add(egui::Label::new(egui::RichText::new(&edit.remote_path).strong()).truncate()).on_hover_text(&edit.remote_path);
+            ui.add(egui::Label::new(egui::RichText::new(&edit.remote_path).strong()).truncate())
+                .on_hover_text(&edit.remote_path);
             ui.horizontal_wrapped(|ui| {
-                ui.label(match edit.state {SftpEditState::Preparing=>"正在读取文件",SftpEditState::Ready if self.save_pending.is_some()=>"正在保存修改",SftpEditState::Ready if edit.queued_item.is_some()=>"正在上传修改",SftpEditState::Ready=>"可编辑",SftpEditState::Unknown=>"状态待核对",SftpEditState::Closed=>"编辑已关闭"});
+                ui.label(match edit.state {
+                    SftpEditState::Preparing => "正在读取文件",
+                    SftpEditState::Ready if self.save_pending.is_some() => "正在保存修改",
+                    SftpEditState::Ready if edit.queued_item.is_some() => "正在上传修改",
+                    SftpEditState::Ready => "可编辑",
+                    SftpEditState::Unknown => "状态待核对",
+                    SftpEditState::Closed => "编辑已关闭",
+                });
                 ui.weak(super::browser::bytes(edit.current.size));
-                if self.edit_dirty {ui.colored_label(cshell_ui::theme::WARNING,"有未保存的修改");}
-                else if edit.current!=edit.base {ui.colored_label(cshell_ui::theme::WARNING,"工作副本有修改");}
+                if self.edit_dirty {
+                    ui.colored_label(cshell_ui::theme::WARNING, "有未保存的修改");
+                } else if edit.current != edit.base {
+                    ui.colored_label(cshell_ui::theme::WARNING, "工作副本有修改");
+                }
             });
-            ui.collapsing("文件与校验详情",|ui| {
-                ui.label(format!("工作副本：{}", edit.local_path));ui.label(&edit.detail);
+            ui.collapsing("文件与校验详情", |ui| {
+                ui.label(format!("工作副本：{}", edit.local_path));
+                ui.label(&edit.detail);
                 ui.monospace(format!("远端基础 SHA-256 {}", hex(edit.base)));
             });
-            self.editor_review(ui,session,view,edit,command);
+            self.editor_review(ui, session, view, edit, command);
             let stamp = (edit.id, edit.revision, edit.current, edit.base);
             if self.edit_stamp.as_ref().is_none_or(|s| s.0 != edit.id) {
                 if !self.edit_dirty {
@@ -848,7 +913,7 @@ impl AdvancedSftp {
                     self.edit_dirty = false;
                     self.edit_stamp = Some(stamp);
                 }
-                if self.editor_text(ui,edit) {
+                if self.editor_text(ui, edit) {
                     self.edit_dirty = true;
                     self.discard_draft_confirm = false;
                     self.save_confirm = false;
@@ -890,55 +955,55 @@ impl AdvancedSftp {
             } else {
                 ui.weak("大文件或非 UTF-8 内容请使用外部编辑器；工作文件上限 8 MiB。");
             }
-            ui.collapsing("外部编辑器",|ui| {
-            self.external_editor_tools(ui);
-            ui.label("外部编辑器完整可执行路径");
-            if ui
-                .text_edit_singleline(&mut self.editor_executable)
-                .changed()
-            {
-                self.editor_confirm = false;
-            }
-            ui.label("参数 JSON 数组；{file} 替换为工作文件，未指定则追加文件路径");
-            if ui
-                .text_edit_singleline(&mut self.editor_arguments)
-                .changed()
-            {
-                self.editor_confirm = false;
-            }
-            let arguments = if self.editor_arguments.trim().is_empty() {
-                Some(Vec::<String>::new())
-            } else {
-                serde_json::from_str::<Vec<String>>(&self.editor_arguments).ok()
-            };
-            ui.weak("外部修改会自动检测；回传仍由“保存并上传”明确提交。");
-            if ui
-                .add_enabled(
-                    arguments.is_some()
-                        && std::path::Path::new(&self.editor_executable).is_absolute()
-                        && view.edit_writable
-                        && !view.workspace_busy
-                        && edit.session == session
-                        && edit.state == SftpEditState::Ready
-                        && !edit.closed,
-                    egui::Button::new("用外部编辑器打开"),
-                )
-                .clicked()
-            {
-                *command = Some(workspace(
-                    session,
-                    None,
-                    SftpOperation::EditLaunch,
-                    serde_json::to_vec(&SftpEditorLaunch {
-                        executable: self.editor_executable.clone(),
-                        arguments: arguments.unwrap_or_default(),
-                    })
-                    .unwrap_or_default(),
-                    edit.revision,
-                    Some(edit.id),
-                ));
-                self.editor_confirm = false;
-            }
+            ui.collapsing("外部编辑器", |ui| {
+                self.external_editor_tools(ui);
+                ui.label("外部编辑器完整可执行路径");
+                if ui
+                    .text_edit_singleline(&mut self.editor_executable)
+                    .changed()
+                {
+                    self.editor_confirm = false;
+                }
+                ui.label("参数 JSON 数组；{file} 替换为工作文件，未指定则追加文件路径");
+                if ui
+                    .text_edit_singleline(&mut self.editor_arguments)
+                    .changed()
+                {
+                    self.editor_confirm = false;
+                }
+                let arguments = if self.editor_arguments.trim().is_empty() {
+                    Some(Vec::<String>::new())
+                } else {
+                    serde_json::from_str::<Vec<String>>(&self.editor_arguments).ok()
+                };
+                ui.weak("外部修改会自动检测；回传仍由“保存并上传”明确提交。");
+                if ui
+                    .add_enabled(
+                        arguments.is_some()
+                            && std::path::Path::new(&self.editor_executable).is_absolute()
+                            && view.edit_writable
+                            && !view.workspace_busy
+                            && edit.session == session
+                            && edit.state == SftpEditState::Ready
+                            && !edit.closed,
+                        egui::Button::new("用外部编辑器打开"),
+                    )
+                    .clicked()
+                {
+                    *command = Some(workspace(
+                        session,
+                        None,
+                        SftpOperation::EditLaunch,
+                        serde_json::to_vec(&SftpEditorLaunch {
+                            executable: self.editor_executable.clone(),
+                            arguments: arguments.unwrap_or_default(),
+                        })
+                        .unwrap_or_default(),
+                        edit.revision,
+                        Some(edit.id),
+                    ));
+                    self.editor_confirm = false;
+                }
             });
             if self.edit_buffer.len() > MAX_SFTP_INLINE_EDIT_BYTES {
                 ui.colored_label(
@@ -946,105 +1011,117 @@ impl AdvancedSftp {
                     "内置编辑草稿超过 256 KiB，请缩减或复制到外部编辑器。",
                 );
             }
-            if !self.documents.external_footer {self.editor_save_controls(ui,session,view,command);}
-            ui.collapsing("恢复与记录管理",|ui| {
-            if self.edit_dirty {
-                ui.checkbox(&mut self.discard_draft_confirm,"确认放弃未保存的编辑草稿");
-                if ui.add_enabled(self.discard_draft_confirm && view.edit_text.is_some(),egui::Button::new("放弃草稿，恢复工作副本")).clicked(){
-                    self.edit_buffer=view.edit_text.as_deref().cloned().unwrap_or_default();self.edit_dirty=false;self.edit_stamp=Some(stamp);self.discard_draft_confirm=false;self.editor_notice=None;
+            if !self.documents.external_footer {
+                self.editor_save_controls(ui, session, view, command);
+            }
+            ui.collapsing("恢复与记录管理", |ui| {
+                if self.edit_dirty {
+                    ui.checkbox(&mut self.discard_draft_confirm, "确认放弃未保存的编辑草稿");
+                    if ui
+                        .add_enabled(
+                            self.discard_draft_confirm && view.edit_text.is_some(),
+                            egui::Button::new("放弃草稿，恢复工作副本"),
+                        )
+                        .clicked()
+                    {
+                        self.edit_buffer = view.edit_text.as_deref().cloned().unwrap_or_default();
+                        self.edit_dirty = false;
+                        self.edit_stamp = Some(stamp);
+                        self.discard_draft_confirm = false;
+                        self.editor_notice = None;
+                    }
                 }
-            }
-            if ui.button("重新读取工作副本（保留草稿）").clicked() {
-                *command = Some(workspace(
-                    session,
-                    Some(edit.session),
-                    SftpOperation::EditGet,
-                    Vec::new(),
-                    0,
-                    Some(edit.id),
-                ));
-            }
-            if edit.session != session {
-                ui.checkbox(
-                    &mut self.rebind_confirm,
-                    "确认将编辑记录绑定到当前相同的已验证主机；已有回传队列须先迁移",
-                );
-                if ui
-                    .add_enabled(
-                        self.rebind_confirm
-                            && view.edit_writable
-                            && !view.workspace_busy
-                            && view.peer.as_ref() == Some(&edit.peer),
-                        egui::Button::new("重新绑定编辑会话"),
-                    )
-                    .clicked()
-                {
+                if ui.button("重新读取工作副本（保留草稿）").clicked() {
                     *command = Some(workspace(
                         session,
-                        None,
-                        SftpOperation::EditRebind,
+                        Some(edit.session),
+                        SftpOperation::EditGet,
                         Vec::new(),
-                        edit.revision,
+                        0,
                         Some(edit.id),
                     ));
-                    self.rebind_confirm = false;
                 }
-            }
-            ui.checkbox(
-                &mut self.close_confirm,
-                "确认关闭此编辑记录，保留工作文件和未结束的回传",
-            );
-            if ui
-                .add_enabled(
-                    self.close_confirm
-                        && view.edit_writable
-                        && !view.workspace_busy
-                        && edit.state != SftpEditState::Preparing,
-                    egui::Button::new("关闭编辑记录"),
-                )
-                .clicked()
-            {
-                *command = Some(workspace(
-                    session,
-                    Some(edit.session),
-                    SftpOperation::EditClose,
-                    Vec::new(),
-                    edit.revision,
-                    Some(edit.id),
-                ));
-                self.close_confirm = false;
-            }
-            if edit.closed {
-                ui.checkbox(&mut self.forget_confirm, "确认移除关闭的编辑记录");
+                if edit.session != session {
+                    ui.checkbox(
+                        &mut self.rebind_confirm,
+                        "确认将编辑记录绑定到当前相同的已验证主机；已有回传队列须先迁移",
+                    );
+                    if ui
+                        .add_enabled(
+                            self.rebind_confirm
+                                && view.edit_writable
+                                && !view.workspace_busy
+                                && view.peer.as_ref() == Some(&edit.peer),
+                            egui::Button::new("重新绑定编辑会话"),
+                        )
+                        .clicked()
+                    {
+                        *command = Some(workspace(
+                            session,
+                            None,
+                            SftpOperation::EditRebind,
+                            Vec::new(),
+                            edit.revision,
+                            Some(edit.id),
+                        ));
+                        self.rebind_confirm = false;
+                    }
+                }
                 ui.checkbox(
-                    &mut self.discard_private,
-                    "同时永久删除此记录的私有工作副本及快照（未结束回传禁止删除）",
+                    &mut self.close_confirm,
+                    "确认关闭此编辑记录，保留工作文件和未结束的回传",
                 );
                 if ui
                     .add_enabled(
-                        self.forget_confirm
+                        self.close_confirm
+                            && view.edit_writable
                             && !view.workspace_busy
-                            && (!self.discard_private || edit.queued_item.is_none()),
-                        egui::Button::new("移除编辑记录与所选私有文件"),
+                            && edit.state != SftpEditState::Preparing,
+                        egui::Button::new("关闭编辑记录"),
                     )
                     .clicked()
                 {
                     *command = Some(workspace(
                         session,
                         Some(edit.session),
-                        SftpOperation::WorkspaceForget,
-                        serde_json::to_vec(&SftpWorkspaceForget {
-                            editor: true,
-                            discard_private_files: self.discard_private,
-                        })
-                        .unwrap_or_default(),
+                        SftpOperation::EditClose,
+                        Vec::new(),
                         edit.revision,
                         Some(edit.id),
                     ));
-                    self.forget_confirm = false;
-                    self.discard_private = false;
+                    self.close_confirm = false;
                 }
-            }
+                if edit.closed {
+                    ui.checkbox(&mut self.forget_confirm, "确认移除关闭的编辑记录");
+                    ui.checkbox(
+                        &mut self.discard_private,
+                        "同时永久删除此记录的私有工作副本及快照（未结束回传禁止删除）",
+                    );
+                    if ui
+                        .add_enabled(
+                            self.forget_confirm
+                                && !view.workspace_busy
+                                && (!self.discard_private || edit.queued_item.is_none()),
+                            egui::Button::new("移除编辑记录与所选私有文件"),
+                        )
+                        .clicked()
+                    {
+                        *command = Some(workspace(
+                            session,
+                            Some(edit.session),
+                            SftpOperation::WorkspaceForget,
+                            serde_json::to_vec(&SftpWorkspaceForget {
+                                editor: true,
+                                discard_private_files: self.discard_private,
+                            })
+                            .unwrap_or_default(),
+                            edit.revision,
+                            Some(edit.id),
+                        ));
+                        self.forget_confirm = false;
+                        self.discard_private = false;
+                    }
+                }
             });
         });
     }
@@ -1135,5 +1212,5 @@ impl AdvancedSftp {
 }
 
 #[cfg(test)]
-#[path="editor_tests.rs"]
+#[path = "editor_tests.rs"]
 mod editor_tests;

@@ -405,10 +405,14 @@ pub(super) async fn execute(
             })
             .await?;
     }
-    if let Some(seconds)=journal.draft.modified_unix_seconds {
-        journal.update(|v|v.intent=SftpVerifiedIntent::Permissions).await?;
+    if let Some(seconds) = journal.draft.modified_unix_seconds {
+        journal
+            .update(|v| v.intent = SftpVerifiedIntent::Permissions)
+            .await?;
         engine.set_modified(seconds).await?;
-        journal.update(|v|v.intent=SftpVerifiedIntent::None).await?;
+        journal
+            .update(|v| v.intent = SftpVerifiedIntent::None)
+            .await?;
     }
     engine
         .expected_permissions(journal.draft.expected_permissions)

@@ -1,4 +1,5 @@
 //! Geometry checks use the production font/style and do not connect to a daemon.
+type LayoutCase<'a> = (&'a str, Box<dyn FnMut(&Context) + 'a>);
 use egui::{Context, Rect, Vec2, accesskit};
 
 pub(crate) fn context() -> Context {
@@ -108,7 +109,7 @@ fn auxiliary_dialogs_fit_the_smallest_supported_workbench() {
         workspace.open = true;
         let document = cshell_domain::WorkspaceDocument::default();
         let sessions = Default::default();
-        let mut cases: Vec<(&str, Box<dyn FnMut(&Context)>)> = vec![
+        let mut cases: Vec<LayoutCase<'_>> = vec![
             (
                 "凭据管理",
                 Box::new(|c| {

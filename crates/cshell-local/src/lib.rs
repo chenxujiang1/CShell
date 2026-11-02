@@ -429,6 +429,7 @@ fn find_on_path(program: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::field_reassign_with_default)]
 mod tests {
     use super::{LocalProfile, PtySession, WorkingDirectoryPolicy};
     use cshell_domain::TerminalSize;
@@ -468,7 +469,9 @@ mod tests {
         std::thread::spawn(move || {
             let mut buffer = [0; 4096];
             while let Ok(count) = reader.read(&mut buffer) {
-                if count == 0 || sender.send(buffer[..count].to_vec()).is_err() { break; }
+                if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
+                    break;
+                }
             }
         });
         let mut terminal = AlacrittyTerminalEngine::new(size);
@@ -484,12 +487,22 @@ mod tests {
                 assert!(status.success(), "directory command failed: {status}");
                 let snapshot = terminal.snapshot();
                 let found = (0..snapshot.rows).any(|row| {
-                    let text: String = snapshot.row(row).unwrap().iter().flat_map(cshell_terminal::Cell::characters).collect();
+                    let text: String = snapshot
+                        .row(row)
+                        .unwrap()
+                        .iter()
+                        .flat_map(cshell_terminal::Cell::characters)
+                        .collect();
                     std::fs::canonicalize(text.trim()).ok().as_ref() == Some(&expected)
                 });
-                if found { break; }
+                if found {
+                    break;
+                }
             }
-            assert!(std::time::Instant::now() < deadline, "cwd probe did not exit");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cwd probe did not exit"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }

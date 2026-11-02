@@ -50,9 +50,14 @@ pub(super) async fn digest_content(
     path: &str,
     limit: u64,
 ) -> Result<StagedUploadContent, StagedUploadError> {
-    digest_content_with_progress(client,path,limit,None).await
+    digest_content_with_progress(client, path, limit, None).await
 }
-async fn digest_content_with_progress(client:&SftpClient,path:&str,limit:u64,progress:Option<&ReadProgress>)->Result<StagedUploadContent,StagedUploadError> {
+async fn digest_content_with_progress(
+    client: &SftpClient,
+    path: &str,
+    limit: u64,
+    progress: Option<&ReadProgress>,
+) -> Result<StagedUploadContent, StagedUploadError> {
     if !valid_path(path) {
         return Err(StagedUploadError::Invalid);
     }
@@ -84,7 +89,9 @@ async fn digest_content_with_progress(client:&SftpClient,path:&str,limit:u64,pro
         let expected = attrs.size.ok_or(StagedUploadError::Invalid)?;
         let mut hash = Sha256::new();
         let mut offset = 0;
-        if let Some(progress)=progress {progress(0,expected);}
+        if let Some(progress) = progress {
+            progress(0, expected);
+        }
         while offset < expected {
             let count = (expected - offset).min(SFTP_TRANSFER_BATCH_BYTES as u64) as usize;
             let bytes = client
@@ -93,7 +100,9 @@ async fn digest_content_with_progress(client:&SftpClient,path:&str,limit:u64,pro
                 .map_err(|_| StagedUploadError::Changed)?;
             offset += bytes.len() as u64;
             hash.update(&bytes);
-            if let Some(progress)=progress {progress(offset,expected);}
+            if let Some(progress) = progress {
+                progress(offset, expected);
+            }
         }
         match client.session.read(handle.clone(), offset, 1).await {
             Err(error) if is_status(&error, StatusCode::Eof) => {}
@@ -151,23 +160,52 @@ impl Drop for StagedUpload {
 impl StagedUpload {
     /// Clear a bounded namespace challenge before any user data is written.
     pub async fn reset_empty(&self) -> Result<(), StagedUploadError> {
-        let handle=self.handle.as_ref().ok_or(StagedUploadError::Invalid)?;
-        self.client.session.fsetstat(handle.clone(),FileAttributes{size:Some(0),..Default::default()}).await.map_err(|_|StagedUploadError::Uncertain)?;
+        let handle = self.handle.as_ref().ok_or(StagedUploadError::Invalid)?;
+        self.client
+            .session
+            .fsetstat(
+                handle.clone(),
+                FileAttributes {
+                    size: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|_| StagedUploadError::Uncertain)?;
         Ok(())
     }
-    pub async fn size(&self,path:&str)->Result<Option<u64>,StagedUploadError> {
-        if !valid_path(path) {return Err(StagedUploadError::Invalid);}
+    pub async fn size(&self, path: &str) -> Result<Option<u64>, StagedUploadError> {
+        if !valid_path(path) {
+            return Err(StagedUploadError::Invalid);
+        }
         match self.client.session.lstat(path).await {
-            Ok(value) if value.attrs.file_type()==FileType::File=>value.attrs.size.map(Some).ok_or(StagedUploadError::Invalid),
-            Ok(_)=>Err(StagedUploadError::Invalid),
-            Err(error) if absent(&error)=>Ok(None),
-            Err(_)=>Err(StagedUploadError::Uncertain),
+            Ok(value) if value.attrs.file_type() == FileType::File => {
+                value.attrs.size.map(Some).ok_or(StagedUploadError::Invalid)
+            }
+            Ok(_) => Err(StagedUploadError::Invalid),
+            Err(error) if absent(&error) => Ok(None),
+            Err(_) => Err(StagedUploadError::Uncertain),
         }
     }
-    pub async fn check_size(&self,temporary:&str,expected:u64)->Result<(),StagedUploadError> {
-        let handle=self.handle.as_ref().ok_or(StagedUploadError::Invalid)?;
-        let opened=self.client.session.fstat(handle.clone()).await.map_err(|_|StagedUploadError::Uncertain)?.attrs;
-        if opened.file_type()!=FileType::File || opened.size!=Some(expected) || self.size(temporary).await?!=Some(expected) {return Err(StagedUploadError::Changed);}
+    pub async fn check_size(
+        &self,
+        temporary: &str,
+        expected: u64,
+    ) -> Result<(), StagedUploadError> {
+        let handle = self.handle.as_ref().ok_or(StagedUploadError::Invalid)?;
+        let opened = self
+            .client
+            .session
+            .fstat(handle.clone())
+            .await
+            .map_err(|_| StagedUploadError::Uncertain)?
+            .attrs;
+        if opened.file_type() != FileType::File
+            || opened.size != Some(expected)
+            || self.size(temporary).await? != Some(expected)
+        {
+            return Err(StagedUploadError::Changed);
+        }
         Ok(())
     }
     pub async fn preflight_existing(
@@ -293,6 +331,10 @@ impl StagedUpload {
     }
     /// Replacement has no server-side compare-and-swap. The caller explicitly
     /// authorizes replacement under exclusive external access; keep the copy backup.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit identity, revision and authority inputs are kept separate at this boundary"
+    )]
     pub async fn publish_existing(
         &self,
         temporary: &str,
@@ -497,11 +539,7 @@ impl StagedUpload {
             .read_chunk_bytes()
             .map_err(|_| StagedUploadError::Invalid)?
             .min(limit as u32);
-        let result = self
-            .client
-            .session
-            .read(handle.clone(), offset, size as u32)
-            .await;
+        let result = self.client.session.read(handle.clone(), offset, size).await;
         if close {
             self.client
                 .session
@@ -534,16 +572,33 @@ impl StagedUpload {
         self.flush().await?;
         self.digest(temporary, limit).await
     }
-    pub async fn verify_with_progress(&mut self,temporary:&str,limit:u64,progress:&ReadProgress)->Result<StagedUploadContent,StagedUploadError> {
+    pub async fn verify_with_progress(
+        &mut self,
+        temporary: &str,
+        limit: u64,
+        progress: &ReadProgress,
+    ) -> Result<StagedUploadContent, StagedUploadError> {
         self.flush().await?;
-        digest_content_with_progress(&self.client,temporary,limit,Some(progress)).await
+        digest_content_with_progress(&self.client, temporary, limit, Some(progress)).await
     }
-    pub async fn probe_with_progress(&self,path:&str,limit:u64,progress:&ReadProgress)->Result<Option<StagedUploadContent>,StagedUploadError> {
-        if !valid_path(path) {return Err(StagedUploadError::Invalid);}
+    pub async fn probe_with_progress(
+        &self,
+        path: &str,
+        limit: u64,
+        progress: &ReadProgress,
+    ) -> Result<Option<StagedUploadContent>, StagedUploadError> {
+        if !valid_path(path) {
+            return Err(StagedUploadError::Invalid);
+        }
         match self.client.session.lstat(path).await {
-            Ok(_)=>digest_content_with_progress(&self.client,path,limit,Some(progress)).await.map(Some),
-            Err(error) if absent(&error)=>{progress(0,0);Ok(None)},
-            Err(_)=>Err(StagedUploadError::Uncertain),
+            Ok(_) => digest_content_with_progress(&self.client, path, limit, Some(progress))
+                .await
+                .map(Some),
+            Err(error) if absent(&error) => {
+                progress(0, 0);
+                Ok(None)
+            }
+            Err(_) => Err(StagedUploadError::Uncertain),
         }
     }
     pub async fn flush(&self) -> Result<(), StagedUploadError> {
@@ -583,14 +638,42 @@ impl StagedUpload {
             .map_err(|_| StagedUploadError::Uncertain)?;
         self.flush().await
     }
-    pub async fn set_modified(&self,seconds:u32)->Result<(),StagedUploadError>{
-        let handle=self.handle.as_ref().ok_or(StagedUploadError::Invalid)?;
-        let attrs=self.client.session.fstat(handle.clone()).await.map_err(|_|StagedUploadError::Uncertain)?.attrs;
-        if attrs.file_type()!=FileType::File{return Err(StagedUploadError::Changed);}
-        self.client.session.fsetstat(handle.clone(),FileAttributes{atime:Some(attrs.atime.unwrap_or(seconds)),mtime:Some(seconds),..Default::default()}).await.map_err(|_|StagedUploadError::Uncertain)?;
+    pub async fn set_modified(&self, seconds: u32) -> Result<(), StagedUploadError> {
+        let handle = self.handle.as_ref().ok_or(StagedUploadError::Invalid)?;
+        let attrs = self
+            .client
+            .session
+            .fstat(handle.clone())
+            .await
+            .map_err(|_| StagedUploadError::Uncertain)?
+            .attrs;
+        if attrs.file_type() != FileType::File {
+            return Err(StagedUploadError::Changed);
+        }
+        self.client
+            .session
+            .fsetstat(
+                handle.clone(),
+                FileAttributes {
+                    atime: Some(attrs.atime.unwrap_or(seconds)),
+                    mtime: Some(seconds),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|_| StagedUploadError::Uncertain)?;
         self.flush().await?;
-        let actual=self.client.session.fstat(handle.clone()).await.map_err(|_|StagedUploadError::Uncertain)?.attrs;
-        if actual.mtime!=Some(seconds)||actual.size!=attrs.size{return Err(StagedUploadError::Changed);}Ok(())
+        let actual = self
+            .client
+            .session
+            .fstat(handle.clone())
+            .await
+            .map_err(|_| StagedUploadError::Uncertain)?
+            .attrs;
+        if actual.mtime != Some(seconds) || actual.size != attrs.size {
+            return Err(StagedUploadError::Changed);
+        }
+        Ok(())
     }
     pub async fn permissions(&self, path: &str) -> Result<Option<u32>, StagedUploadError> {
         self.client

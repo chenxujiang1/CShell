@@ -296,7 +296,11 @@ impl DesktopApp {
             self.sftp_window = None;
             return;
         }
-        let view = self.sftp.as_ref().map(DesktopSftpConnection::view).map(|v|self.sftp_tabs.local.display(v));
+        let view = self
+            .sftp
+            .as_ref()
+            .map(DesktopSftpConnection::view)
+            .map(|v| self.sftp_tabs.local.display(v));
         let command = self.sftp_window.as_mut().and_then(|window| {
             window.event(
                 event_loop,
@@ -310,16 +314,23 @@ impl DesktopApp {
         if let Some(command) = command {
             self.submit_sftp_command(command);
         }
-        if let Some(action)=self.sftp_panel.take_tab_action() {self.apply_sftp_tab_action(action);}
-        if let Some(command) = self.sftp_panel.take_profile_command() {
-            if !self.profiles.as_ref().is_some_and(|p| p.request(command)) {
-                self.sftp_panel.profile_request_failed();
-            }
+        if let Some(action) = self.sftp_panel.take_tab_action() {
+            self.apply_sftp_tab_action(action);
+        }
+        if let Some(command) = self.sftp_panel.take_profile_command()
+            && !self.profiles.as_ref().is_some_and(|p| p.request(command))
+        {
+            self.sftp_panel.profile_request_failed();
         }
     }
 }
 
 #[cfg(all(test, target_os = "windows"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use winit::platform::windows::EventLoopBuilderExtWindows;
@@ -562,17 +573,50 @@ impl DesktopApp {
                 selected.filter(|id| catalog.ssh_connections.iter().any(|c| c.profile_id == *id))
             })
     }
-    pub(super) fn open_sftp_profile(&mut self,profile:cshell_domain::ProfileId) {self.open_sftp_tab(profile);}
-    fn submit_sftp_command(&mut self, mut command:sftp_connection::SftpClientCommand) {
-        if let sftp_connection::SftpClientCommand::ConnectProfile{profile,source_ssh_session,..}=&mut command {
-            if source_ssh_session.is_none() {*source_ssh_session=self.sftp_ssh_source(*profile);}
-        }
-        let new_session=if let sftp_connection::SftpClientCommand::ConnectProfile{session,..}=&command {Some(*session)} else {None};
-        if let Some(accepted)=self.sftp_tabs.local.submit(&command) {if !accepted {self.sftp_panel.request_failed(false);}return;}
-        let transfer=matches!(&command,sftp_connection::SftpClientCommand::TransferBatch(..)|sftp_connection::SftpClientCommand::Tree(_,cshell_ipc::SftpOperation::TreeStart,..));
-        if self.sftp.as_ref().is_some_and(|s|s.request(command)) {
-            if let Some(session)=new_session {self.sftp_session=Some(session);self.sftp_panel.open=true;}
-        }else{self.sftp_panel.request_failed(transfer);}
+    pub(super) fn open_sftp_profile(&mut self, profile: cshell_domain::ProfileId) {
+        self.open_sftp_tab(profile);
     }
-    pub(super) fn sync_sftp_lifecycle(&mut self) {self.sync_sftp_tabs();}
+    fn submit_sftp_command(&mut self, mut command: sftp_connection::SftpClientCommand) {
+        if let sftp_connection::SftpClientCommand::ConnectProfile {
+            profile,
+            source_ssh_session,
+            ..
+        } = &mut command
+            && source_ssh_session.is_none()
+        {
+            *source_ssh_session = self.sftp_ssh_source(*profile);
+        }
+        let new_session =
+            if let sftp_connection::SftpClientCommand::ConnectProfile { session, .. } = &command {
+                Some(*session)
+            } else {
+                None
+            };
+        if let Some(accepted) = self.sftp_tabs.local.submit(&command) {
+            if !accepted {
+                self.sftp_panel.request_failed(false);
+            }
+            return;
+        }
+        let transfer = matches!(
+            &command,
+            sftp_connection::SftpClientCommand::TransferBatch(..)
+                | sftp_connection::SftpClientCommand::Tree(
+                    _,
+                    cshell_ipc::SftpOperation::TreeStart,
+                    ..
+                )
+        );
+        if self.sftp.as_ref().is_some_and(|s| s.request(command)) {
+            if let Some(session) = new_session {
+                self.sftp_session = Some(session);
+                self.sftp_panel.open = true;
+            }
+        } else {
+            self.sftp_panel.request_failed(transfer);
+        }
+    }
+    pub(super) fn sync_sftp_lifecycle(&mut self) {
+        self.sync_sftp_tabs();
+    }
 }

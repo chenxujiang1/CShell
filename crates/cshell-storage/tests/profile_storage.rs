@@ -1,3 +1,10 @@
+// Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
 mod support;
 use support::strip_newer_fixture_schema;
 
@@ -314,7 +321,9 @@ async fn future_schema_is_not_downgraded() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("future.db");
     let pool = raw_pool(&path).await?;
-    query("PRAGMA user_version = 2147483647").execute(&pool).await?;
+    query("PRAGMA user_version = 2147483647")
+        .execute(&pool)
+        .await?;
     pool.close().await;
     assert!(matches!(
         SqliteProfileRepository::open(&path).await,
@@ -337,11 +346,18 @@ async fn ssh_target_round_trip_and_failed_update_are_atomic() -> Result<(), Box<
     let target = SshConnectionRecord {
         options: cshell_domain::SshConnectionOptions {
             sftp_verification: Some(cshell_domain::SftpVerification::Full),
-            authentication_order: vec![cshell_domain::SshAuthStep::KeyboardInteractive,cshell_domain::SshAuthStep::Password],
+            authentication_order: vec![
+                cshell_domain::SshAuthStep::KeyboardInteractive,
+                cshell_domain::SshAuthStep::Password,
+            ],
             keyboard_interactive: true,
             zmodem_download_directory: Some("D:/downloads/profile".into()),
-            keepalive_enabled: false, keepalive_interval_secs: 41, keepalive_max: 4,
-            auto_reconnect: true, reconnect_delay_secs: 9, reconnect_attempts: 7,
+            keepalive_enabled: false,
+            keepalive_interval_secs: 41,
+            keepalive_max: 4,
+            auto_reconnect: true,
+            reconnect_delay_secs: 9,
+            reconnect_attempts: 7,
         },
         profile_id: record.id,
         host: "server.example.com".into(),
@@ -395,40 +411,108 @@ async fn ssh_target_round_trip_and_failed_update_are_atomic() -> Result<(), Box<
     assert_eq!(intact.ssh_connections, vec![target.clone()]);
     let mut invalid = target.clone();
     invalid.options.reconnect_delay_secs = 0;
-    assert!(service.apply_batch(1, &[CatalogChange::UpsertSshConnection(invalid)]).await.is_err());
-    assert_eq!(service.load().await?.snapshot().ssh_connections, vec![target]);
+    assert!(
+        service
+            .apply_batch(1, &[CatalogChange::UpsertSshConnection(invalid)])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        service.load().await?.snapshot().ssh_connections,
+        vec![target]
+    );
     service.into_repository().close().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn v15_ssh_options_migration_preserves_targets_and_legacy_behavior() -> Result<(), Box<dyn Error>> {
+async fn v15_ssh_options_migration_preserves_targets_and_legacy_behavior()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("legacy-options.db");
+    std::fs::create_dir(temp.path().join("credentials"))?;
+    let sidecars = [
+        "credentials/master.vault",
+        "credentials/master.vault.root",
+        "known_hosts",
+        "display-settings.json",
+    ];
+    for name in sidecars {
+        std::fs::write(temp.path().join(name), format!("preserved fixture: {name}"))?;
+    }
     let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
-    let record = profile("legacy SSH", None);
-    let target = SshConnectionRecord {
-        profile_id: record.id, host: "legacy.example.test".into(), port: 2222, username: "operator".into(),
-        auth_method: SshAuthMethod::Password, private_key_path: None, certificate_path: None,
-        agent_backend: Default::default(), agent_identity: None, route: Default::default(), options: Default::default(),
+    let folder = ProfileFolder {
+        id: FolderId::new(),
+        name: "Existing servers".into(),
+        parent_id: None,
+        terminal: TerminalOverrides::default(),
     };
-    service.apply_batch(0, &[CatalogChange::UpsertProfile(record), CatalogChange::UpsertSshConnection(target.clone())]).await?;
+    let record = profile("legacy SSH", Some(folder.id));
+    let expected_record = record.clone();
+    let target = SshConnectionRecord {
+        profile_id: record.id,
+        host: "legacy.example.test".into(),
+        port: 2222,
+        username: "operator".into(),
+        auth_method: SshAuthMethod::Password,
+        private_key_path: None,
+        certificate_path: None,
+        agent_backend: Default::default(),
+        agent_identity: None,
+        route: Default::default(),
+        options: Default::default(),
+    };
+    service
+        .apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertFolder(folder.clone()),
+                CatalogChange::UpsertProfile(record),
+                CatalogChange::UpsertSshConnection(target.clone()),
+            ],
+        )
+        .await?;
     service.into_repository().close().await;
     let pool = raw_pool(&path).await?;
-    query("ALTER TABLE profile_ssh_connections DROP COLUMN options_json").execute(&pool).await?;
+    query("ALTER TABLE profile_ssh_connections DROP COLUMN options_json")
+        .execute(&pool)
+        .await?;
     query("PRAGMA user_version = 15").execute(&pool).await?;
     pool.close().await;
     let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
     let snapshot = service.load().await?.snapshot();
     assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.folders, vec![folder]);
+    assert_eq!(snapshot.profiles, vec![expected_record]);
     assert_eq!(snapshot.ssh_connections, vec![target.clone()]);
     assert!(!snapshot.ssh_connections[0].options.auto_reconnect);
     assert!(snapshot.ssh_connections[0].options.keepalive_enabled);
     let mut old_json = serde_json::to_value(&target)?;
-    assert!(!old_json.as_object().unwrap().contains_key("options"), "legacy default options must not alter stored snapshot JSON");
+    assert!(
+        !old_json.as_object().unwrap().contains_key("options"),
+        "legacy default options must not alter stored snapshot JSON"
+    );
     old_json.as_object_mut().unwrap().remove("options");
-    assert_eq!(serde_json::from_value::<SshConnectionRecord>(old_json)?, target);
+    assert_eq!(
+        serde_json::from_value::<SshConnectionRecord>(old_json)?,
+        target
+    );
     service.into_repository().close().await;
+    assert_eq!(backups(temp.path())?.len(), 1);
+    let reopened = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    assert_eq!(reopened.load().await?.snapshot(), snapshot);
+    reopened.into_repository().close().await;
+    assert_eq!(
+        backups(temp.path())?.len(),
+        1,
+        "reopening an upgraded store must not migrate it again"
+    );
+    for name in sidecars {
+        assert_eq!(
+            std::fs::read(temp.path().join(name))?,
+            format!("preserved fixture: {name}").as_bytes()
+        );
+    }
     Ok(())
 }
 
@@ -836,17 +920,80 @@ async fn existing_v5_local_json_defaults_to_keep_alive_without_rewriting_catalog
 }
 
 #[tokio::test]
-async fn v16_login_migration_preserves_configuration_and_allows_blank_username()->Result<(),Box<dyn Error>>{
-    let temp=tempfile::tempdir()?;let path=temp.path().join("login.db");let record=profile("login",None);
-    let target=SshConnectionRecord{profile_id:record.id,host:"server.test".into(),port:2222,username:"operator".into(),auth_method:SshAuthMethod::Password,private_key_path:None,certificate_path:None,agent_backend:Default::default(),agent_identity:None,route:Default::default(),options:cshell_domain::SshConnectionOptions::new_profile()};
-    let service=ProfileService::new(SqliteProfileRepository::open(&path).await?);service.apply_batch(0,&[CatalogChange::UpsertProfile(record),CatalogChange::UpsertSshConnection(target.clone())]).await?;service.into_repository().close().await;
-    let pool=raw_pool(&path).await?;
-    query("ALTER TABLE profile_ssh_connections RENAME TO login_fixture_copy").execute(&pool).await?;
+async fn v16_login_migration_preserves_configuration_and_allows_blank_username()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("login.db");
+    let record = profile("login", None);
+    let target = SshConnectionRecord {
+        profile_id: record.id,
+        host: "server.test".into(),
+        port: 2222,
+        username: "operator".into(),
+        auth_method: SshAuthMethod::Password,
+        private_key_path: None,
+        certificate_path: None,
+        agent_backend: Default::default(),
+        agent_identity: None,
+        route: Default::default(),
+        options: cshell_domain::SshConnectionOptions::new_profile(),
+    };
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    service
+        .apply_batch(
+            0,
+            &[
+                CatalogChange::UpsertProfile(record),
+                CatalogChange::UpsertSshConnection(target.clone()),
+            ],
+        )
+        .await?;
+    service.into_repository().close().await;
+    let pool = raw_pool(&path).await?;
+    query("ALTER TABLE profile_ssh_connections RENAME TO login_fixture_copy")
+        .execute(&pool)
+        .await?;
     query("CREATE TABLE profile_ssh_connections(profile_id TEXT PRIMARY KEY REFERENCES profile_records(id) ON DELETE CASCADE,host TEXT NOT NULL,port INTEGER NOT NULL,username TEXT NOT NULL CHECK(length(username)>0),auth_method INTEGER NOT NULL,private_key_path TEXT,certificate_path TEXT,agent_backend INTEGER NOT NULL,agent_identity TEXT,route_json TEXT NOT NULL,options_json TEXT NOT NULL)").execute(&pool).await?;
-    query("INSERT INTO profile_ssh_connections SELECT * FROM login_fixture_copy").execute(&pool).await?;query("DROP TABLE login_fixture_copy").execute(&pool).await?;query("PRAGMA user_version=16").execute(&pool).await?;pool.close().await;
-    let service=ProfileService::new(SqliteProfileRepository::open(&path).await?);assert_eq!(service.load().await?.snapshot().ssh_connections,vec![target.clone()]);
-    let mut empty=target;empty.username.clear();service.apply_batch(1,&[CatalogChange::UpsertSshConnection(empty.clone())]).await?;assert_eq!(service.load().await?.snapshot().ssh_connections,vec![empty]);service.into_repository().close().await;
-    let pool=raw_pool(&path).await?;let version:i64=query_scalar("PRAGMA user_version").fetch_one(&pool).await?;assert_eq!(version,17);let violations=sqlx::query("PRAGMA foreign_key_check").fetch_all(&pool).await?;assert!(violations.is_empty());pool.close().await;
-    assert_eq!(std::fs::read_dir(temp.path())?.filter_map(Result::ok).filter(|p|p.file_name().to_string_lossy().starts_with("login.db.backup-")).count(),1);
+    query("INSERT INTO profile_ssh_connections SELECT * FROM login_fixture_copy")
+        .execute(&pool)
+        .await?;
+    query("DROP TABLE login_fixture_copy")
+        .execute(&pool)
+        .await?;
+    query("PRAGMA user_version=16").execute(&pool).await?;
+    pool.close().await;
+    let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+    assert_eq!(
+        service.load().await?.snapshot().ssh_connections,
+        vec![target.clone()]
+    );
+    let mut empty = target;
+    empty.username.clear();
+    service
+        .apply_batch(1, &[CatalogChange::UpsertSshConnection(empty.clone())])
+        .await?;
+    assert_eq!(
+        service.load().await?.snapshot().ssh_connections,
+        vec![empty]
+    );
+    service.into_repository().close().await;
+    let pool = raw_pool(&path).await?;
+    let version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
+    assert_eq!(version, 17);
+    let violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await?;
+    assert!(violations.is_empty());
+    pool.close().await;
+    assert_eq!(
+        std::fs::read_dir(temp.path())?
+            .filter_map(Result::ok)
+            .filter(|p| p
+                .file_name()
+                .to_string_lossy()
+                .starts_with("login.db.backup-"))
+            .count(),
+        1
+    );
     Ok(())
 }

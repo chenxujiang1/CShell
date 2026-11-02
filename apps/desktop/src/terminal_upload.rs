@@ -371,11 +371,10 @@ impl Panel {
                                             .desired_width(ui.available_width()),
                                     );
                                     let remaining = s.total_bytes.saturating_sub(s.bytes);
-                                    let eta = if s.bytes_per_second > 0 {
-                                        format!(" · 剩余约 {} 秒", remaining / s.bytes_per_second)
-                                    } else {
-                                        String::new()
-                                    };
+                                    let eta = remaining
+                                        .checked_div(s.bytes_per_second)
+                                        .map(|seconds| format!(" · 剩余约 {seconds} 秒"))
+                                        .unwrap_or_default();
                                     ui.label(format!(
                                         "{}/{} 个文件 · {} / {} · {}/s{}",
                                         s.completed,

@@ -139,8 +139,10 @@ impl ProfileRepository for SqliteProfileRepository {
             let profile_id: String = row.try_get("profile_id").map_err(corrupt)?;
             let port: i64 = row.try_get("port").map_err(corrupt)?;
             ssh_connections.push(SshConnectionRecord {
-                options: serde_json::from_str(&row.try_get::<String, _>("options_json").map_err(corrupt)?)
-                    .map_err(|_| ProfileRepositoryError::Corrupt)?,
+                options: serde_json::from_str(
+                    &row.try_get::<String, _>("options_json").map_err(corrupt)?,
+                )
+                .map_err(|_| ProfileRepositoryError::Corrupt)?,
                 profile_id: parse_profile_id(&profile_id)?,
                 host: row.try_get("host").map_err(corrupt)?,
                 port: u16::try_from(port).map_err(|_| ProfileRepositoryError::Corrupt)?,

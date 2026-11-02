@@ -59,7 +59,7 @@ pub fn edit(
     }
     if response.has_focus() && ui.is_enabled() {
         // Defer context writes until the input read guard has been released.
-        let mut surrender_focus=false;
+        let mut surrender_focus = false;
         // Events are borrowed: no additional plaintext event copies or persistent history.
         ui.input(|input| {
             for event in &input.events {
@@ -143,14 +143,16 @@ pub fn edit(
                             cursor.offset = value.len();
                             cursor.all = false;
                         }
-                        egui::Key::Escape | egui::Key::Enter => surrender_focus=true,
+                        egui::Key::Escape | egui::Key::Enter => surrender_focus = true,
                         _ => {}
                     },
                     _ => {}
                 }
             }
         });
-        if surrender_focus {response.surrender_focus();}
+        if surrender_focus {
+            response.surrender_focus();
+        }
         if response.changed()
             || ui.input(|input| {
                 input
@@ -272,7 +274,6 @@ mod tests {
             output
         };
         draw(vec![]);
-        drop(draw);
         context.memory_mut(|memory| memory.request_focus(id));
         let mut draw = |events| {
             let mut output = context.run_ui(
@@ -307,7 +308,6 @@ mod tests {
             egui::Event::Text("中".into()),
         ]);
         assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == "••••")));
-        drop(draw);
         assert_eq!(value, "ab中c");
         let mut output = context.run_ui(
             egui::RawInput {

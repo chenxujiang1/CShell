@@ -64,6 +64,73 @@ fn round_trip_and_idempotent_delete() {
     assert!(!format!("{secret:?}").contains("transient-probe"));
 }
 
+/// An independent libsecret client creates an existing entry before the new
+/// D-Bus adapter reads it, and reads it back after an update. The current-thread
+/// executor also catches synchronous adapters that accidentally nest runtimes.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_secret_tool_interop_on_current_thread_runtime() {
+    if std::env::var("CSHELL_SECRET_TOOL_ORACLE").as_deref() != Ok("1") {
+        return;
+    }
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    struct Cleanup(ProbeId);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = SystemKeychain::new().delete(&self.0);
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let id = ProbeId::new();
+        let store = SystemKeychain::new();
+        assert_eq!(store.read(&id).err(), Some(KeychainError::Missing));
+        let cleanup = Cleanup(id.clone());
+        let mut child = Command::new("secret-tool")
+            .args(["store", "--label=CShell isolated compatibility test"])
+            .args(["service", PROBE_SERVICE, "username", &id.0])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("libsecret oracle installed");
+        child
+            .stdin
+            .take()
+            .expect("oracle stdin")
+            .write_all(b"legacy-oracle-secret")
+            .expect("write dummy secret");
+        assert!(child.wait().expect("oracle completed").success());
+        assert_eq!(
+            store.read(&id).expect("read preexisting entry").expose(),
+            b"legacy-oracle-secret"
+        );
+        assert_eq!(
+            store.write_new(&id, &Secret::new(b"must-not-overwrite".to_vec())),
+            Err(KeychainError::AlreadyExists)
+        );
+        keyring::Entry::new(PROBE_SERVICE, &id.0)
+            .expect("native entry")
+            .set_secret(b"updated-oracle-secret")
+            .expect("update legacy entry");
+        let output = Command::new("secret-tool")
+            .args(["lookup", "service", PROBE_SERVICE, "username", &id.0])
+            .output()
+            .expect("independent oracle lookup");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"updated-oracle-secret\n");
+        store.delete(&id).expect("remove test entry");
+        assert_eq!(store.read(&id).err(), Some(KeychainError::Missing));
+        drop(cleanup);
+    });
+}
+
 #[test]
 fn existing_entry_cannot_be_overwritten() {
     let store = ProbeStore(FakeBackend::default());

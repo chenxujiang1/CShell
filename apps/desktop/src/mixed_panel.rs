@@ -55,8 +55,10 @@ fn new_step(kind: u8) -> Option<StepDraft> {
             },
         },
         _ => {
-            let mut policy = TaskPolicy::default();
-            policy.concurrency = 1;
+            let policy = TaskPolicy {
+                concurrency: 1,
+                ..Default::default()
+            };
             MixedTaskAction::Command {
                 definition: TaskDefinition {
                     id: TaskId::new(),
@@ -387,8 +389,9 @@ impl MixedPanel {
                         }
                     });
             });
-        if *open && let (Some(plan), Some(page)) = (&view.plan, &view.page) {
-            if (page.active
+        if *open
+            && let (Some(plan), Some(page)) = (&view.plan, &view.page)
+            && (page.active
                 || view.cancel_busy
                 || self.read_requested
                 || view.repair.as_ref().is_some_and(|document| {
@@ -397,15 +400,14 @@ impl MixedPanel {
                         .as_ref()
                         .is_some_and(|job| job.status == FileRecoveryStatus::Running)
                 }))
-                && !view.busy
-                && self
-                    .refresh_at
-                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
-                && connection.page(plan.clone(), page.after, false)
-            {
-                self.refresh_at = Some(Instant::now());
-                self.read_requested = false;
-            }
+            && !view.busy
+            && self
+                .refresh_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+            && connection.page(plan.clone(), page.after, false)
+        {
+            self.refresh_at = Some(Instant::now());
+            self.read_requested = false;
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
@@ -1126,22 +1128,23 @@ impl MixedPanel {
                     continue;
                 }
                 for (index, step) in row.run.steps.iter().enumerate() {
-                    if let MixedReceipt::Command { target, .. } = &step.receipt {
-                        if target_terminal(target.state) && target_terminal(target.steps[0].state) {
-                            for stderr in [false, true] {
-                                sources.push(OutputAnalysisRequest {
-                                    format: "cshell.output-analysis-request".into(),
-                                    version: 1,
-                                    kind: OutputAnalysisKind::Mixed,
-                                    run_id: plan.id(),
-                                    left: row.run.host_id,
-                                    left_revision: row.run.revision,
-                                    right: None,
-                                    right_revision: None,
-                                    step: index as u32,
-                                    stderr,
-                                });
-                            }
+                    if let MixedReceipt::Command { target, .. } = &step.receipt
+                        && target_terminal(target.state)
+                        && target_terminal(target.steps[0].state)
+                    {
+                        for stderr in [false, true] {
+                            sources.push(OutputAnalysisRequest {
+                                format: "cshell.output-analysis-request".into(),
+                                version: 1,
+                                kind: OutputAnalysisKind::Mixed,
+                                run_id: plan.id(),
+                                left: row.run.host_id,
+                                left_revision: row.run.revision,
+                                right: None,
+                                right_revision: None,
+                                step: index as u32,
+                                stderr,
+                            });
                         }
                     }
                 }
@@ -1473,6 +1476,10 @@ impl MixedPanel {
             }
         }
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit UI, immutable plan and target inputs keep repair authority visible"
+    )]
     fn file_repair_controls(
         &mut self,
         ui: &mut egui::Ui,
@@ -1490,18 +1497,17 @@ impl MixedPanel {
                 egui::Button::new("只读探测此文件步骤"),
             )
             .clicked()
-        {
-            if connection.repair(
+            && connection.repair(
                 plan.clone(),
                 target.host_id,
                 step,
                 target.revision,
                 MixedFileOperation::Probe,
                 page.after,
-            ) {
-                self.read_requested = true;
-                self.deactivate();
-            }
+            )
+        {
+            self.read_requested = true;
+            self.deactivate();
         }
         if step != target.next_step
             || !matches!(

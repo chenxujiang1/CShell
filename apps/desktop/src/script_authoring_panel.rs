@@ -134,7 +134,7 @@ impl ScriptAuthoringPanel {
     pub fn indicator(&mut self, context: &egui::Context) -> bool {
         let mut show = self.live.indicator(context);
         if self.recorder.active() {
-            cshell_ui::form::dialog(&context, "脚本录制中")
+            cshell_ui::form::dialog(context, "脚本录制中")
                 .id(egui::Id::new("script-recording-indicator"))
                 .collapsible(false)
                 .resizable(false)
@@ -148,7 +148,7 @@ impl ScriptAuthoringPanel {
                 });
         }
         if let Some(run) = &self.active_run {
-            cshell_ui::form::dialog(&context, "离线脚本运行中")
+            cshell_ui::form::dialog(context, "离线脚本运行中")
                 .id(egui::Id::new("script-run-indicator"))
                 .collapsible(false)
                 .resizable(false)

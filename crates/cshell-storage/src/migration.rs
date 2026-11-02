@@ -142,7 +142,9 @@ pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
         14 => {
             create_backup(&pool, path).await?;
         }
-        15 | 16 => {create_backup(&pool,path).await?;}
+        15 | 16 => {
+            create_backup(&pool, path).await?;
+        }
         SCHEMA_VERSION => {}
         other => return Err(StorageError::UnsupportedSchema(other)),
     }
@@ -196,9 +198,9 @@ pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
         query("PRAGMA user_version = 16").execute(&mut *tx).await?;
         tx.commit().await?;
     }
-    let login_version:i64=query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
-    if login_version==16 {
-        let mut tx=pool.begin().await?;
+    let login_version: i64 = query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
+    if login_version == 16 {
+        let mut tx = pool.begin().await?;
         query("CREATE TABLE profile_ssh_connections_v17 (
             profile_id TEXT PRIMARY KEY REFERENCES profile_records(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             host TEXT NOT NULL CHECK(length(host)>0),
@@ -211,8 +213,12 @@ pub(crate) async fn open_pool(path: &Path) -> Result<SqlitePool, StorageError> {
         )").execute(&mut *tx).await?;
         query("ALTER TABLE profile_ssh_connections_v17 ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'").execute(&mut *tx).await?;
         query("INSERT INTO profile_ssh_connections_v17 (profile_id,host,port,username,auth_method,private_key_path,certificate_path,agent_backend,agent_identity,route_json,options_json) SELECT profile_id,host,port,username,auth_method,private_key_path,certificate_path,agent_backend,agent_identity,route_json,options_json FROM profile_ssh_connections").execute(&mut *tx).await?;
-        query("DROP TABLE profile_ssh_connections").execute(&mut *tx).await?;
-        query("ALTER TABLE profile_ssh_connections_v17 RENAME TO profile_ssh_connections").execute(&mut *tx).await?;
+        query("DROP TABLE profile_ssh_connections")
+            .execute(&mut *tx)
+            .await?;
+        query("ALTER TABLE profile_ssh_connections_v17 RENAME TO profile_ssh_connections")
+            .execute(&mut *tx)
+            .await?;
         query("PRAGMA user_version = 17").execute(&mut *tx).await?;
         tx.commit().await?;
     }

@@ -42,7 +42,8 @@ impl Connection {
                     let old=state.challenge.clone();let old_error=state.error.clone();let busy=state.busy;let old_revision=state.catalog_revision;
                     state.busy=false;
                     match result {
-                        Ok(response) if response.status==Status::Ok as i32=>{state.catalog_revision=response.auth_catalog_revision;state.challenge=response.auth_challenge; if respond{state.error=None;} if !response.auth_notice.is_empty(){state.error=Some(response.auth_notice);}},
+                        Ok(response) if response.status==Status::Ok as i32=>{state.catalog_revision=response.auth_catalog_revision;state.challenge=response.auth_challenge; if respond{state.error=None;}
+if !response.auth_notice.is_empty(){state.error=Some(response.auth_notice);}},
                         Ok(_)=>{if respond{state.error=Some("验证已过期或被取消，请重新连接。".into());}state.challenge=None;},
                         Err(error)=>{if respond{state.error=Some(error);}else{state.challenge=None;}},
                     }
@@ -155,21 +156,19 @@ impl Dialog {
         profiles: Option<&crate::profile_connection::DesktopProfileConnection>,
     ) {
         let revision = self.view.catalog_revision;
-        if revision > self.last_catalog_refresh {
-            if let Some(profiles) = profiles {
-                if profiles.catalog_revision() == Some(revision)
-                    || profiles.request(crate::profile_connection::ProfileClientCommand::Refresh)
-                {
-                    self.last_catalog_refresh = revision;
-                }
-            }
+        if revision > self.last_catalog_refresh
+            && let Some(profiles) = profiles
+            && (profiles.catalog_revision() == Some(revision)
+                || profiles.request(crate::profile_connection::ProfileClientCommand::Refresh))
+        {
+            self.last_catalog_refresh = revision;
         }
     }
     pub fn sync(&mut self, config: Option<&DesktopConnectionConfig>) -> bool {
-        if self.connection.is_none() {
-            if let Some(config) = config {
-                self.connection = Connection::start(config.clone()).ok();
-            }
+        if self.connection.is_none()
+            && let Some(config) = config
+        {
+            self.connection = Connection::start(config.clone()).ok();
         }
         let Some(view) = self.connection.as_ref().map(Connection::view) else {
             return false;
@@ -224,7 +223,9 @@ impl Dialog {
         let mut cancel = false;
         egui::Modal::new(egui::Id::new("ssh-keyboard-interactive")).show(context, |ui| {
             ui.set_width(ui.available_width().min(460.0));
-            ui.heading(if challenge.vault_unlock {"解锁并连接"} else if challenge.login {
+            ui.heading(if challenge.vault_unlock {
+                "解锁并连接"
+            } else if challenge.login {
                 "SSH 账号与认证"
             } else {
                 "SSH 键盘交互验证"
@@ -240,7 +241,11 @@ impl Dialog {
                         ui.label(&challenge.instructions);
                     }
                 });
-            ui.weak(if challenge.vault_unlock {"本地凭据库验证，主密码不会发送给服务器。"}else{"按服务器提示填写；每轮最多等待 2 分钟。"});
+            ui.weak(if challenge.vault_unlock {
+                "本地凭据库验证，主密码不会发送给服务器。"
+            } else {
+                "按服务器提示填写；每轮最多等待 2 分钟。"
+            });
             ui.add_enabled_ui(!self.view.busy, |ui| {
                 if challenge.login {
                     ui.label("用户名");
@@ -303,12 +308,23 @@ impl Dialog {
                 }
                 let ready = (!challenge.login
                     || (!self.username.trim().is_empty()
-                        && !self.username.trim().chars().any(|c| c.is_control() || c.is_whitespace())))
+                        && !self
+                            .username
+                            .trim()
+                            .chars()
+                            .any(|c| c.is_control() || c.is_whitespace())))
                     && (!challenge.password_required
                         || self.answers.first().is_some_and(|s| !s.is_empty()));
                 ui.horizontal(|ui| {
                     submit = ui
-                        .add_enabled(ready, egui::Button::new(if challenge.vault_unlock {"解锁并连接"}else{"继续验证"}))
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(if challenge.vault_unlock {
+                                "解锁并连接"
+                            } else {
+                                "继续验证"
+                            }),
+                        )
                         .clicked();
                     cancel = ui.button("取消连接").clicked();
                 });

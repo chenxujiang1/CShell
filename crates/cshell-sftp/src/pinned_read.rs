@@ -63,17 +63,32 @@ impl PinnedRead {
         path: &str,
         maximum: u64,
     ) -> Result<PinnedReadContent, PinnedReadError> {
-        self.open_size(path,maximum,false).await?;
+        self.open_size(path, maximum, false).await?;
         self.digest().await
     }
     /// Pin and inspect metadata without reading the complete source before transfer.
-    pub async fn open_size(&mut self,path:&str,maximum:u64,follow:bool)->Result<u64,PinnedReadError> {
+    pub async fn open_size(
+        &mut self,
+        path: &str,
+        maximum: u64,
+        follow: bool,
+    ) -> Result<u64, PinnedReadError> {
         let resolved;
-        let path=if follow {
-            let names=self.client.session.realpath(path).await.map_err(|_|PinnedReadError::Unavailable)?;
-            if names.files.len()!=1 {return Err(PinnedReadError::Invalid);}
-            resolved=names.files[0].filename.clone();&resolved
-        } else {path};
+        let path = if follow {
+            let names = self
+                .client
+                .session
+                .realpath(path)
+                .await
+                .map_err(|_| PinnedReadError::Unavailable)?;
+            if names.files.len() != 1 {
+                return Err(PinnedReadError::Invalid);
+            }
+            resolved = names.files[0].filename.clone();
+            &resolved
+        } else {
+            path
+        };
         if self.handle.is_some()
             || !path.starts_with('/')
             || path.ends_with('/')

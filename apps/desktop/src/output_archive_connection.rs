@@ -25,6 +25,10 @@ enum Operation {
         Arc<ExportTransferControl>,
     ),
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 enum Outcome {
     Document(OutputArchiveDocument),
     Exported,

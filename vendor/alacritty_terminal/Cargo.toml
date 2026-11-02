@@ -29,7 +29,6 @@ homepage = "https://alacritty.org"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/alacritty/alacritty"
-resolver = "2"
 
 [features]
 default = ["serde"]

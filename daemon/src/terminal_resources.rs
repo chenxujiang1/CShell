@@ -189,6 +189,11 @@ impl Drop for CloseQueue {
     }
 }
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use cshell_terminal::TerminalEngine;
@@ -235,6 +240,11 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod burst_tests {
     use super::*;
     #[test]
@@ -291,6 +301,11 @@ mod burst_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod activity_tests {
     #[test]
     fn subscriptions_restore_interactive_rate_and_last_clone_drop_restores_background_rate() {
@@ -308,6 +323,11 @@ mod activity_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod submission_error_tests {
     #[test]
     fn oversized_and_closed_submissions_are_not_retryable_backpressure() {
@@ -334,6 +354,11 @@ mod submission_error_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod priority_tests {
     use super::*;
     #[test]

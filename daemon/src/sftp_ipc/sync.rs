@@ -15,70 +15,6 @@ pub(super) struct Plans {
     readers: Arc<tokio::sync::Semaphore>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn local_scan_is_read_only_and_rejects_parent_paths_and_reserved_names() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("empty")).unwrap();
-        std::fs::write(root.path().join("keep"), b"unchanged").unwrap();
-        let inventory = local_inventory(root.path().to_str().unwrap(),&[]).unwrap();
-        assert_eq!(inventory.len(), 2);
-        assert!(inventory["empty"].directory);
-        assert_eq!(
-            std::fs::read(root.path().join("keep")).unwrap(),
-            b"unchanged"
-        );
-        assert!(local_inventory(root.path().join("../other").to_str().unwrap(),&[]).is_err());
-        let mut seen = BTreeSet::new();
-        assert!(check_name("../escape", &mut seen).is_err());
-        assert!(check_name("a/b", &mut seen).is_ok());
-        assert!(check_name("a/b", &mut seen).is_err());
-        #[cfg(windows)]
-        assert!(check_name("CON.txt", &mut seen).is_err());
-    }
-    #[tokio::test]
-    async fn unknown_source_and_noncanonical_requests_create_no_preview_or_job() {
-        let service = SftpIpcService::default();
-        let registry = SshSessionRegistry::default();
-        let session = SessionId::new();
-        let id = SessionId::new();
-        let root = tempfile::tempdir().unwrap();
-        let request = SftpRequest {
-            operation: SftpOperation::SyncScan as i32,
-            session_id: session.as_uuid().as_bytes().to_vec(),
-            transfer_id: id.as_uuid().as_bytes().to_vec(),
-            document_json: serde_json::to_vec(&SftpSyncOptions {
-                local: root.path().to_str().unwrap().into(),
-                remote: "/home".into(),
-                direction: SftpQueueDirection::Upload,
-                verification: Default::default(),
-                compare_content: true,excludes:Vec::new(),preserve_modified:false,
-            })
-            .unwrap(),
-            ..Default::default()
-        };
-        assert_ne!(
-            service.handle(request.clone(), &registry).await.status,
-            SftpStatus::Ok as i32
-        );
-        assert_ne!(
-            service
-                .handle(
-                    SftpRequest {
-                        confirmed: true,
-                        ..request
-                    },
-                    &registry
-                )
-                .await
-                .status,
-            SftpStatus::Ok as i32
-        );
-        assert!(service.sync_plans.records.lock().unwrap().is_empty());
-    }
-}
 impl Default for Plans {
     fn default() -> Self {
         Self {
@@ -185,7 +121,8 @@ async fn compare_contents(
     checked
 }
 fn options_valid(v: &SftpSyncOptions) -> bool {
-    valid_sftp_exclusions(&v.excludes) && v.local.len() <= 4096
+    valid_sftp_exclusions(&v.excludes)
+        && v.local.len() <= 4096
         && v.remote.len() <= 4096
         && !v.local.chars().any(char::is_control)
         && sftp_remote_path(&v.remote, true)
@@ -217,7 +154,7 @@ fn check_name(relative: &str, seen: &mut BTreeSet<String>) -> Result<(), String>
     }
     Ok(())
 }
-fn local_inventory(root: &str,rules:&[String]) -> Result<Inventory, String> {
+fn local_inventory(root: &str, rules: &[String]) -> Result<Inventory, String> {
     super::tree::local_directory(std::path::Path::new(root), false)?;
     let mut out = Inventory::new();
     let mut seen = BTreeSet::new();
@@ -236,7 +173,9 @@ fn local_inventory(root: &str,rules:&[String]) -> Result<Inventory, String> {
                 format!("{prefix}/{name}")
             };
             check_name(&relative, &mut seen)?;
-            if sftp_excluded(&relative,rules){continue;}
+            if sftp_excluded(&relative, rules) {
+                continue;
+            }
             let m = std::fs::symlink_metadata(entry.path()).map_err(|_| "本地文件已变化")?;
             #[cfg(windows)]
             {
@@ -277,8 +216,9 @@ async fn inventory(
     source: &Arc<SshSession>,
     options: &SftpSyncOptions,
 ) -> Result<(Inventory, Inventory), String> {
-    let local = options.local.clone();let rules=options.excludes.clone();
-    let a = tokio::task::spawn_blocking(move || local_inventory(&local,&rules))
+    let local = options.local.clone();
+    let rules = options.excludes.clone();
+    let a = tokio::task::spawn_blocking(move || local_inventory(&local, &rules))
         .await
         .map_err(|_| "本地比较线程失败")??;
     let client = source.open_sftp().await.map_err(|_| "SFTP 连接不可用")?;
@@ -319,7 +259,9 @@ async fn inventory(
                         format!("{prefix}/{}", entry.name)
                     };
                     check_name(&relative, &mut seen)?;
-                    if sftp_excluded(&relative,&options.excludes){continue;}
+                    if sftp_excluded(&relative, &options.excludes) {
+                        continue;
+                    }
                     let directory = match entry.metadata.file_type {
                         RemoteFileType::Directory => true,
                         RemoteFileType::File => false,
@@ -541,7 +483,16 @@ impl SftpIpcService {
                     total_bytes = total_bytes
                         .checked_add(metadata.size)
                         .ok_or("同步总大小溢出")?;
-                    let modified_unix_seconds=if options.preserve_modified{Some(metadata.modified.and_then(|t|u32::try_from(t).ok()).ok_or("源未提供可保留的修改时间，请关闭保留时间后重新比较")?)}else{None};
+                    let modified_unix_seconds = if options.preserve_modified {
+                        Some(
+                            metadata
+                                .modified
+                                .and_then(|t| u32::try_from(t).ok())
+                                .ok_or("源未提供可保留的修改时间，请关闭保留时间后重新比较")?,
+                        )
+                    } else {
+                        None
+                    };
                     files.push(SftpQueueDraft {
                         modified_unix_seconds,
                         direction: options.direction,
@@ -612,5 +563,77 @@ impl SftpIpcService {
             )?;
             serde_json::to_vec(&snapshot).map_err(|_| "同步状态编码失败".into())
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+mod tests {
+    use super::*;
+    #[test]
+    fn local_scan_is_read_only_and_rejects_parent_paths_and_reserved_names() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("empty")).unwrap();
+        std::fs::write(root.path().join("keep"), b"unchanged").unwrap();
+        let inventory = local_inventory(root.path().to_str().unwrap(), &[]).unwrap();
+        assert_eq!(inventory.len(), 2);
+        assert!(inventory["empty"].directory);
+        assert_eq!(
+            std::fs::read(root.path().join("keep")).unwrap(),
+            b"unchanged"
+        );
+        assert!(local_inventory(root.path().join("../other").to_str().unwrap(), &[]).is_err());
+        let mut seen = BTreeSet::new();
+        assert!(check_name("../escape", &mut seen).is_err());
+        assert!(check_name("a/b", &mut seen).is_ok());
+        assert!(check_name("a/b", &mut seen).is_err());
+        #[cfg(windows)]
+        assert!(check_name("CON.txt", &mut seen).is_err());
+    }
+    #[tokio::test]
+    async fn unknown_source_and_noncanonical_requests_create_no_preview_or_job() {
+        let service = SftpIpcService::default();
+        let registry = SshSessionRegistry::default();
+        let session = SessionId::new();
+        let id = SessionId::new();
+        let root = tempfile::tempdir().unwrap();
+        let request = SftpRequest {
+            operation: SftpOperation::SyncScan as i32,
+            session_id: session.as_uuid().as_bytes().to_vec(),
+            transfer_id: id.as_uuid().as_bytes().to_vec(),
+            document_json: serde_json::to_vec(&SftpSyncOptions {
+                local: root.path().to_str().unwrap().into(),
+                remote: "/home".into(),
+                direction: SftpQueueDirection::Upload,
+                verification: Default::default(),
+                compare_content: true,
+                excludes: Vec::new(),
+                preserve_modified: false,
+            })
+            .unwrap(),
+            ..Default::default()
+        };
+        assert_ne!(
+            service.handle(request.clone(), &registry).await.status,
+            SftpStatus::Ok as i32
+        );
+        assert_ne!(
+            service
+                .handle(
+                    SftpRequest {
+                        confirmed: true,
+                        ..request
+                    },
+                    &registry
+                )
+                .await
+                .status,
+            SftpStatus::Ok as i32
+        );
+        assert!(service.sync_plans.records.lock().unwrap().is_empty());
     }
 }

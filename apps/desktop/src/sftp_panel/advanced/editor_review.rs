@@ -1,3 +1,5 @@
+type DiffResult = (Signature, Result<Vec<TextDiffRow>, String>);
+
 use super::*;
 use cshell_domain::SftpQueueItemId;
 type Signature = (SessionId, u64, [u8; 32], [u8; 32], u8);
@@ -11,7 +13,7 @@ pub(super) struct ReviewPanel {
     backup: Option<SftpQueueItemId>,
     seen: Option<Signature>,
     pub(super) pending: Option<(SessionId, u64, SftpVerifiedContent)>,
-    worker: Option<std::sync::mpsc::Receiver<(Signature, Result<Vec<TextDiffRow>, String>)>>,
+    worker: Option<std::sync::mpsc::Receiver<DiffResult>>,
     cache: Option<(Signature, Vec<TextDiffRow>)>,
     error: Option<String>,
 }
@@ -202,14 +204,13 @@ impl AdvancedSftp {
                             .into(),
                     );
                 }
-                if ui.button("复制备份路径").clicked() {
-                    if let Some(backup) = value
+                if ui.button("复制备份路径").clicked()
+                    && let Some(backup) = value
                         .backups
                         .iter()
                         .find(|b| Some(b.item) == self.review.backup)
-                    {
-                        ui.ctx().copy_text(backup.path.clone());
-                    }
+                {
+                    ui.ctx().copy_text(backup.path.clone());
                 }
             }
         }

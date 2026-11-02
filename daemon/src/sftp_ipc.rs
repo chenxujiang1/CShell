@@ -18,18 +18,18 @@ mod browse;
 mod migration;
 mod namespace;
 mod queue;
+mod sync;
+mod terminal_upload;
+mod tree;
 mod verified;
 mod workspace;
 mod workspace_store;
-mod terminal_upload;
-mod tree;
-mod sync;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SftpIpcService {
     uploads: terminal_upload::Uploads,
     trees: tree::Trees,
-    sync_plans:sync::Plans,
+    sync_plans: sync::Plans,
     jobs: Arc<Mutex<BTreeMap<Vec<u8>, TransferJob>>>,
     queues: queue::Queues,
     browsers: browse::Browsers,
@@ -47,9 +47,16 @@ struct TransferJob {
 }
 
 impl SftpIpcService {
-    pub(crate) fn stop_session_transfers(&self,session:SessionId) {
-        for job in self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values() {
-            if job.session_id==session {job.control.cancel();}
+    pub(crate) fn stop_session_transfers(&self, session: SessionId) {
+        for job in self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+        {
+            if job.session_id == session {
+                job.control.cancel();
+            }
         }
     }
 
@@ -77,11 +84,24 @@ impl SftpIpcService {
             }
         };
         match operation {
-            SftpOperation::SyncScan|SftpOperation::SyncApply=>self.sync_request(request,session_id,operation,sessions).await,
-            SftpOperation::TreeStart|SftpOperation::TreeGet|SftpOperation::TreePause|SftpOperation::TreeContinue|SftpOperation::TreeCancel|SftpOperation::TreeRetry=>self.tree(request,session_id,operation,sessions).await,
-            SftpOperation::TerminalUploadStart | SftpOperation::TerminalUploadGet
-            | SftpOperation::TerminalUploadPause | SftpOperation::TerminalUploadContinue
-            | SftpOperation::TerminalUploadCancel => self.terminal_upload(request, session_id, operation, sessions).await,
+            SftpOperation::SyncScan | SftpOperation::SyncApply => {
+                self.sync_request(request, session_id, operation, sessions)
+                    .await
+            }
+            SftpOperation::TreeStart
+            | SftpOperation::TreeGet
+            | SftpOperation::TreePause
+            | SftpOperation::TreeContinue
+            | SftpOperation::TreeCancel
+            | SftpOperation::TreeRetry => self.tree(request, session_id, operation, sessions).await,
+            SftpOperation::TerminalUploadStart
+            | SftpOperation::TerminalUploadGet
+            | SftpOperation::TerminalUploadPause
+            | SftpOperation::TerminalUploadContinue
+            | SftpOperation::TerminalUploadCancel => {
+                self.terminal_upload(request, session_id, operation, sessions)
+                    .await
+            }
             SftpOperation::RemoteBrowse
             | SftpOperation::LocalBrowse
             | SftpOperation::BrowseNext
@@ -116,7 +136,9 @@ impl SftpIpcService {
             SftpOperation::BrowseManaged => {
                 self.browse_managed(request, session_id, sessions).await
             }
-            SftpOperation::EditReview|SftpOperation::EditRebase|SftpOperation::FileInspect
+            SftpOperation::EditReview
+            | SftpOperation::EditRebase
+            | SftpOperation::FileInspect
             | SftpOperation::FileApply
             | SftpOperation::FileJobGet
             | SftpOperation::FileJobCancel
@@ -145,7 +167,12 @@ impl SftpIpcService {
             | SftpOperation::PauseTransfer
             | SftpOperation::ResumeTransfer => self.transfer_status(request, operation, session_id),
             SftpOperation::CurrentTransfer => self.current_transfer(session_id),
-            SftpOperation::ConnectProfile | SftpOperation::Disconnect | SftpOperation::ConnectionStatus => SftpResponse::with_status(SftpStatus::Unsupported,"SFTP lifecycle requires the session dispatcher"),
+            SftpOperation::ConnectProfile
+            | SftpOperation::Disconnect
+            | SftpOperation::ConnectionStatus => SftpResponse::with_status(
+                SftpStatus::Unsupported,
+                "SFTP lifecycle requires the session dispatcher",
+            ),
         }
     }
 

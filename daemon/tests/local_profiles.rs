@@ -85,7 +85,8 @@ async fn create(
 ) -> Result<cshell_ipc::SessionCreateResponse, Box<dyn Error>> {
     let response = exchange(
         service,
-        envelope::Payload::SessionCreateRequest(SessionCreateRequest {connection_diagnostics:false,
+        envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            connection_diagnostics: false,
             source_ssh_session_id: None,
             local_launch: None,
             profile_id: Some(id.as_uuid().as_bytes().to_vec()),
@@ -452,7 +453,8 @@ async fn local_configuration_and_discovery_require_capability() -> Result<(), Bo
         &Envelope {
             request_id: 3,
             payload: Some(envelope::Payload::SessionCreateRequest(
-                SessionCreateRequest {connection_diagnostics:false,
+                SessionCreateRequest {
+                    connection_diagnostics: false,
                     source_ssh_session_id: None,
                     local_launch: None,
                     profile_id: Some(record.id.as_uuid().as_bytes().to_vec()),
@@ -654,7 +656,8 @@ async fn local_launch_isolation_probe() -> Result<(), Box<dyn Error>> {
     assert!(
         matches!(response.payload, Some(envelope::Payload::ProfileResponse(response)) if response.status == ProfileStatus::Unsupported as i32)
     );
-    let request = SessionCreateRequest {connection_diagnostics:false,
+    let request = SessionCreateRequest {
+        connection_diagnostics: false,
         source_ssh_session_id: None,
         rows: 24,
         cols: 80,

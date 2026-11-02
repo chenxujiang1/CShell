@@ -1,8 +1,8 @@
-use cshell_ssh::connection_progress as progress;
-use cshell_domain::ConnectionStage as Stage;
 use crate::session_ipc::{SshLaunchFailure, read_ssh_auth_file, ssh_launch_failure};
+use cshell_domain::ConnectionStage as Stage;
 use cshell_domain::{SshAgentBackend, SshAuthMethod, SshConnectionRecord, SshRoute};
 use cshell_ipc::SessionFailureCode;
+use cshell_ssh::connection_progress as progress;
 use cshell_ssh::{
     AgentBackend, KnownHostsVerifier, ProxyProtocol, ScannedHostKey, SshAuthentication,
     SshCertificate, SshConnection, SshError, SshPrivateKey, SshProvider, SshTransport,
@@ -80,9 +80,7 @@ impl SshConnectionPlan {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&peer.route) else {
             return None;
         };
-        let Some(parts) = value.as_array().filter(|v| v.len() == 3) else {
-            return None;
-        };
+        let parts = value.as_array().filter(|v| v.len() == 3)?;
         let fingerprints: Option<Vec<&str>> = match parts[0].as_u64() {
             Some(1) if parts[2].is_null() => Some(Vec::new()),
             Some(1) => parts[2]
@@ -112,10 +110,22 @@ impl SshConnectionPlan {
     }
     /// Freeze the account identities returned by this already authenticated transport.
     /// Host key verification and captured identity comparisons remain strict.
-    pub(crate) fn authenticated_plan(&self,client:&SshConnection,jump:Option<&JumpConnection>)->Self {
-        let mut resolved=self.clone();
-        if let Some(username)=client.authenticated_username(){resolved.target.username=username.to_owned();}
-        if let Some(jump)=jump {for (record,client) in resolved.jumps.iter_mut().zip(&jump.0.clients){if let Some(username)=client.authenticated_username(){record.username=username.to_owned();}}}
+    pub(crate) fn authenticated_plan(
+        &self,
+        client: &SshConnection,
+        jump: Option<&JumpConnection>,
+    ) -> Self {
+        let mut resolved = self.clone();
+        if let Some(username) = client.authenticated_username() {
+            resolved.target.username = username.to_owned();
+        }
+        if let Some(jump) = jump {
+            for (record, client) in resolved.jumps.iter_mut().zip(&jump.0.clients) {
+                if let Some(username) = client.authenticated_username() {
+                    record.username = username.to_owned();
+                }
+            }
+        }
         resolved
     }
     pub(crate) fn verified_peer(
@@ -124,7 +134,7 @@ impl SshConnectionPlan {
         jump: Option<&JumpConnection>,
     ) -> Result<cshell_domain::ClipboardTrust, serde_json::Error> {
         let fingerprints = jump.map(JumpConnection::fingerprints).unwrap_or_default();
-        let resolved=self.authenticated_plan(client,jump);
+        let resolved = self.authenticated_plan(client, jump);
         let host = cshell_domain::ClipboardHost::new(&self.target.host, self.target.port)
             .ok_or_else(|| {
                 <serde_json::Error as serde::ser::Error>::custom("invalid verified peer host")
@@ -309,7 +319,7 @@ async fn route_stream(
         clients: Vec::new(),
     };
     for (index, jump) in plan.jumps.iter().enumerate() {
-        progress::peer((index+1) as u8,&jump.host,jump.port);
+        progress::peer((index + 1) as u8, &jump.host, jump.port);
         progress::stage(Stage::Credentials);
         let connected = async {
             let mut verifier = verifier(jump, path).await?;
@@ -334,8 +344,24 @@ async fn route_stream(
                 leaf_stream(jump).await?
             };
             tokio::time::timeout(
-                std::time::Duration::from_secs(if jump.options.keyboard_interactive || !jump.options.authentication_order.is_empty() || jump.username.is_empty() || jump.auth_method==SshAuthMethod::Password {300} else {30}),
-                provider.connect_configured(stream, jump.username.clone(), auth, verifier, jump.options.clone()),
+                std::time::Duration::from_secs(
+                    if jump.options.keyboard_interactive
+                        || !jump.options.authentication_order.is_empty()
+                        || jump.username.is_empty()
+                        || jump.auth_method == SshAuthMethod::Password
+                    {
+                        300
+                    } else {
+                        30
+                    },
+                ),
+                provider.connect_configured(
+                    stream,
+                    jump.username.clone(),
+                    auth,
+                    verifier,
+                    jump.options.clone(),
+                ),
             )
             .await
             .map_err(|_| {
@@ -368,7 +394,7 @@ async fn route_stream(
             "missing authenticated jump",
         )
     })?;
-    progress::peer(0,&plan.target.host,plan.target.port);
+    progress::peer(0, &plan.target.host, plan.target.port);
     let stream = match jump_stream(last, &plan.target).await {
         Ok(stream) => stream,
         Err(mut failure) => {
@@ -433,7 +459,7 @@ async fn connect_target(
     vault: &Arc<crate::vault_control::VaultController>,
     peer: Option<&cshell_domain::ClipboardTrust>,
 ) -> Result<RoutedSshConnection, SshLaunchFailure> {
-    progress::peer(0,&plan.target.host,plan.target.port);
+    progress::peer(0, &plan.target.host, plan.target.port);
     progress::stage(Stage::Credentials);
     let provider = preflight(plan, Some(credential_template))?;
     let _trust = crate::host_ca_store::coordination().read_owned().await;
@@ -458,9 +484,15 @@ async fn connect_target(
         })?;
     let (stream, jump) =
         route_stream(plan, provider.as_ref(), path, vault, pins.as_deref()).await?;
-    progress::peer(0,&plan.target.host,plan.target.port);
+    progress::peer(0, &plan.target.host, plan.target.port);
     let client = provider
-        .connect_configured(stream, plan.target.username.clone(), auth, verifier, plan.target.options.clone())
+        .connect_configured(
+            stream,
+            plan.target.username.clone(),
+            auth,
+            verifier,
+            plan.target.options.clone(),
+        )
         .await
         .map_err(ssh_failure);
     let client = match client {
@@ -515,12 +547,19 @@ pub(crate) async fn load_authentication(
     vault: &Arc<crate::vault_control::VaultController>,
 ) -> Result<SshAuthentication, String> {
     vault.ensure_owned().map_err(|error| error.to_string())?;
-    if target.auth_method==SshAuthMethod::Password || !target.options.authentication_order.is_empty() || target.username.is_empty() {
-        return crate::keyboard_auth::ordered_authentication(target,vault).await;
+    if target.auth_method == SshAuthMethod::Password
+        || !target.options.authentication_order.is_empty()
+        || target.username.is_empty()
+    {
+        return crate::keyboard_auth::ordered_authentication(target, vault).await;
     }
-    load_single_authentication(target,vault,target.auth_method).await
+    load_single_authentication(target, vault, target.auth_method).await
 }
-pub(crate) async fn load_single_authentication(target:&SshConnectionRecord,vault:&Arc<crate::vault_control::VaultController>,method:SshAuthMethod)->Result<SshAuthentication,String> {
+pub(crate) async fn load_single_authentication(
+    target: &SshConnectionRecord,
+    vault: &Arc<crate::vault_control::VaultController>,
+    method: SshAuthMethod,
+) -> Result<SshAuthentication, String> {
     if method == SshAuthMethod::Agent {
         vault.ensure_owned().map_err(|error| error.to_string())?;
         return Ok(SshAuthentication::Agent {
@@ -553,8 +592,17 @@ pub(crate) async fn load_single_authentication(target:&SshConnectionRecord,vault
             let secret = tokio::task::spawn_blocking(move || {
                 if portable {
                     controller
-                        .read(&credential_target, cshell_vault::VaultCredentialKind::Password)
-                        .map_err(|e| match e {cshell_vault::VaultError::Missing=>KeychainError::Missing,cshell_vault::VaultError::BindingMismatch=>KeychainError::BindingMismatch,_=>KeychainError::Unavailable})
+                        .read(
+                            &credential_target,
+                            cshell_vault::VaultCredentialKind::Password,
+                        )
+                        .map_err(|e| match e {
+                            cshell_vault::VaultError::Missing => KeychainError::Missing,
+                            cshell_vault::VaultError::BindingMismatch => {
+                                KeychainError::BindingMismatch
+                            }
+                            _ => KeychainError::Unavailable,
+                        })
                 } else {
                     SystemProfilePasswordVault::new().read(&reference, &binding)
                 }
@@ -562,10 +610,19 @@ pub(crate) async fn load_single_authentication(target:&SshConnectionRecord,vault
             .await
             .map_err(|_| "system keychain task failed")?;
             let password = match secret {
-                Ok(secret) => Some(Zeroizing::new(std::str::from_utf8(secret.expose()).map_err(|_| "stored password is not valid UTF-8")?.to_owned())),
+                Ok(secret) => Some(Zeroizing::new(
+                    std::str::from_utf8(secret.expose())
+                        .map_err(|_| "stored password is not valid UTF-8")?
+                        .to_owned(),
+                )),
                 Err(KeychainError::Missing) if target.options.keyboard_interactive => None,
-                Err(KeychainError::BindingMismatch) => return Err("SSH target changed; save its password again".into()),
-                Err(_) => return Err("password unavailable in credential storage; save it from the Profile editor".into()),
+                Err(KeychainError::BindingMismatch) => {
+                    return Err("SSH target changed; save its password again".into());
+                }
+                Err(_) => return Err(
+                    "password unavailable in credential storage; save it from the Profile editor"
+                        .into(),
+                ),
             };
             if target.options.keyboard_interactive {
                 crate::keyboard_auth::authentication(vault.clone(), target, password)
@@ -600,7 +657,8 @@ pub(crate) async fn load_single_authentication(target:&SshConnectionRecord,vault
                 Err(error @ SshError::RsaKey(_)) => {
                     return Err(format!("private key unavailable: {error}"));
                 }
-                Err(error) if matches!(&error, SshError::LegacyPem(reason) if *reason != cshell_ssh::LegacyPemError::PassphraseRequired) => {
+                Err(error) if matches!(&error, SshError::LegacyPem(reason) if *reason != cshell_ssh::LegacyPemError::PassphraseRequired) =>
+                {
                     return Err(format!("private key unavailable: {error}"));
                 }
                 Err(error) if matches!(&error,SshError::Ppk(reason)if *reason!=cshell_ssh::PpkError::PassphraseRequired) =>

@@ -22,19 +22,44 @@ pub struct VaultPanel {
     protection_target: Option<bool>,
 }
 impl Default for VaultPanel {
-    fn default()->Self {Self{open:false,response:None,error:None,password:Zeroizing::new(String::new()),confirmation:Zeroizing::new(String::new()),passphrase:Zeroizing::new(String::new()),page:0,keys:Default::default(),busy:false,notice:String::new(),creation_system:true,rebuilding:false,rebuild_confirmed:false,protection_target:None}}
+    fn default() -> Self {
+        Self {
+            open: false,
+            response: None,
+            error: None,
+            password: Zeroizing::new(String::new()),
+            confirmation: Zeroizing::new(String::new()),
+            passphrase: Zeroizing::new(String::new()),
+            page: 0,
+            keys: Default::default(),
+            busy: false,
+            notice: String::new(),
+            creation_system: true,
+            rebuilding: false,
+            rebuild_confirmed: false,
+            protection_target: None,
+        }
+    }
 }
 impl VaultPanel {
     pub fn owns_native_key_picker(&self) -> bool {
         self.open && self.keys.picker_open()
     }
     pub fn set_operation_state(&mut self, busy: bool, notice: String) {
-        if self.busy && !busy && !notice.is_empty() && self.error.is_none() { self.keys.finished(); }
-        if !busy && self.response.as_ref().is_some_and(|r| r.unlocked) { self.rebuilding = false; self.rebuild_confirmed = false; }
+        if self.busy && !busy && !notice.is_empty() && self.error.is_none() {
+            self.keys.finished();
+        }
+        if !busy && self.response.as_ref().is_some_and(|r| r.unlocked) {
+            self.rebuilding = false;
+            self.rebuild_confirmed = false;
+        }
         self.busy = busy;
         self.notice = notice;
     }
-    pub fn request_failed(&mut self) { self.busy = false; self.error = Some("请求未提交，请稍后重试".into()); }
+    pub fn request_failed(&mut self) {
+        self.busy = false;
+        self.error = Some("请求未提交，请稍后重试".into());
+    }
     pub fn clear(&mut self) {
         self.password.zeroize();
         self.confirmation.zeroize();
@@ -53,7 +78,7 @@ impl VaultPanel {
         let mut open = self.open;
         let mut outgoing = None;
         let response = self.response.clone();
-        cshell_ui::form::dialog(&context, "凭据管理").open(&mut open).default_width(800.0).show(context, |ui| {
+        cshell_ui::form::dialog(context, "凭据管理").open(&mut open).default_width(800.0).show(context, |ui| {
             ui.horizontal(|ui| {
                 cshell_ui::form::tab(ui, &mut self.page, 0, "密钥对");
                 cshell_ui::form::tab(ui, &mut self.page, 1, "连接凭据设置");
@@ -111,7 +136,13 @@ impl VaultPanel {
             self.rebuilding = false;
         }
         self.open = open;
-        if outgoing.as_ref().is_some_and(|r| r.operation != Op::Status as i32) { self.busy = true; self.notice.clear(); }
+        if outgoing
+            .as_ref()
+            .is_some_and(|r| r.operation != Op::Status as i32)
+        {
+            self.busy = true;
+            self.notice.clear();
+        }
         outgoing
     }
 }
@@ -146,7 +177,10 @@ mod tests {
             .nodes
             .iter()
             .find(|(_, node)| {
-                matches!(node.role(), egui::accesskit::Role::Button | egui::accesskit::Role::CheckBox) && node.label() == Some(label)
+                matches!(
+                    node.role(),
+                    egui::accesskit::Role::Button | egui::accesskit::Role::CheckBox
+                ) && node.label() == Some(label)
             })
             .unwrap()
             .1
@@ -174,79 +208,226 @@ mod tests {
     }
     #[test]
     fn unlocked_credentials_remain_editable_for_locked_suspended_and_unavailable_desktops() {
-        for state in [cshell_ipc::VaultSessionState::Locked, cshell_ipc::VaultSessionState::Suspended,
-            cshell_ipc::VaultSessionState::Unavailable] {
+        for state in [
+            cshell_ipc::VaultSessionState::Locked,
+            cshell_ipc::VaultSessionState::Suspended,
+            cshell_ipc::VaultSessionState::Unavailable,
+        ] {
             let context = egui::Context::default();
             context.enable_accesskit();
             let id = ProfileId::new();
             let mut panel = VaultPanel {
-                open: true, page: 1,
+                open: true,
+                page: 1,
                 response: Some(VaultResponse {
-                    exists: true, unlocked: true, session_state: state as i32,
+                    exists: true,
+                    unlocked: true,
+                    session_state: state as i32,
                     status: cshell_ipc::VaultControlStatus::Ok as i32,
-                    profile_id: id.as_uuid().as_bytes().to_vec(), ..Default::default()
-                }), ..Default::default()
+                    profile_id: id.as_uuid().as_bytes().to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
             };
             draw(&mut panel, &context, Some((id, 1)), vec![]);
             let (tree, _) = draw(&mut panel, &context, Some((id, 1)), vec![]);
-            let (_, request) = draw(&mut panel, &context, Some((id, 1)), click(&tree, "使用加密 Vault"));
+            let (_, request) = draw(
+                &mut panel,
+                &context,
+                Some((id, 1)),
+                click(&tree, "使用加密 Vault"),
+            );
             assert_eq!(request.unwrap().operation, Op::SetMode as i32);
             panel.busy = false;
             let (tree, _) = draw(&mut panel, &context, Some((id, 1)), vec![]);
-            let (_, request) = draw(&mut panel, &context, Some((id, 1)), click(&tree, "立即锁定"));
+            let (_, request) = draw(
+                &mut panel,
+                &context,
+                Some((id, 1)),
+                click(&tree, "立即锁定"),
+            );
             assert_eq!(request.unwrap().operation, Op::Lock as i32);
         }
     }
 
     #[test]
     fn keys_page_unlocks_in_place_and_immediately_shows_key_actions() {
-        let context = egui::Context::default(); context.enable_accesskit();
-        let mut panel = VaultPanel { open: true, response: Some(VaultResponse { exists: true, revision: 9, lock_generation: 17, ..Default::default() }), password: Zeroizing::new("test-password".into()), ..Default::default() };
-        draw(&mut panel,&context,None,vec![]); let (tree,_) = draw(&mut panel,&context,None,vec![]);
-        let (_,request) = draw(&mut panel,&context,None,click(&tree,"解锁"));
-        let request=request.unwrap(); assert_eq!(request.operation,Op::Unlock as i32); assert_eq!(request.secret,b"test-password"); assert_eq!(panel.page,0); assert!(panel.password.is_empty());
-        panel.response.as_mut().unwrap().unlocked=true; panel.set_operation_state(false,String::new());
-        let (tree,_) = draw(&mut panel,&context,None,vec![]);
-        assert!(tree.nodes.iter().any(|(_,n)|n.label()==Some("生成新密钥对…")));
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut panel = VaultPanel {
+            open: true,
+            response: Some(VaultResponse {
+                exists: true,
+                revision: 9,
+                lock_generation: 17,
+                ..Default::default()
+            }),
+            password: Zeroizing::new("test-password".into()),
+            ..Default::default()
+        };
+        draw(&mut panel, &context, None, vec![]);
+        let (tree, _) = draw(&mut panel, &context, None, vec![]);
+        let (_, request) = draw(&mut panel, &context, None, click(&tree, "解锁"));
+        let request = request.unwrap();
+        assert_eq!(request.operation, Op::Unlock as i32);
+        assert_eq!(request.secret, b"test-password");
+        assert_eq!(panel.page, 0);
+        assert!(panel.password.is_empty());
+        panel.response.as_mut().unwrap().unlocked = true;
+        panel.set_operation_state(false, String::new());
+        let (tree, _) = draw(&mut panel, &context, None, vec![]);
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, n)| n.label() == Some("生成新密钥对…"))
+        );
     }
     #[test]
     fn keys_page_creates_or_unlocks_both_protection_modes_without_switching_tabs() {
-        for (exists,system,label,operation) in [(false,false,"创建并解锁凭据库",Op::Create),(false,true,"创建系统钥匙串保护的凭据库",Op::CreateSystem),(true,true,"通过系统钥匙串解锁",Op::UnlockSystem)] {
-            let context=egui::Context::default();context.enable_accesskit();
-            let mut panel=VaultPanel { open:true, creation_system:system, response:Some(VaultResponse{exists,system,..Default::default()}), password:Zeroizing::new("test-password".into()),confirmation:Zeroizing::new("test-password".into()),..Default::default() };
-            draw(&mut panel,&context,None,vec![]);let (tree,_)=draw(&mut panel,&context,None,vec![]);
-            let (_,request)=draw(&mut panel,&context,None,click(&tree,label));let request=request.unwrap();assert_eq!(request.operation,operation as i32);assert_eq!(panel.page,0);
-            if system {assert!(request.secret.is_empty());} else {assert_eq!(request.secret,b"test-password");}
+        for (exists, system, label, operation) in [
+            (false, false, "创建并解锁凭据库", Op::Create),
+            (false, true, "创建系统钥匙串保护的凭据库", Op::CreateSystem),
+            (true, true, "通过系统钥匙串解锁", Op::UnlockSystem),
+        ] {
+            let context = egui::Context::default();
+            context.enable_accesskit();
+            let mut panel = VaultPanel {
+                open: true,
+                creation_system: system,
+                response: Some(VaultResponse {
+                    exists,
+                    system,
+                    ..Default::default()
+                }),
+                password: Zeroizing::new("test-password".into()),
+                confirmation: Zeroizing::new("test-password".into()),
+                ..Default::default()
+            };
+            draw(&mut panel, &context, None, vec![]);
+            let (tree, _) = draw(&mut panel, &context, None, vec![]);
+            let (_, request) = draw(&mut panel, &context, None, click(&tree, label));
+            let request = request.unwrap();
+            assert_eq!(request.operation, operation as i32);
+            assert_eq!(panel.page, 0);
+            if system {
+                assert!(request.secret.is_empty());
+            } else {
+                assert_eq!(request.secret, b"test-password");
+            }
         }
     }
     #[test]
     fn rebuild_requires_explicit_acknowledgement_and_sends_global_fenced_request() {
-        let context=egui::Context::default();context.enable_accesskit();
-        let mut panel=VaultPanel { open:true,rebuilding:true,creation_system:false,response:Some(VaultResponse{exists:true,system:true,revision:9,lock_generation:17,..Default::default()}),password:Zeroizing::new("new-test-password".into()),confirmation:Zeroizing::new("new-test-password".into()),..Default::default() };
-        let selected=Some((ProfileId::new(),55));draw(&mut panel,&context,selected,vec![]);let(tree,_)=draw(&mut panel,&context,selected,vec![]);
-        assert!(draw(&mut panel,&context,selected,click(&tree,"保留旧库并重建")).1.is_none());
-        let(tree,_)=draw(&mut panel,&context,selected,vec![]);
-        draw(&mut panel,&context,selected,click(&tree,"我理解新库为空，需要重新添加凭据，旧库不会自动恢复"));
-        let(tree,_)=draw(&mut panel,&context,selected,vec![]);
-        let request=draw(&mut panel,&context,selected,click(&tree,"保留旧库并重建")).1.unwrap();
-        assert_eq!(request.operation,Op::RebuildPassword as i32);assert!(request.confirm_rebuild);assert!(request.profile_id.is_empty());assert_eq!(request.expected_profile_revision,0);
-        assert_eq!(request.expected_vault_revision,9);assert_eq!(request.expected_lock_generation,17);assert_eq!(request.secret,b"new-test-password");assert!(panel.password.is_empty() && panel.confirmation.is_empty());
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut panel = VaultPanel {
+            open: true,
+            rebuilding: true,
+            creation_system: false,
+            response: Some(VaultResponse {
+                exists: true,
+                system: true,
+                revision: 9,
+                lock_generation: 17,
+                ..Default::default()
+            }),
+            password: Zeroizing::new("new-test-password".into()),
+            confirmation: Zeroizing::new("new-test-password".into()),
+            ..Default::default()
+        };
+        let selected = Some((ProfileId::new(), 55));
+        draw(&mut panel, &context, selected, vec![]);
+        let (tree, _) = draw(&mut panel, &context, selected, vec![]);
+        assert!(
+            draw(
+                &mut panel,
+                &context,
+                selected,
+                click(&tree, "保留旧库并重建")
+            )
+            .1
+            .is_none()
+        );
+        let (tree, _) = draw(&mut panel, &context, selected, vec![]);
+        draw(
+            &mut panel,
+            &context,
+            selected,
+            click(&tree, "我理解新库为空，需要重新添加凭据，旧库不会自动恢复"),
+        );
+        let (tree, _) = draw(&mut panel, &context, selected, vec![]);
+        let request = draw(
+            &mut panel,
+            &context,
+            selected,
+            click(&tree, "保留旧库并重建"),
+        )
+        .1
+        .unwrap();
+        assert_eq!(request.operation, Op::RebuildPassword as i32);
+        assert!(request.confirm_rebuild);
+        assert!(request.profile_id.is_empty());
+        assert_eq!(request.expected_profile_revision, 0);
+        assert_eq!(request.expected_vault_revision, 9);
+        assert_eq!(request.expected_lock_generation, 17);
+        assert_eq!(request.secret, b"new-test-password");
+        assert!(panel.password.is_empty() && panel.confirmation.is_empty());
     }
     #[test]
     fn cancelling_rebuild_clears_confirmation_and_secrets_without_a_request() {
-        let context=egui::Context::default();context.enable_accesskit();
-        let mut panel=VaultPanel{open:true,rebuilding:true,rebuild_confirmed:true,response:Some(VaultResponse{exists:true,..Default::default()}),password:Zeroizing::new("test-secret".into()),..Default::default()};
-        draw(&mut panel,&context,None,vec![]);let(tree,_)=draw(&mut panel,&context,None,vec![]);
-        assert!(draw(&mut panel,&context,None,click(&tree,"取消重建")).1.is_none());assert!(!panel.rebuilding && !panel.rebuild_confirmed && panel.password.is_empty());
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut panel = VaultPanel {
+            open: true,
+            rebuilding: true,
+            rebuild_confirmed: true,
+            response: Some(VaultResponse {
+                exists: true,
+                ..Default::default()
+            }),
+            password: Zeroizing::new("test-secret".into()),
+            ..Default::default()
+        };
+        draw(&mut panel, &context, None, vec![]);
+        let (tree, _) = draw(&mut panel, &context, None, vec![]);
+        assert!(
+            draw(&mut panel, &context, None, click(&tree, "取消重建"))
+                .1
+                .is_none()
+        );
+        assert!(!panel.rebuilding && !panel.rebuild_confirmed && panel.password.is_empty());
     }
     #[test]
     fn inline_create_unlock_and_rebuild_fit_small_workbench_windows() {
-        for size in [egui::vec2(900.0,600.0),egui::vec2(720.0,480.0)] {
-            for (exists,system,rebuilding) in [(false,false,false),(false,true,false),(true,false,false),(true,true,false),(true,false,true),(true,true,true)] {
-                let context=crate::ui_layout_gate::context();let mut panel=VaultPanel{open:true,creation_system:system,rebuilding,response:Some(VaultResponse{exists,system,..Default::default()}),..Default::default()};
-                let mut draw=|ctx:&egui::Context|{let _=panel.draw(ctx,None);};
-                for _ in 0..2 {crate::ui_layout_gate::frame(&context,size,&mut draw);}
-                let tree=crate::ui_layout_gate::frame(&context,size,&mut draw);crate::ui_layout_gate::check_window(&context,size,"凭据管理",&tree);
+        for size in [egui::vec2(900.0, 600.0), egui::vec2(720.0, 480.0)] {
+            for (exists, system, rebuilding) in [
+                (false, false, false),
+                (false, true, false),
+                (true, false, false),
+                (true, true, false),
+                (true, false, true),
+                (true, true, true),
+            ] {
+                let context = crate::ui_layout_gate::context();
+                let mut panel = VaultPanel {
+                    open: true,
+                    creation_system: system,
+                    rebuilding,
+                    response: Some(VaultResponse {
+                        exists,
+                        system,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut draw = |ctx: &egui::Context| {
+                    let _ = panel.draw(ctx, None);
+                };
+                for _ in 0..2 {
+                    crate::ui_layout_gate::frame(&context, size, &mut draw);
+                }
+                let tree = crate::ui_layout_gate::frame(&context, size, &mut draw);
+                crate::ui_layout_gate::check_window(&context, size, "凭据管理", &tree);
             }
         }
     }

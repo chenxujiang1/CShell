@@ -22,6 +22,10 @@ pub(crate) struct QuickCommandView {
     pub(crate) busy: bool,
     pub(crate) status: String,
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 enum Operation {
     Reload,
     Change(QuickCommandChange),
@@ -260,8 +264,10 @@ async fn send(
 mod tests {
     use super::*;
     use crate::daemon_connection::ResolvedDesktopEndpoint;
+    #[cfg(windows)]
+    use cshell_domain::ConnectionId;
     use cshell_domain::{
-        ConnectionId, QuickCommandAction, QuickCommandId, QuickCommandRecord, QuickCommandTarget,
+        QuickCommandAction, QuickCommandId, QuickCommandRecord, QuickCommandTarget,
     };
     use cshell_ipc::{DiscoveryRecord, HandshakePolicy, RuntimePaths, server_handshake};
     use std::{

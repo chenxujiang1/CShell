@@ -109,8 +109,8 @@ pub enum SftpCleanupLocation {
 #[derive(Clone, PartialEq, Message)]
 #[prost(skip_debug)]
 pub struct SftpRequest {
-    #[prost(bool,tag="10")]
-    pub connection_diagnostics:bool,
+    #[prost(bool, tag = "10")]
+    pub connection_diagnostics: bool,
     #[prost(enumeration = "SftpOperation", tag = "1")]
     pub operation: i32,
     /// Daemon SSH or dedicated SFTP session; local terminal sessions are not accepted.
@@ -159,7 +159,14 @@ pub struct SftpDirectoryEntry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
 pub enum SftpTransferPhase {
-    Unknown=0, Preparing=1, Transferring=2, Verifying=3, Publishing=4, CheckingPublished=5, Cleaning=6, ServerChecksum=7,
+    Unknown = 0,
+    Preparing = 1,
+    Transferring = 2,
+    Verifying = 3,
+    Publishing = 4,
+    CheckingPublished = 5,
+    Cleaning = 6,
+    ServerChecksum = 7,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -183,12 +190,12 @@ pub struct SftpTransfer {
     pub cleanup_location: i32,
     #[prost(bool, tag = "9")]
     pub paused: bool,
-    #[prost(enumeration="SftpTransferPhase",tag="10")]
-    pub phase:i32,
-    #[prost(uint64,tag="11")]
-    pub phase_bytes:u64,
-    #[prost(uint64,optional,tag="12")]
-    pub phase_total:Option<u64>,
+    #[prost(enumeration = "SftpTransferPhase", tag = "10")]
+    pub phase: i32,
+    #[prost(uint64, tag = "11")]
+    pub phase_bytes: u64,
+    #[prost(uint64, optional, tag = "12")]
+    pub phase_total: Option<u64>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -279,6 +286,11 @@ impl SftpResponse {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use crate::{Envelope, envelope};

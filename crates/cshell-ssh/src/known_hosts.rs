@@ -209,7 +209,9 @@ impl KnownHostsVerifier {
         !self.entries.is_empty()
     }
     pub fn has_authority_entries(&self) -> bool {
-        self.entries.iter().any(|entry| entry.marker == Some(Marker::CertAuthority))
+        self.entries
+            .iter()
+            .any(|entry| entry.marker == Some(Marker::CertAuthority))
     }
     /// Add a peer pin without replacing known_hosts, CA or revocation checks.
     #[must_use]

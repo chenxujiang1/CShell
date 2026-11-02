@@ -142,7 +142,10 @@ async fn query(request: &Request) -> Result<TerminalToolsReply, &'static str> {
         ))
     };
     let expect = match Op::try_from(request.operation).map_err(|_| "invalid terminal operation")? {
-        Op::ShellHistory => TerminalToolsExpectation::Shell {session:session.ok_or("missing session scope")?,id:request.cursor},
+        Op::ShellHistory => TerminalToolsExpectation::Shell {
+            session: session.ok_or("missing session scope")?,
+            id: request.cursor,
+        },
         Op::Get => TerminalToolsExpectation::View { after: 0 },
         Op::Poll => TerminalToolsExpectation::View {
             after: request.cursor,
@@ -321,13 +324,11 @@ pub(crate) async fn run(args: &[String]) -> Result<(), &'static str> {
         [op, path] if op == "themes-export" => {
             let mut request = cshell_ipc::ProfileRequest::default();
             request.operation = cshell_ipc::ProfileOperation::List as i32;
-            let listed = theme(request)
-            .await?;
+            let listed = theme(request).await?;
             let mut request = cshell_ipc::ProfileRequest::default();
             request.operation = cshell_ipc::ProfileOperation::ExportThemes as i32;
             request.expected_revision = listed.revision;
-            let response = theme(request)
-            .await?;
+            let response = theme(request).await?;
             let document =
                 ThemeDocument::parse(&response.export_json).map_err(|_| "invalid Theme export")?;
             let bytes = if std::path::Path::new(path)
@@ -368,8 +369,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), &'static str> {
             request.operation = cshell_ipc::ProfileOperation::PreviewThemes as i32;
             request.import_json = bytes.clone();
             request.import_policy = cshell_ipc::ProfileImportPolicy::Replace as i32;
-            let response = theme(request)
-            .await?;
+            let response = theme(request).await?;
             let preview = response.preview.ok_or("Theme preview missing")?;
             if preview.base_revision != revision
                 || !preview.can_commit
@@ -393,8 +393,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), &'static str> {
             request.expected_revision = revision;
             request.import_json = bytes;
             request.import_policy = cshell_ipc::ProfileImportPolicy::Replace as i32;
-            let response = theme(request)
-            .await?;
+            let response = theme(request).await?;
             if Some(response.revision) != revision.checked_add(1) {
                 return Err("Theme commit revision mismatch");
             }

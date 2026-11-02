@@ -59,7 +59,12 @@ async fn authenticate_inner(
     ordered: &mut OrderedAuthentication,
 ) -> Result<(), SshError> {
     let username = (ordered.login)(username).await?;
-    if username.is_empty() || username.len() > 128 || username.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if username.is_empty()
+        || username.len() > 128
+        || username
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+    {
         return Err(SshError::AuthenticationCancelled);
     }
     *ordered

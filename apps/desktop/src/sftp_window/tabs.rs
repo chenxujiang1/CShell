@@ -128,20 +128,31 @@ impl Drop for CommonLocal {
 impl Drop for SftpTabs {
     fn drop(&mut self) {
         for tab in &mut self.entries {
-            if let Some(content) = &mut tab.parked {
-                if let Some(connection) = content.connection.take() {
-                    connection.retire();
-                }
+            if let Some(content) = &mut tab.parked
+                && let Some(connection) = content.connection.take()
+            {
+                connection.retire();
             }
         }
     }
 }
 impl DesktopApp {
-    pub(crate) fn sftp_ssh_source(&self,profile:ProfileId)->Option<SessionId> {
-        let tab=self.current_workspace_tab?;
-        if !self.workspace.document.bindings.iter().any(|b|b.tab_id==tab && b.profile_id==Some(profile)) {return None;}
-        let session=*self.workspace.sessions.get(&tab)?;
-        self.view_model.reusable_ssh_sessions.contains(&session).then_some(session)
+    pub(crate) fn sftp_ssh_source(&self, profile: ProfileId) -> Option<SessionId> {
+        let tab = self.current_workspace_tab?;
+        if !self
+            .workspace
+            .document
+            .bindings
+            .iter()
+            .any(|b| b.tab_id == tab && b.profile_id == Some(profile))
+        {
+            return None;
+        }
+        let session = *self.workspace.sessions.get(&tab)?;
+        self.view_model
+            .reusable_ssh_sessions
+            .contains(&session)
+            .then_some(session)
     }
     pub(super) fn open_sftp_tab(&mut self, profile: ProfileId) {
         if let Some(id) = self
@@ -152,15 +163,14 @@ impl DesktopApp {
             .map(|t| t.id)
         {
             self.select_sftp_tab(id);
-            if let Some(view) = self.sftp.as_ref().map(DesktopSftpConnection::view) {
-                if !view.connection_phase.busy()
-                    && view.connection_phase != ConnectionPhase::Connected
-                {
-                    self.submit_sftp_command(sftp_connection::lifecycle::connect(
-                        profile,
-                        view.connection_previous.or(view.session_id),
-                    ));
-                }
+            if let Some(view) = self.sftp.as_ref().map(DesktopSftpConnection::view)
+                && !view.connection_phase.busy()
+                && view.connection_phase != ConnectionPhase::Connected
+            {
+                self.submit_sftp_command(sftp_connection::lifecycle::connect(
+                    profile,
+                    view.connection_previous.or(view.session_id),
+                ));
             }
             self.focus_sftp();
             return;
@@ -212,7 +222,11 @@ impl DesktopApp {
             }
         }
         connection.share_local_browser();
-        let command = sftp_connection::lifecycle::connect_shared(profile, None,self.sftp_ssh_source(profile));
+        let command = sftp_connection::lifecycle::connect_shared(
+            profile,
+            None,
+            self.sftp_ssh_source(profile),
+        );
         let session = if let SftpClientCommand::ConnectProfile { session, .. } = &command {
             *session
         } else {
@@ -306,10 +320,10 @@ impl DesktopApp {
             panel: std::mem::replace(&mut self.sftp_panel, target.panel),
             session: self.sftp_session,
         };
-        if let Some(active) = self.sftp_tabs.active {
-            if let Some(tab) = self.sftp_tabs.entries.iter_mut().find(|t| t.id == active) {
-                tab.parked = Some(previous);
-            }
+        if let Some(active) = self.sftp_tabs.active
+            && let Some(tab) = self.sftp_tabs.entries.iter_mut().find(|t| t.id == active)
+        {
+            tab.parked = Some(previous);
         }
         self.sftp = target.connection;
         self.sftp_session = target.session;
@@ -317,13 +331,15 @@ impl DesktopApp {
         self.sftp_panel.open = true;
         self.last_sftp_generation = None;
         self.sync_sftp_tabs();
-        if self.sftp_tabs.active==Some(id) {self.focus_sftp();}
+        if self.sftp_tabs.active == Some(id) {
+            self.focus_sftp();
+        }
     }
     fn close_sftp_tab(&mut self, id: u64) {
         let Some(index) = self.sftp_tabs.entries.iter().position(|t| t.id == id) else {
             return;
         };
-        let was_closing=std::mem::replace(&mut self.sftp_tabs.closing,true);
+        let was_closing = std::mem::replace(&mut self.sftp_tabs.closing, true);
         if self.sftp_tabs.active == Some(id) {
             if self.sftp_tabs.entries.len() > 1 {
                 let next = if index + 1 < self.sftp_tabs.entries.len() {
@@ -348,17 +364,17 @@ impl DesktopApp {
             }
         }
         let mut removed = self.sftp_tabs.entries.remove(index);
-        if let Some(mut content) = removed.parked.take() {
-            if let Some(connection) = content.connection.take() {
-                if let Some(session) = connection.view().session_id {
-                    let _ = connection.request(SftpClientCommand::Disconnect(session));
-                }
-                connection.retire();
+        if let Some(mut content) = removed.parked.take()
+            && let Some(connection) = content.connection.take()
+        {
+            if let Some(session) = connection.view().session_id {
+                let _ = connection.request(SftpClientCommand::Disconnect(session));
             }
+            connection.retire();
         }
         self.last_sftp_generation = None;
         self.sync_sftp_tabs();
-        self.sftp_tabs.closing=was_closing;
+        self.sftp_tabs.closing = was_closing;
     }
     pub(super) fn close_all_sftp_tabs(&mut self) {
         if let Some(connection) = self.sftp.take() {
@@ -368,13 +384,13 @@ impl DesktopApp {
             connection.retire();
         }
         for tab in &mut self.sftp_tabs.entries {
-            if let Some(mut content) = tab.parked.take() {
-                if let Some(connection) = content.connection.take() {
-                    if let Some(session) = connection.view().session_id {
-                        let _ = connection.request(SftpClientCommand::Disconnect(session));
-                    }
-                    connection.retire();
+            if let Some(mut content) = tab.parked.take()
+                && let Some(connection) = content.connection.take()
+            {
+                if let Some(session) = connection.view().session_id {
+                    let _ = connection.request(SftpClientCommand::Disconnect(session));
                 }
+                connection.retire();
             }
         }
         self.sftp_tabs.entries.clear();
@@ -391,15 +407,36 @@ impl DesktopApp {
         }
     }
     pub(super) fn sync_sftp_tabs(&mut self) {
-        let cancelled:Vec<_>=if self.sftp_tabs.closing {Vec::new()}else{self.sftp_tabs.entries.iter().filter_map(|tab|{
-            let connection=if self.sftp_tabs.active==Some(tab.id){self.sftp.as_ref()}else{tab.parked.as_ref().and_then(|content|content.connection.as_ref())};
-            connection.filter(|connection|connection.take_cancelled_connection()).map(|_|tab.id)
-        }).collect()};
+        let cancelled: Vec<_> = if self.sftp_tabs.closing {
+            Vec::new()
+        } else {
+            self.sftp_tabs
+                .entries
+                .iter()
+                .filter_map(|tab| {
+                    let connection = if self.sftp_tabs.active == Some(tab.id) {
+                        self.sftp.as_ref()
+                    } else {
+                        tab.parked
+                            .as_ref()
+                            .and_then(|content| content.connection.as_ref())
+                    };
+                    connection
+                        .filter(|connection| connection.take_cancelled_connection())
+                        .map(|_| tab.id)
+                })
+                .collect()
+        };
         if !cancelled.is_empty() {
-            for id in cancelled {self.close_sftp_tab(id);}
+            for id in cancelled {
+                self.close_sftp_tab(id);
+            }
             return;
         }
-        if self.sftp_tabs.entries.is_empty() {self.sftp_panel.remote_tabs.clear();return;}
+        if self.sftp_tabs.entries.is_empty() {
+            self.sftp_panel.remote_tabs.clear();
+            return;
+        }
         let active_view = self.sftp.as_ref().map(DesktopSftpConnection::view);
         if let Some(view) = &active_view {
             if view.connection_profile.is_some() {
@@ -438,7 +475,16 @@ impl DesktopApp {
         }
         self.sftp_panel.remote_tabs = summaries;
         if let Some(catalog) = self.profiles.as_ref().and_then(|p| p.view().catalog) {
-            self.sftp_panel.verification_overrides=catalog.ssh_connections.iter().filter_map(|target|target.options.sftp_verification.map(|mode|(target.profile_id,mode))).collect();
+            self.sftp_panel.verification_overrides = catalog
+                .ssh_connections
+                .iter()
+                .filter_map(|target| {
+                    target
+                        .options
+                        .sftp_verification
+                        .map(|mode| (target.profile_id, mode))
+                })
+                .collect();
             self.sftp_panel.available_hosts = catalog
                 .ssh_connections
                 .iter()

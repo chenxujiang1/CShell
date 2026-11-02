@@ -27,6 +27,10 @@ struct Cursor {
     expires: Instant,
     source: Source,
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded owned control messages retain their existing value-based API and serialization"
+)]
 enum Source {
     Remote {
         reader: cshell_sftp::DirectoryCursor,
@@ -125,7 +129,7 @@ impl LocalCursor {
                 return Err(SftpStatus::Failed);
             }
             let meta = std::fs::symlink_metadata(entry.path()).map_err(|_| SftpStatus::Failed)?;
-            let mut kind = if meta.file_type().is_symlink() {
+            let kind = if meta.file_type().is_symlink() {
                 3
             } else if meta.is_dir() {
                 2
@@ -135,12 +139,14 @@ impl LocalCursor {
                 4
             };
             #[cfg(windows)]
-            {
+            let kind = {
                 use std::os::windows::fs::MetadataExt;
                 if meta.file_attributes() & 0x400 != 0 {
-                    kind = 3;
+                    3
+                } else {
+                    kind
                 }
-            }
+            };
             self.pending.push_back(SftpDirectoryEntry {
                 name,
                 path,
@@ -395,7 +401,9 @@ impl SftpIpcService {
                     {
                         return Err(SftpStatus::InvalidRequest);
                     }
-                    let live = sessions.get_sftp(session).map_err(|_| SftpStatus::Unavailable)?;
+                    let live = sessions
+                        .get_sftp(session)
+                        .map_err(|_| SftpStatus::Unavailable)?;
                     if !live.running() {
                         return Err(SftpStatus::Unavailable);
                     }
@@ -529,9 +537,17 @@ impl SftpIpcService {
 }
 
 impl SftpIpcService {
-    pub(crate) async fn close_session_cursors(&self,session:SessionId) {
-        let mut cursors=self.browsers.cursors.lock().await;
-        let ids:Vec<_>=cursors.iter().filter(|(_,slot)|slot.session==session).map(|(id,_)|id.clone()).collect();
-        for id in ids {if let Some(slot)=cursors.remove(&id) {let _=slot.shutdown.send(true);}}
+    pub(crate) async fn close_session_cursors(&self, session: SessionId) {
+        let mut cursors = self.browsers.cursors.lock().await;
+        let ids: Vec<_> = cursors
+            .iter()
+            .filter(|(_, slot)| slot.session == session)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some(slot) = cursors.remove(&id) {
+                let _ = slot.shutdown.send(true);
+            }
+        }
     }
 }

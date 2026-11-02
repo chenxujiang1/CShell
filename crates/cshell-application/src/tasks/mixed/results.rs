@@ -554,6 +554,7 @@ pub fn assemble_mixed_results(
     Ok(document)
 }
 /// Bounds aggregate client memory and requires every page to advance the same capture.
+#[derive(Debug)]
 pub struct MixedResultCollector {
     manifest: MixedResultManifest,
     targets: Vec<MixedTargetView>,
