@@ -4,7 +4,7 @@
 
 ## 生成试用包
 
-冻结并提交准备分发的源码后，运行 GitHub Actions 的 `ci` 工作流。工作流支持手动触发；提交或 PR 也会触发。`trial-package` 依赖质量、平台、原生资源、窗口恢复和互通门禁，任一依赖失败就不会生成可分发产物。目前本地格式和严格 Clippy 仍未通过，需要先处理；新增打包配置本身不表示这些门禁已经通过。
+冻结并提交准备分发的源码后，运行 GitHub Actions 的 `ci` 工作流。工作流支持手动触发；提交或 PR 也会触发。`trial-package` 依赖质量、平台、原生资源、窗口恢复和互通门禁，任一依赖失败就不会生成可分发产物。以对应源码提交的完整 CI 结果为准；新增打包配置本身不表示这些门禁已经通过。
 
 成功后下载对应 artifact：
 
@@ -16,7 +16,9 @@
 
 每包附 SHA-256；保留包内源码版本用于反馈关联。本地未提交修改的包会标记 `modified workspace`，不能仅凭 HEAD 哈希视为可复现版本。工作流只上传 CI artifact，不创建公开 Release，也不自动发布给用户。
 
-另有 `macOS personal trial` 工作流，向 `codex/macos-trial` 分支推送后构建两个 Mac 架构，执行 SSH、凭据库、存储、本地 PTY、脚本运行时单元与集成测试、原生钥匙串检查、完整桌面交互单元测试，并验证解压 app 的窗口运行。该分支只运行这套专用 Mac 流程，避免普通 CI 的其他平台任务重复占用 Mac 运行器；其他分支及 PR 继续运行完整 `ci`。它用于用户本人早期试用，不代表完整公开发布门禁已经通过，已有格式与严格 Clippy 失败仍需处理。向公开仓库推送源码快照前应确认快照内容可以公开。
+另有 `macOS personal trial` 工作流，向 `codex/macos-trial` 分支推送后构建两个 Mac 架构，执行 SSH、凭据库、存储、本地 PTY、脚本运行时单元与集成测试、原生钥匙串检查、完整桌面交互单元测试，并验证解压 app 的窗口运行。该分支只运行这套专用 Mac 流程，避免普通 CI 的其他平台任务重复占用 Mac 运行器；其他分支及 PR 继续运行完整 `ci`。它用于用户本人早期试用，不代表完整公开发布门禁已经通过。向公开仓库推送源码快照前应确认快照内容可以公开。
+
+托管 Mac CI 将明确识别的 Apple Paravirtual 虚拟 GPU 与物理 GPU 分开验收：仅在 `CSHELL_ALLOW_VIRTUAL_GPU=1` 时执行功能与资源门禁并报告全部回显延迟，不据此认证物理 Mac 性能。真实 Mac 仍须运行 `cargo xtask echo-latency-bench` 按原 P95/P99 阈值另行验收；物理 GPU 与 CPU 回退阈值均保持不变。
 
 Windows 包含 `CShell.exe`、`cshelld.exe`、`cshell-script-worker.exe` 和首次使用说明。macOS 包含 `CShell.app` 和外部可读的首次使用说明；三个可执行文件都位于 `Contents/MacOS`，保证桌面程序能找到后台、后台能找到脚本工作进程。不要单独分发 GUI。
 

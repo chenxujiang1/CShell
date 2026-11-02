@@ -14,7 +14,7 @@ CShell 是使用 Rust 开发的原生 SSH、SFTP 与本地终端客户端，提�
 | Mac Apple Silicon（M 系列） | `CShell-trial-macos-arm64.zip` | `CShell.app`、首次使用说明 |
 | Mac Intel | `CShell-trial-macos-x64.zip` | `CShell.app`、首次使用说明 |
 
-Mac 双架构试用包由 [macOS personal trial 构建](https://github.com/chenxujiang1/CShell/actions/workflows/macos-trial.yml)生成。进入成功的构建记录，在 **Artifacts** 中下载对应架构；构建日志显示失败时，该版本不作为可用试用包。Windows 试用包由完整 [CI 构建](https://github.com/chenxujiang1/CShell/actions/workflows/ci.yml)生成。
+Windows 和 Mac 双架构试用包由完整 [CI 构建](https://github.com/chenxujiang1/CShell/actions/workflows/ci.yml)生成。进入全部检查通过的构建记录，在 **Artifacts** 中下载对应架构；任一前置门禁失败时，不生成可分发试用包。另有 [macOS personal trial 构建](https://github.com/chenxujiang1/CShell/actions/workflows/macos-trial.yml)供个人验证，该流程通过不代表完整 CI 通过。
 
 下载 Actions 产物需要登录 GitHub；解压外层 artifact 后可以找到试用 ZIP 和对应的 `.sha256` 校验文件。试用产物保留 14 天，过期后需要重新构建。本仓库当前没有承诺稳定版本或自动更新渠道。
 
