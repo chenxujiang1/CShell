@@ -69,6 +69,7 @@ fn round_trip_and_idempotent_delete() {
 /// executor also catches synchronous adapters that accidentally nest runtimes.
 #[cfg(target_os = "linux")]
 #[test]
+#[allow(clippy::expect_used)] // Assertions in this explicitly enabled native test.
 fn native_secret_tool_interop_on_current_thread_runtime() {
     if std::env::var("CSHELL_SECRET_TOOL_ORACLE").as_deref() != Ok("1") {
         return;
