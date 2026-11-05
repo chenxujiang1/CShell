@@ -91,7 +91,9 @@ jobs:
           - macos-15
           - macos-15-intel
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Intel hosted runners need room for cold optimized builds and the probes.
+    # Individual probe timeouts and resource/performance budgets stay enforced.
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 60 || 30 }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
