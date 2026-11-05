@@ -72,6 +72,7 @@ PY
 plutil -lint "$app/Contents/Info.plist"
 cat > "$app/Contents/Resources/README-first-run.txt" <<EOF
 CShell 早期测试版 — macOS $2
+软件版本：$version
 源码版本：$commit
 
 1. 解压后将 CShell.app 拖入“应用程序”，再双击打开。后台程序已包含在 app 内。

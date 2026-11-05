@@ -30,6 +30,15 @@ $sourceStatus = @(& git -C $repository status --porcelain --untracked-files=norm
 if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the trial source state.' }
 if ($sourceStatus.Count -gt 0) { $commit += ' (modified workspace)' }
 
+$manifest = Get-Content -LiteralPath (Join-Path $repository 'Cargo.toml') -Raw -Encoding UTF8
+$packageSection = [regex]::Match($manifest, '(?ms)^\[workspace\.package\]\s*(?<body>.*?)(?=^\[|\z)').Groups['body'].Value
+$versionMatch = [regex]::Match($packageSection, '(?m)^version\s*=\s*"(?<version>[0-9]+\.[0-9]+\.[0-9]+)"')
+if (-not $versionMatch.Success) { throw 'Unable to identify the workspace release version.' }
+$version = $versionMatch.Groups['version'].Value
+if ((Get-Item -LiteralPath $gui).VersionInfo.ProductVersion -ne $version) {
+    throw 'The desktop binary version does not match Cargo.toml; rebuild before packaging.'
+}
+
 $outputDirectory = Join-Path $repository 'artifacts\ui-refresh-20261015\bin'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $archiveName = 'CShell-trial-windows-x64.zip'
@@ -58,6 +67,7 @@ try {
 
         $instructions = @(
             'CShell 早期测试版 — Windows x64'
+            "软件版本：$version"
             "源码版本：$commit"
             ''
             '1. 解压整个 ZIP，保持 CShell.exe、cshelld.exe 和 cshell-script-worker.exe 在同一目录。'

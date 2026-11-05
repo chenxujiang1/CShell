@@ -8,11 +8,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is missing")?);
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is missing")?);
+    let version = env::var("CARGO_PKG_VERSION")?;
+    let major: u16 = env::var("CARGO_PKG_VERSION_MAJOR")?.parse()?;
+    let minor: u16 = env::var("CARGO_PKG_VERSION_MINOR")?.parse()?;
+    let patch: u16 = env::var("CARGO_PKG_VERSION_PATCH")?.parse()?;
+    let resource = out.join("cshell-version.rc");
+    let source = fs::read_to_string(root.join("assets/icons/cshell.rc"))?
+        .replace(
+            "@CSHELL_VERSION_TUPLE@",
+            &format!("{major},{minor},{patch},0"),
+        )
+        .replace("@CSHELL_VERSION_STRING@", &version);
+    fs::write(&resource, source)?;
     if env::var("TARGET").unwrap_or_default().ends_with("-gnu") {
         let file = out.join("cshell-icons.o");
         let status = Command::new("windres")
             .current_dir(&root)
-            .args(["assets/icons/cshell.rc", "-O", "coff", "-o"])
+            .arg(&resource)
+            .args(["-O", "coff", "-o"])
             .arg(&file)
             .status()?;
         if !status.success() {
@@ -46,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .current_dir(&root)
         .arg("/nologo")
         .arg(format!("/fo{}", file.display()))
-        .arg("assets/icons/cshell.rc")
+        .arg(&resource)
         .status()?;
     if !status.success() {
         return Err("CShell icon resource compilation with Windows SDK failed".into());

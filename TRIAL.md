@@ -1,5 +1,7 @@
 # Windows 与 macOS 早期试用
 
+当前系列为 1.0，软件版本为 `1.0.0`。发布分支为 `release/1.0`，标签为 `v1.0.0`；GitHub Release 由维护者按 [发布操作文档](RELEASE.md)手动发布。此前 `307ec1d` 等提交生成的包内置版本为 `0.1.0`，不能通过改文件名变成 `1.0.0`，请改用版本标签对应源码的新构建。
+
 目标为 Windows x64、macOS Apple Silicon（arm64）和 macOS Intel（x64）。每个平台单独分发 ZIP，不依赖用户安装 Rust。macOS 运行器采用 macOS 15；更早系统尚需实机验收，不能仅按 CPU 架构推断兼容性。
 
 ## 生成试用包
