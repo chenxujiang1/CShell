@@ -49,6 +49,13 @@ pub(super) fn tooltip(
 
 pub(super) fn toolbar(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) {
     let wide = ui.available_width() >= 1080.0;
+    let current_ssh = !model.ssh_control_busy
+        && !model.layout_paused
+        && model
+            .selected_tab
+            .and_then(|tab| model.tabs.iter().find(|t| t.id == tab))
+            .and_then(|t| t.session_id)
+            .is_some_and(|id| model.reusable_ssh_sessions.contains(&id));
     ui.spacing_mut().item_spacing.x = 4.0;
     ui.horizontal_centered(|ui| {
         if tool_button(ui, Icon::Add, "＋ 新建", true, false)
@@ -90,6 +97,11 @@ pub(super) fn toolbar(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) {
         if tool_button(ui, Icon::Folder, "SFTP", model.can_sftp && !model.ssh_control_busy, false)
             .on_hover_text("为当前 SSH 连接打开独立文件管理窗口，复用现有认证").clicked() {
             model.menu_command = Some(WorkbenchMenuCommand::SftpFiles);
+        }
+        if tool_button(ui, Icon::Server, "资源", current_ssh, false)
+            .on_hover_text("服务器资源 · 查看当前 SSH 会话的 CPU、内存和负载；默认只采集一次")
+            .on_disabled_hover_text("请先切换到已连接的 SSH 标签；连接操作或工作区暂停时不可用。").clicked() {
+            model.menu_command = Some(WorkbenchMenuCommand::ServerResources);
         }
         if wide && tool_button(ui, Icon::Search, "查找", true, false).on_hover_text("查找终端 · Ctrl+Shift+F").clicked() {
             model.menu_command = Some(WorkbenchMenuCommand::SearchTerminal);

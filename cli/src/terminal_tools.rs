@@ -142,6 +142,9 @@ async fn query(request: &Request) -> Result<TerminalToolsReply, &'static str> {
         ))
     };
     let expect = match Op::try_from(request.operation).map_err(|_| "invalid terminal operation")? {
+        Op::ServerResources => {
+            TerminalToolsExpectation::Resources(session.ok_or("missing session scope")?)
+        }
         Op::ShellHistory => TerminalToolsExpectation::Shell {
             session: session.ok_or("missing session scope")?,
             id: request.cursor,

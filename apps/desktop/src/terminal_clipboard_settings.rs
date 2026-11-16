@@ -10,6 +10,7 @@ pub(crate) struct Settings {
     pub middle_click_paste: bool,
     pub word_delimiters: String,
     pub smart_selection: bool,
+    pub chinese_word_selection: bool,
     pub mac_history_shortcuts: bool,
 }
 impl Default for Settings {
@@ -20,6 +21,7 @@ impl Default for Settings {
             middle_click_paste: true,
             word_delimiters: cshell_render::DEFAULT_WORD_DELIMITERS.into(),
             smart_selection: false,
+            chinese_word_selection: true,
             mac_history_shortcuts: cfg!(target_os = "macos"),
         }
     }
@@ -66,7 +68,11 @@ pub(crate) fn draw(ui: &mut egui::Ui) {
     );
     ui.weak("右键默认打开菜单；启用直接粘贴后，Shift＋右键仍可打开菜单。");
     ui.collapsing("高级选择设置", |ui| {
-        ui.checkbox(&mut settings.smart_selection, "双击智能选择完整路径、URL 和 IP 地址");
+        ui.checkbox(&mut settings.chinese_word_selection, "中文按词选择（关闭后按字选择）");
+        ui.horizontal(|ui| {
+            if ui.small_button("常用技术词").clicked() { settings.word_delimiters = cshell_render::DEFAULT_WORD_DELIMITERS.into(); }
+            if ui.small_button("严格分词").clicked() { settings.word_delimiters = cshell_render::STRICT_WORD_DELIMITERS.into(); }
+        });
         ui.label("双击单词时的分隔字符（空白始终分隔）");
         ui.add(
             egui::TextEdit::singleline(&mut settings.word_delimiters)
@@ -76,7 +82,7 @@ pub(crate) fn draw(ui: &mut egui::Ui) {
         if ui.small_button("恢复默认分隔符").clicked() {
             settings.word_delimiters = Settings::default().word_delimiters;
         }
-        ui.weak("默认将冒号、引号和中文标点作为边界；保留 / 和 .。智能选择可识别地址中的冒号，三击选择完整逻辑行。");
+        ui.weak("默认 /、反斜杠、冒号和标点分隔；保留 .、-、_。完整路径、URL、地址从右键菜单复制，双击始终按词选择。");
     });
     ui.separator();
     for text in [
@@ -113,7 +119,10 @@ pub(crate) fn draw(ui: &mut egui::Ui) {
 
 fn migrate_word_delimiters(settings: &mut Settings) {
     // Upgrade the former default without overwriting customized boundaries.
-    if settings.word_delimiters == "\"'`[]{}()<>|;,=" {
+    if matches!(
+        settings.word_delimiters.as_str(),
+        "\"'`[]{}()<>|;,=" | "\"'`[]{}()<>|;,:=：，；（）【】「」『』“”‘’"
+    ) {
         settings.word_delimiters = cshell_render::DEFAULT_WORD_DELIMITERS.into();
     }
 }

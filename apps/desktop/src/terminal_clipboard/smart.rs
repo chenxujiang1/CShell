@@ -48,12 +48,50 @@ fn token(
     if cell.character.is_whitespace() {
         return None;
     }
-    let candidate = TerminalSelection {
+    let bounds = TerminalSelection {
         anchor: point,
         focus: point,
-        mode: TerminalSelectionMode::Word,
+        mode: TerminalSelectionMode::Line,
     }
-    .expanded_with_delimiters(snapshot, "\"'`<>{}()|,;：，；（）【】「」『』“”‘’");
+    .expanded_lines(snapshot);
+    let mut positions = Vec::new();
+    for row in bounds.anchor.row..=bounds.focus.row {
+        for (column, cell) in snapshot.row(row)?.iter().enumerate() {
+            if matches!(
+                cell.width,
+                cshell_terminal::CellWidth::WideSpacer
+                    | cshell_terminal::CellWidth::LeadingWideSpacer
+            ) {
+                continue;
+            }
+            positions.push((
+                TerminalCellPoint {
+                    row,
+                    column: column as u16,
+                },
+                cell.character,
+            ));
+            if positions.len() > 64 * 1024 {
+                return None;
+            }
+        }
+    }
+    let offset = positions.iter().position(|(p, _)| *p == point)?;
+    let boundary =
+        |c: char| c.is_whitespace() || "\"'`<>{}()|,;：，；（）【】「」『』“”‘’".contains(c);
+    let mut start = offset;
+    let mut end = offset;
+    while start > 0 && !boundary(positions[start - 1].1) {
+        start -= 1;
+    }
+    while end + 1 < positions.len() && !boundary(positions[end + 1].1) {
+        end += 1;
+    }
+    let candidate = TerminalSelection {
+        anchor: positions[start].0,
+        focus: positions[end].0,
+        mode: TerminalSelectionMode::Character,
+    };
     let text = candidate.text(snapshot).ok()?;
     let address = text.parse::<std::net::IpAddr>().is_ok()
         || text.parse::<std::net::SocketAddr>().is_ok()
@@ -64,7 +102,7 @@ fn token(
     let url = ["https://", "http://", "ssh://", "ftp://", "file://"]
         .iter()
         .any(|prefix| text.starts_with(prefix) && text.len() > prefix.len());
-    let path = ["/", "./", "../", "~/"]
+    let path = ["/", "./", "../", "~/", "\\\\"]
         .iter()
         .any(|prefix| text.starts_with(prefix))
         || (text.as_bytes().get(1) == Some(&b':')
@@ -137,6 +175,6 @@ mod tests {
             assert_eq!(selected(text, 2, true), text);
         }
         assert_eq!(selected("127.0.0.1:8080", 2, false), "127.0.0.1");
-        assert_eq!(selected("/var/log/app.log", 7, false), "/var/log/app.log");
+        assert_eq!(selected("/var/log/app.log", 7, false), "log");
     }
 }

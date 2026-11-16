@@ -1,10 +1,11 @@
-//! Bounded OSC 7 observation, with passive per-shell Linux discovery as fallback.
+//! Untrusted OSC 7 hints are checked against the authenticated server's shell proof.
 use super::*;
 #[derive(Debug, Default)]
 pub(super) struct DirectoryTracker {
     state: u8,
     bytes: Vec<u8>,
     pub path: Option<String>,
+    authority: Option<String>,
 }
 impl DirectoryTracker {
     pub fn feed(&mut self, data: &[u8]) {
@@ -32,8 +33,9 @@ impl DirectoryTracker {
                         continue;
                     }
                     if b == 7 || self.state == 3 && b == b'\\' {
-                        if let Some(path) = decode(&self.bytes) {
+                        if let Some((authority, path)) = decode(&self.bytes) {
                             self.path = Some(path);
+                            self.authority = Some(authority);
                         }
                         self.state = 0;
                         self.bytes.clear();
@@ -63,13 +65,22 @@ impl DirectoryTracker {
     }
     pub fn reset(&mut self) {
         self.path = None;
+        self.authority = None;
         self.state = 0;
         self.bytes.clear();
     }
 }
-fn decode(data: &[u8]) -> Option<String> {
+fn decode(data: &[u8]) -> Option<(String, String)> {
     let uri = data.strip_prefix(b"7;file://")?;
     let start = uri.iter().position(|b| *b == b'/')?;
+    let authority = std::str::from_utf8(&uri[..start]).ok()?;
+    if authority.len() > 255
+        || !authority
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-:[]%".contains(&b))
+    {
+        return None;
+    }
     let mut out = Vec::new();
     let mut i = start;
     while i < uri.len() {
@@ -83,7 +94,7 @@ fn decode(data: &[u8]) -> Option<String> {
         }
     }
     let path = String::from_utf8(out).ok()?;
-    cshell_application::sftp_remote_path(&path, true).then_some(path)
+    cshell_application::sftp_remote_path(&path, true).then_some((authority.to_owned(), path))
 }
 impl SshSession {
     pub(crate) async fn current_remote_directory(&self) -> Option<String> {
@@ -91,29 +102,43 @@ impl SshSession {
             return None;
         }
         let epoch = self.connection_epoch.load(Ordering::Acquire);
-        let reported = self
+        // OSC 7 comes from arbitrary terminal programs, including a nested ssh.
+        // Its authority/path cannot authorize writes on this SSH transport.
+        // Resolve against the server owning the marked shell instead. Failure
+        // requires an explicit SFTP directory; never reuse an unverified path.
+        let path = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            self.active_transport()
+                .client
+                .remote_working_directory(&self.id.to_string()),
+        )
+        .await
+        .ok()
+        .flatten();
+        let verified = path?;
+        let observed = self
             .directory
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .path
-            .clone();
-        let path = if let Some(path) = reported {
-            Some(path)
-        } else {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(4),
-                self.active_transport()
-                    .client
-                    .remote_working_directory(&self.id.to_string()),
-            )
-            .await
-            .ok()
-            .flatten()
-        };
-        if self.connection_epoch.load(Ordering::Acquire) != epoch || !self.running() {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let foreign_host = observed.authority.as_ref().is_some_and(|host| {
+            !host.is_empty()
+                && !host.eq_ignore_ascii_case(&verified.hostname)
+                && !self
+                    .clipboard_host
+                    .as_ref()
+                    .is_some_and(|peer| host.eq_ignore_ascii_case(&peer.host))
+        });
+        if self.connection_epoch.load(Ordering::Acquire) != epoch
+            || !self.running()
+            || foreign_host
+            || observed
+                .path
+                .as_ref()
+                .is_some_and(|path| path != &verified.path)
+        {
             None
         } else {
-            path
+            Some(verified.path)
         }
     }
 }

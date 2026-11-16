@@ -385,6 +385,8 @@ pub struct SftpConnectionInfo {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SftpConnectRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_override: Option<cshell_domain::JumpConnectionOverride>,
     pub profile: cshell_domain::ProfileId,
     #[serde(default)]
     pub source_ssh_session: Option<cshell_domain::SessionId>,

@@ -9,6 +9,7 @@ pub enum TerminalToolsOperation {
     Poll = 4,
     RawJournal = 5,
     ShellHistory = 6,
+    ServerResources = 7,
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
 #[repr(i32)]

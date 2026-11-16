@@ -9,6 +9,184 @@ fn old_settings_default_to_sftp_immediate_upload_and_success_auto_close() {
     assert!(settings.close_successful_upload);
     assert_eq!(settings.download_directory, "D:/saved");
 }
+
+fn retry_plan(id: SessionId, row: &Row) -> RetryPlan {
+    let snapshot = row.snapshot.as_ref().unwrap();
+    RetryPlan {
+        id,
+        source: row.source,
+        revision: 7,
+        host: snapshot.host.clone(),
+        directory: snapshot.directory.clone(),
+        completed_files: 0,
+        retry_files: 1,
+        can_retry: true,
+        detail: "只重试未完成文件".into(),
+    }
+}
+
+#[test]
+fn retry_requires_review_and_confirmation_and_cannot_be_submitted_twice_or_removed_in_flight() {
+    let (id, mut row) = task(Some(State::Failed), Protocol::Sftp);
+    let source = row.source;
+    let plan = retry_plan(id, &row);
+    row.accept(id, true, &serde_json::to_vec(&plan).unwrap())
+        .unwrap();
+    let (mut panel, mut receiver) = panel_with_task(id, row);
+    let ctx = crate::ui_layout_gate::context();
+    let pos = task_button(&ctx, &mut panel, "确认重试");
+    click_task_button(&ctx, &mut panel, pos);
+    let request = receiver.try_recv().unwrap();
+    assert_eq!(request.operation, Op::TerminalUploadRetry as i32);
+    assert_eq!(request.session_id, source.as_uuid().as_bytes());
+    assert_eq!(request.transfer_id, id.as_uuid().as_bytes());
+    assert_eq!(request.expected_revision, 7);
+    assert!(request.confirmed && request.document_json.is_empty());
+    panel.retry(source, id, 7);
+    panel.remove_finished(source, id);
+    assert!(receiver.try_recv().is_err());
+    assert!(
+        panel
+            .connection
+            .as_ref()
+            .unwrap()
+            .shared
+            .lock()
+            .unwrap()
+            .rows
+            .contains_key(&id)
+    );
+}
+
+#[test]
+fn retry_review_rejects_changed_target_and_new_attempt_clears_finished_timer() {
+    let (id, mut row) = task(Some(State::Failed), Protocol::Sftp);
+    let mut plan = retry_plan(id, &row);
+    plan.directory = "/other".into();
+    assert!(
+        row.accept(id, true, &serde_json::to_vec(&plan).unwrap())
+            .is_err()
+    );
+    plan = retry_plan(id, &row);
+    plan.source = SessionId::new();
+    assert!(
+        row.accept(id, true, &serde_json::to_vec(&plan).unwrap())
+            .is_err()
+    );
+    plan = retry_plan(id, &row);
+    row.accept(id, true, &serde_json::to_vec(&plan).unwrap())
+        .unwrap();
+    let mut snapshot = row.snapshot.clone().unwrap();
+    snapshot.state = State::Running;
+    row.accept(id, false, &serde_json::to_vec(&snapshot).unwrap())
+        .unwrap();
+    assert!(row.finished_at.is_none() && row.retry_plan.is_none());
+}
+
+#[test]
+fn old_poll_receipt_cannot_unlock_an_enqueued_retry_or_remove_its_record() {
+    let (id, mut row) = task(Some(State::Failed), Protocol::Sftp);
+    let source = row.source;
+    let plan = retry_plan(id, &row);
+    row.accept(id, true, &serde_json::to_vec(&plan).unwrap())
+        .unwrap();
+    let (mut panel, mut receiver) = panel_with_task(id, row);
+    panel.retry(source, id, plan.revision);
+    assert_eq!(
+        receiver.try_recv().unwrap().operation,
+        Op::TerminalUploadRetry as i32
+    );
+    let shared = panel.connection.as_ref().unwrap().shared.clone();
+    {
+        let mut view = shared.lock().unwrap();
+        let row = view.rows.get_mut(&id).unwrap();
+        // A query issued before the retry can still report the old failed state.
+        let old = serde_json::to_vec(row.snapshot.as_ref().unwrap()).unwrap();
+        row.pending = false;
+        row.accept(id, false, &old).unwrap();
+        row.record_response(Some(Op::TerminalUploadGet), Some(SftpStatus::Ok), true);
+        assert!(row.retry_request == RetryRequestState::AwaitingReply);
+        row.retry_plan = Some(plan);
+    }
+    panel.retry(source, id, 7);
+    panel.remove_finished(source, id);
+    assert!(receiver.try_recv().is_err());
+    assert!(shared.lock().unwrap().rows.contains_key(&id));
+}
+
+#[test]
+fn uncertain_retry_requires_an_authoritative_status_before_removal_or_resubmission() {
+    let (id, mut row) = task(Some(State::Failed), Protocol::Sftp);
+    let source = row.source;
+    row.retry_request = RetryRequestState::AwaitingReply;
+    row.record_response(Some(Op::TerminalUploadRetry), None, false);
+    assert!(row.retry_request == RetryRequestState::Unknown);
+    let (mut panel, mut receiver) = panel_with_task(id, row);
+    panel.remove_finished(source, id);
+    let shared = panel.connection.as_ref().unwrap().shared.clone();
+    assert!(shared.lock().unwrap().rows.contains_key(&id));
+    {
+        let mut view = shared.lock().unwrap();
+        let row = view.rows.get_mut(&id).unwrap();
+        row.record_response(
+            Some(Op::TerminalUploadRetryInspect),
+            Some(SftpStatus::Ok),
+            true,
+        );
+        assert!(row.retry_request == RetryRequestState::Unknown);
+        row.record_response(Some(Op::TerminalUploadGet), None, false);
+        assert!(row.retry_request == RetryRequestState::Unknown);
+        let status = serde_json::to_vec(row.snapshot.as_ref().unwrap()).unwrap();
+        row.accept(id, false, &status).unwrap();
+        row.record_response(Some(Op::TerminalUploadGet), Some(SftpStatus::Ok), true);
+        assert!(row.retry_request == RetryRequestState::Idle);
+        assert!(
+            row.retry_plan.is_none(),
+            "fresh inspection is required for another retry"
+        );
+    }
+    panel.remove_finished(source, id);
+    assert!(shared.lock().unwrap().rows.is_empty());
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn rejected_or_expired_retry_can_be_removed_but_malformed_success_stays_uncertain() {
+    let (id, mut row) = task(Some(State::Failed), Protocol::Sftp);
+    row.retry_request = RetryRequestState::AwaitingReply;
+    row.record_response(Some(Op::TerminalUploadRetry), Some(SftpStatus::Ok), false);
+    assert!(row.retry_request == RetryRequestState::Unknown);
+    row.record_response(Some(Op::TerminalUploadGet), Some(SftpStatus::Ok), false);
+    assert!(row.retry_request == RetryRequestState::Unknown);
+    row.record_response(
+        Some(Op::TerminalUploadGet),
+        Some(SftpStatus::Unavailable),
+        false,
+    );
+    assert!(row.retry_request == RetryRequestState::Idle);
+    row.retry_request = RetryRequestState::AwaitingReply;
+    row.record_response(
+        Some(Op::TerminalUploadRetry),
+        Some(SftpStatus::Conflict),
+        false,
+    );
+    assert!(row.retry_request == RetryRequestState::Idle);
+    let source = row.source;
+    let (mut panel, mut receiver) = panel_with_task(id, row);
+    panel.remove_finished(source, id);
+    assert!(
+        panel
+            .connection
+            .as_ref()
+            .unwrap()
+            .shared
+            .lock()
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(receiver.try_recv().is_err());
+}
 #[test]
 fn upload_progress_and_failure_fit_small_windows_with_real_fonts() {
     use crate::ui_layout_gate::{check_window, context, frame};
@@ -37,6 +215,8 @@ fn upload_progress_and_failure_fit_small_windows_with_real_fonts() {
             Row {
                 source,
                 snapshot: Some(snapshot),
+                retry_plan: None,
+                retry_request: RetryRequestState::Idle,
                 error: None,
                 finished_at: Some(Instant::now()),
                 auto_close: true,
@@ -94,6 +274,8 @@ fn success_auto_hides_but_failure_cancel_and_opt_out_remain_visible() {
                     bytes_per_second: 0,
                     detail: "测试结果".into(),
                 }),
+                retry_plan: None,
+                retry_request: RetryRequestState::Idle,
                 error: None,
                 finished_at: Some(Instant::now() - Duration::from_secs(3)),
                 auto_close,
@@ -133,6 +315,8 @@ fn failure_reopens_once_after_user_hides_progress() {
         Row {
             source,
             snapshot: None,
+            retry_plan: None,
+            retry_request: RetryRequestState::Idle,
             error: Some("无法确认上传结果".into()),
             finished_at: None,
             auto_close: true,
@@ -159,6 +343,205 @@ fn failure_reopens_once_after_user_hides_progress() {
     shared.lock().unwrap().generation += 1;
     assert!(panel.poll());
     assert!(!panel.open);
+}
+
+fn task(state: Option<State>, protocol: Protocol) -> (SessionId, Row) {
+    let id = SessionId::new();
+    let source = SessionId::new();
+    (
+        id,
+        Row {
+            source,
+            snapshot: state.map(|state| Snapshot {
+                id,
+                source,
+                host: "test@host:22".into(),
+                directory: "/srv/test".into(),
+                protocol,
+                state,
+                bytes: 1,
+                total_bytes: 2,
+                completed: 0,
+                total_files: 1,
+                current_name: "upload.txt".into(),
+                bytes_per_second: 0,
+                detail: "上传状态".into(),
+            }),
+            retry_plan: None,
+            retry_request: RetryRequestState::Idle,
+            error: None,
+            finished_at: state.filter(|s| s.finished()).map(|_| Instant::now()),
+            auto_close: false,
+            pending: false,
+        },
+    )
+}
+
+fn panel_with_task(id: SessionId, row: Row) -> (Panel, tokio::sync::mpsc::Receiver<SftpRequest>) {
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let (stop, _) = tokio::sync::watch::channel(false);
+    (
+        Panel {
+            open: true,
+            connection: Some(Connection {
+                shared: Arc::new(Mutex::new(View {
+                    generation: 1,
+                    rows: BTreeMap::from([(id, row)]),
+                })),
+                sender,
+                stop,
+            }),
+            ..Default::default()
+        },
+        receiver,
+    )
+}
+
+fn task_button(ctx: &egui::Context, panel: &mut Panel, label: &str) -> egui::Pos2 {
+    let size = egui::vec2(720.0, 480.0);
+    ctx.all_styles_mut(|style| style.animation_time = 0.0);
+    for _ in 0..3 {
+        crate::ui_layout_gate::frame(ctx, size, |c| panel.draw(c));
+    }
+    let tree = crate::ui_layout_gate::frame(ctx, size, |c| panel.draw(c));
+    let node = tree
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == egui::accesskit::Role::Button && n.label() == Some(label))
+        .unwrap_or_else(|| panic!("missing task action: {label}"));
+    let rect = crate::ui_layout_gate::bounds(&node.1);
+    assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(rect));
+    rect.center()
+}
+
+fn click_task_button(ctx: &egui::Context, panel: &mut Panel, pos: egui::Pos2) {
+    for pressed in [true, false] {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(720.0, 480.0),
+                )),
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| panel.draw(ui.ctx()),
+        );
+        out.textures_delta.clear();
+    }
+}
+
+#[test]
+fn finished_upload_has_a_working_remove_action_without_remote_operations() {
+    for protocol in [Protocol::Sftp, Protocol::Zmodem] {
+        for state in [State::Failed, State::Cancelled, State::Succeeded] {
+            let (id, row) = task(Some(state), protocol);
+            let (mut panel, mut receiver) = panel_with_task(id, row);
+            panel.noticed.insert((id, 1));
+            let ctx = crate::ui_layout_gate::context();
+            let pos = task_button(&ctx, &mut panel, "移除任务");
+            click_task_button(&ctx, &mut panel, pos);
+            assert!(
+                panel
+                    .connection
+                    .as_ref()
+                    .unwrap()
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+            assert!(
+                !panel.open,
+                "removing the last task closes the empty progress window"
+            );
+            assert!(panel.noticed.is_empty());
+            assert!(
+                receiver.try_recv().is_err(),
+                "removal must not cancel, retry, or delete remote files"
+            );
+            panel.poll();
+            assert!(!panel.open, "a removed failure must not reopen the window");
+        }
+    }
+}
+
+#[test]
+fn unfinished_and_uncertain_uploads_still_send_real_cancellation_to_the_original_session() {
+    for state in [
+        Some(State::Preparing),
+        Some(State::Ready),
+        Some(State::Running),
+        Some(State::Paused),
+        None,
+    ] {
+        for uncertain in [false, true] {
+            let (id, mut row) = task(state, Protocol::Sftp);
+            let source = row.source;
+            if uncertain {
+                row.error = Some("通信结果未确认".into());
+            }
+            let (mut panel, mut receiver) = panel_with_task(id, row);
+            let ctx = crate::ui_layout_gate::context();
+            let pos = task_button(&ctx, &mut panel, "取消上传");
+            click_task_button(&ctx, &mut panel, pos);
+            let request = receiver.try_recv().unwrap();
+            assert_eq!(request.operation, Op::TerminalUploadCancel as i32);
+            assert_eq!(request.session_id, source.as_uuid().as_bytes());
+            assert_eq!(request.transfer_id, id.as_uuid().as_bytes());
+            assert!(receiver.try_recv().is_err());
+            assert!(
+                panel
+                    .connection
+                    .as_ref()
+                    .unwrap()
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .rows
+                    .contains_key(&id),
+                "cancellation must await the daemon result"
+            );
+        }
+    }
+}
+
+#[test]
+fn removal_rechecks_identity_and_leaves_unfinished_or_unknown_tasks_intact() {
+    let (done, row) = task(Some(State::Failed), Protocol::Sftp);
+    let source = row.source;
+    let (mut panel, mut receiver) = panel_with_task(done, row);
+    let shared = panel.connection.as_ref().unwrap().shared.clone();
+    let mut retained = Vec::new();
+    for state in [
+        Some(State::Preparing),
+        Some(State::Running),
+        Some(State::Paused),
+        None,
+    ] {
+        let (id, row) = task(state, Protocol::Sftp);
+        retained.push((id, row.source));
+        shared.lock().unwrap().rows.insert(id, row);
+    }
+    panel.remove_finished(SessionId::new(), done);
+    assert!(shared.lock().unwrap().rows.contains_key(&done));
+    for (id, source) in &retained {
+        panel.remove_finished(*source, *id);
+    }
+    assert_eq!(shared.lock().unwrap().rows.len(), retained.len() + 1);
+    panel.remove_finished(source, done);
+    assert_eq!(shared.lock().unwrap().rows.len(), retained.len());
+    assert!(panel.open, "other upload progress must stay available");
+    assert!(receiver.try_recv().is_err());
 }
 
 #[derive(Debug)]

@@ -196,6 +196,19 @@ impl SftpPanel {
                         view.connection_previous.or(Some(session)),
                     ));
                 }
+                if ui
+                    .add_enabled(
+                        phase == crate::sftp_connection::ConnectionPhase::Disconnected,
+                        egui::Button::new("连接选项…"),
+                    )
+                    .on_hover_text("本次选择跳板策略；先断开当前 SFTP 后可用")
+                    .clicked()
+                {
+                    *command = Some(crate::sftp_connection::lifecycle::connect_options(
+                        profile,
+                        view.connection_previous.or(Some(session)),
+                    ));
+                }
             }
             if self.page != 0
                 && tool(ui, Icon::Back, "文件与传输", true, None, false)

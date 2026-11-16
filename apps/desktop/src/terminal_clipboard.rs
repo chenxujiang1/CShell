@@ -2,24 +2,50 @@
 use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+mod all;
+pub(crate) fn consume_select_all_key(
+    tracked: &mut Option<winit::keyboard::PhysicalKey>,
+    key: winit::keyboard::PhysicalKey,
+    state: ElementState,
+    matching: bool,
+) -> bool {
+    if state == ElementState::Released {
+        if *tracked == Some(key) {
+            *tracked = None;
+            return true;
+        }
+    } else if matching {
+        *tracked = Some(key);
+        return true;
+    }
+    false
+}
+pub(crate) mod click_policy;
 mod context;
 mod history_drag;
 mod smart;
 
 pub(super) enum Action {
     Copy,
+    Interrupt(SessionId),
     Paste,
     Edit,
     Find(String),
     OpenLink(String),
     RemotePath(String, bool),
     CopyLink(String),
+    SelectScreen,
+    SelectAll,
+    ExportAll,
+    CopyObject(String),
+    SelectObject(context::CapturedSelection),
 }
 
 #[derive(Default)]
 pub(super) struct State {
     pub snapshot: Option<Arc<cshell_terminal::FrameSnapshot>>,
     pub history_frame: Option<cshell_render::LogSurfaceFrame>,
+    pub(super) all: Option<all::Selection>,
     owner: Option<cshell_domain::TabId>,
     dragged: bool,
     clicks: u8,
@@ -196,6 +222,25 @@ pub(super) fn history_text(
 }
 
 impl DesktopApp {
+    pub(super) fn release_menu_for_control_key(&mut self, state: ElementState, key: &Key) -> bool {
+        if self.terminal_clipboard.menu.is_none()
+            || !self.terminal_keyboard_available()
+            || self.terminal_clipboard.owner != self.current_workspace_tab
+            || self.terminal_clipboard.menu_session != self.active_terminal_session_id()
+            || state != ElementState::Pressed
+            || !self.modifiers.control_key()
+            || self.modifiers.alt_key()
+            || self.modifiers.shift_key()
+            || self.modifiers.super_key()
+            || !(matches!(key, Key::Character(text) if !text.is_empty())
+                || is_terminal_force_interrupt_key(key, self.modifiers))
+        {
+            return false;
+        }
+        self.dismiss_clipboard_menu();
+        true
+    }
+
     pub(super) fn clipboard_pointer_available(&self, scale: f32) -> bool {
         let over_control = self.cursor_position.is_some_and(|pos| {
             let point = egui::pos2(pos.x as f32 / scale, pos.y as f32 / scale);
@@ -219,6 +264,7 @@ impl DesktopApp {
         self.terminal_clipboard.snapshot = None;
         self.terminal_clipboard.history_frame = None;
         self.terminal_clipboard.cross = None;
+        self.terminal_clipboard.all = None;
         self.terminal_clipboard.auto_key = None;
         self.terminal_decorations.selection = None;
         self.log_decorations.selection = None;
@@ -244,7 +290,7 @@ impl DesktopApp {
         None
     }
 
-    pub(super) fn begin_clipboard_selection(&mut self, point: TerminalCellPoint) {
+    pub(super) fn begin_clipboard_selection(&mut self, mut point: TerminalCellPoint) {
         self.pause_terminal_reading();
         self.cancel_history_search_jump();
         let extending = self.modifiers.shift_key()
@@ -267,8 +313,29 @@ impl DesktopApp {
         self.terminal_clipboard.owner = self.current_workspace_tab;
         self.terminal_clipboard.press_position = self.cursor_position;
         self.terminal_clipboard.menu = None;
-        self.terminal_clipboard.clicks =
-            register_terminal_click(&mut self.terminal_click, point, std::time::Instant::now());
+        if self
+            .terminal_clipboard
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.row(point.row))
+            .and_then(|r| r.get(usize::from(point.column)))
+            .is_some_and(|c| c.width == cshell_terminal::CellWidth::WideSpacer)
+        {
+            point.column = point.column.saturating_sub(1);
+        }
+        let (interval, tolerance) =
+            click_policy::system_policy(f64::from(self.egui_context.pixels_per_point()));
+        if extending || self.modifiers.alt_key() {
+            self.terminal_click = TerminalClickState::default();
+        }
+        self.terminal_clipboard.clicks = click_policy::register(
+            &mut self.terminal_click,
+            point,
+            self.cursor_position,
+            std::time::Instant::now(),
+            interval,
+            tolerance,
+        );
         self.terminal_clipboard.dragged = extending;
         self.terminal_clipboard.word_anchor =
             (!extending && !self.modifiers.alt_key() && self.terminal_clipboard.clicks == 2)
@@ -330,6 +397,7 @@ impl DesktopApp {
             let threshold = 3.0 * f64::from(self.egui_context.pixels_per_point());
             if (now.x - start.x).hypot(now.y - start.y) > threshold {
                 self.terminal_clipboard.dragged = true;
+                self.terminal_click = TerminalClickState::default();
             }
         }
         if let Some(selection) = &mut self.terminal_decorations.selection
@@ -354,6 +422,7 @@ impl DesktopApp {
                 }
             };
             self.terminal_clipboard.dragged = true;
+            self.terminal_click = TerminalClickState::default();
             self.update_clipboard_highlight();
         }
     }
@@ -366,7 +435,12 @@ impl DesktopApp {
             *selection = if selection.mode == TerminalSelectionMode::Line {
                 selection.expanded_lines(snapshot)
             } else {
-                smart::expand(*selection, snapshot, &terminal_clipboard_settings::get())
+                let settings = terminal_clipboard_settings::get();
+                selection.expanded_with_word_rules(
+                    snapshot,
+                    &settings.word_delimiters,
+                    settings.chinese_word_selection,
+                )
             };
         }
         self.bump_terminal_decorations();
@@ -541,7 +615,8 @@ impl DesktopApp {
             {
                 self.terminal_clipboard.menu = None;
             } else {
-                let selection = self.terminal_decorations.selection.is_some();
+                let selection = self.terminal_decorations.selection.is_some()
+                    || self.terminal_clipboard.all.is_some();
                 let paste = self.active_terminal_session_id().is_some();
                 let remote = self.sftp_profile_for_open().is_some();
                 let shown = egui::Area::new(egui::Id::new("terminal-clipboard-menu"))
@@ -562,6 +637,23 @@ impl DesktopApp {
                             if copy.clicked() {
                                 command = Some(Action::Copy);
                             }
+                            if cshell_ui::form::menu_item(ui, "选择当前屏幕", true).clicked()
+                            {
+                                command = Some(Action::SelectScreen);
+                            }
+                            if cshell_ui::form::menu_item(
+                                ui,
+                                "全选当前终端    Ctrl+Shift+A / ⌘A",
+                                paste,
+                            )
+                            .clicked()
+                            {
+                                command = Some(Action::SelectAll);
+                            }
+                            if cshell_ui::form::menu_item(ui, "导出当前终端…", paste).clicked()
+                            {
+                                command = Some(Action::ExportAll);
+                            }
                             let paste_button = cshell_ui::form::menu_item(
                                 ui,
                                 "粘贴                 Ctrl+Shift+V",
@@ -573,6 +665,15 @@ impl DesktopApp {
                             self.terminal_clipboard.menu_focus_requested = false;
                             if paste_button.clicked() {
                                 command = Some(Action::Paste);
+                            }
+                            if cshell_ui::form::menu_item(ui, "发送中断（Ctrl+Break）", paste)
+                                .on_hover_text(
+                                    "仅向当前终端发送传统 Ctrl+C 中断字符；不会广播到其他终端。",
+                                )
+                                .clicked()
+                                && let Some(session) = self.active_terminal_session_id()
+                            {
+                                command = Some(Action::Interrupt(session));
                             }
                             if ui
                                 .add_enabled(
@@ -586,6 +687,25 @@ impl DesktopApp {
                                 command = Some(Action::Edit);
                             }
                             let context = &self.terminal_clipboard.context;
+                            if let Some(text) = &context.object {
+                                ui.separator();
+                                if cshell_ui::form::menu_item(
+                                    ui,
+                                    "复制完整对象（路径 / URL / 地址）",
+                                    true,
+                                )
+                                .on_hover_text(text)
+                                .clicked()
+                                {
+                                    command = Some(Action::CopyObject(text.clone()));
+                                }
+                                if let Some(selection) = &context.object_selection
+                                    && cshell_ui::form::menu_item(ui, "选择完整对象", true)
+                                        .clicked()
+                                {
+                                    command = Some(Action::SelectObject(selection.clone()));
+                                }
+                            }
                             if let Some(text) = &context.selected {
                                 ui.separator();
                                 if cshell_ui::form::menu_item(ui, "查找选中文本", true).clicked()
@@ -700,6 +820,71 @@ mod tests {
         app
     }
 
+    fn connected_menu_app() -> DesktopApp {
+        let mut app = app();
+        let session = SessionId::new();
+        app.workspace
+            .sessions
+            .insert(app.current_workspace_tab.unwrap(), session);
+        app.view_model.selected = Some(session);
+        app.daemon = Some(DesktopDaemonConnection::for_view_test(
+            crate::daemon_connection::DesktopDaemonView {
+                connected: true,
+                session_id: Some(session),
+                ..Default::default()
+            },
+        ));
+        app.open_clipboard_menu(egui::pos2(10.0, 10.0));
+        app
+    }
+
+    #[test]
+    fn menu_control_keys_close_menu_and_preserve_remote_control_characters() {
+        for letter in ["c", "x", "g", "v"] {
+            let mut app = connected_menu_app();
+            app.modifiers = ModifiersState::CONTROL;
+            app.egui_context
+                .memory_mut(|m| m.request_focus(egui::Id::new("menu-button")));
+            let key = Key::Character(letter.into());
+            assert!(app.release_menu_for_control_key(ElementState::Pressed, &key));
+            assert!(app.terminal_clipboard.menu.is_none());
+            assert_eq!(app.egui_context.memory(|m| m.focused()), None);
+            let action = desktop_key_action(
+                DesktopKeyInput {
+                    key: &key,
+                    text: None,
+                    pressed: true,
+                    repeated: false,
+                },
+                app.modifiers,
+                Default::default(),
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                cshell_terminal::InputEncoder::encode(&action, Default::default()).unwrap(),
+                [letter.as_bytes()[0] - b'a' + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn menu_does_not_forward_copy_chords_modal_or_stale_session_controls() {
+        let key = Key::Character("c".into());
+        let mut app = connected_menu_app();
+        app.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(!app.release_menu_for_control_key(ElementState::Pressed, &key));
+        assert!(app.terminal_clipboard.menu.is_some());
+        app.modifiers = ModifiersState::CONTROL;
+        app.view_model.about_open = true;
+        assert!(!app.release_menu_for_control_key(ElementState::Pressed, &key));
+        app.view_model.about_open = false;
+        app.view_model.selected = Some(SessionId::new());
+        assert!(!app.release_menu_for_control_key(ElementState::Pressed, &key));
+        assert!(!app.send_current_terminal_interrupt(app.terminal_clipboard.menu_session.unwrap()));
+        assert!(app.view_model.input_warning.is_some());
+    }
+
     #[test]
     fn double_click_jitter_and_movement_after_release_do_not_extend_selection() {
         let mut app = app();
@@ -714,6 +899,7 @@ mod tests {
         app.finish_clipboard_selection();
         app.update_clipboard_selection(TerminalCellPoint { row: 1, column: 8 });
         assert_eq!(app.terminal_selection_text().unwrap().unwrap(), "hello");
+        app.cursor_position = Some(winit::dpi::PhysicalPosition::new(80.0, 30.0));
         app.begin_clipboard_selection(TerminalCellPoint { row: 1, column: 8 });
         app.finish_clipboard_selection();
         assert!(app.terminal_selection_text().is_none());
@@ -757,7 +943,7 @@ mod tests {
         app.finish_clipboard_selection();
         app.begin_clipboard_selection(point);
         app.finish_clipboard_selection();
-        assert_eq!(app.terminal_selection_text().unwrap().unwrap(), "/var/log");
+        assert_eq!(app.terminal_selection_text().unwrap().unwrap(), "var");
         app.modifiers = ModifiersState::SHIFT;
         app.begin_clipboard_selection(TerminalCellPoint { row: 1, column: 2 });
         app.finish_clipboard_selection();
@@ -765,7 +951,7 @@ mod tests {
             app.terminal_selection_text()
                 .unwrap()
                 .unwrap()
-                .starts_with("/var/log\n中文")
+                .starts_with("var/log\n中文")
         );
     }
     #[test]

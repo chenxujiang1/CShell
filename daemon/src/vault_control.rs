@@ -41,6 +41,7 @@ pub(crate) struct VaultController {
     _ownership: Result<std::fs::File, VaultError>,
     state: Mutex<State>,
     epoch: AtomicU64,
+    lock_requests: AtomicU64,
     changes: tokio::sync::watch::Sender<u64>,
     enabled: AtomicBool,
     commit_gate: Mutex<()>,
@@ -129,6 +130,7 @@ impl VaultController {
                 root: root.unwrap_or(None),
             }),
             epoch: AtomicU64::new(0),
+            lock_requests: AtomicU64::new(0),
             changes,
             enabled,
             commit_gate: Mutex::new(()),
@@ -158,6 +160,9 @@ impl VaultController {
     }
     pub(crate) fn cancellation(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.subscribe()
+    }
+    pub(crate) fn lock_requests(&self) -> u64 {
+        self.lock_requests.load(Ordering::Acquire)
     }
     pub(crate) fn invalidate(&self) {
         let _gate = self
@@ -195,6 +200,7 @@ impl VaultController {
         Ok(epoch)
     }
     pub(crate) fn lock(&self) {
+        self.lock_requests.fetch_add(1, Ordering::AcqRel);
         self.invalidate();
         let mut state = self.guard();
         // Failure still locks. An old/missing index then requires an unlock;

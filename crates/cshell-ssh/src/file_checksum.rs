@@ -60,11 +60,11 @@ impl RusshClient {
         .flatten()
     }
 }
-fn quote_path(path: &str) -> Option<String> {
+pub(super) fn quote_path(path: &str) -> Option<String> {
     (path.starts_with('/') && path.len() <= 4096 && !path.chars().any(char::is_control))
         .then(|| format!("'{}'", path.replace('\'', "'\\''")))
 }
-fn parse_sha256(output: &[u8]) -> Option<[u8; 32]> {
+pub(super) fn parse_sha256(output: &[u8]) -> Option<[u8; 32]> {
     if output.len() != 68 || &output[64..] != b"  -\n" {
         return None;
     }

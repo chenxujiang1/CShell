@@ -1,10 +1,19 @@
 use super::*;
 
+#[derive(Clone)]
+pub(crate) struct CapturedSelection {
+    snapshot: Arc<cshell_terminal::FrameSnapshot>,
+    history: Option<cshell_render::LogSurfaceFrame>,
+    selection: TerminalSelection,
+}
+
 #[derive(Default)]
 pub(super) struct Context {
     pub selected: Option<zeroize::Zeroizing<String>>,
     pub link: Option<String>,
     pub path: Option<String>,
+    pub object: Option<String>,
+    pub object_selection: Option<CapturedSelection>,
 }
 pub(super) fn web_link(text: &str) -> Option<String> {
     let mut text = text.trim();
@@ -136,10 +145,60 @@ impl DesktopApp {
             .unwrap_or_default();
         let link = web_link(text).or_else(|| pointer.as_ref().and_then(|p| p.1.clone()));
         let path = remote_path(text, None);
+        let object = self
+            .cursor_position
+            .and_then(|p| self.terminal_point_at(p))
+            .and_then(|point| {
+                let history = self
+                    .log_surface
+                    .as_ref()
+                    .and_then(|s| s.prepare_frame(self.viewport_rows));
+                let snapshot = self
+                    .terminal_clipboard
+                    .snapshot
+                    .clone()
+                    .or_else(|| {
+                        history
+                            .as_ref()
+                            .map(|f| Arc::new(history_snapshot(f, self.viewport_rows)))
+                    })
+                    .or_else(|| self.terminal_surface.latest_snapshot().cloned())?;
+                let settings = terminal_clipboard_settings::Settings {
+                    smart_selection: true,
+                    ..terminal_clipboard_settings::get()
+                };
+                let selection = smart::expand(
+                    TerminalSelection {
+                        anchor: point,
+                        focus: point,
+                        mode: TerminalSelectionMode::Word,
+                    },
+                    &snapshot,
+                    &settings,
+                );
+                let value = selection.text(&snapshot).ok()?;
+                let address = value.parse::<std::net::IpAddr>().is_ok()
+                    || value.parse::<std::net::SocketAddr>().is_ok();
+                (value.len() <= 4096
+                    && (value.contains('/')
+                        || value.contains('\\')
+                        || address
+                        || web_link(&value).is_some()))
+                .then_some((
+                    value,
+                    CapturedSelection {
+                        snapshot,
+                        history: self.terminal_clipboard.history_frame.clone().or(history),
+                        selection,
+                    },
+                ))
+            });
         Context {
             selected: selected.map(zeroize::Zeroizing::new),
             link,
             path,
+            object: object.as_ref().map(|(text, _)| text.clone()),
+            object_selection: object.map(|(_, selection)| selection),
         }
     }
     pub(crate) fn ctrl_click_terminal_link(&mut self) -> bool {
@@ -157,6 +216,24 @@ impl DesktopApp {
     }
     pub(crate) fn handle_terminal_context_action(&mut self, action: Action) {
         match action {
+            Action::SelectScreen => self.select_terminal_screen(),
+            Action::SelectAll => self.select_terminal_all(),
+            Action::ExportAll => self.export_terminal_all(),
+            Action::SelectObject(captured) => {
+                self.clear_clipboard_selection();
+                self.terminal_clipboard.owner = self.current_workspace_tab;
+                self.terminal_clipboard.snapshot = Some(captured.snapshot);
+                self.terminal_clipboard.history_frame = captured.history;
+                self.terminal_decorations.selection = Some(captured.selection);
+                self.update_clipboard_highlight();
+                self.pause_terminal_reading();
+            }
+            Action::CopyObject(text) => {
+                if let Some(state) = &mut self.egui_state {
+                    state.set_clipboard_text(text);
+                    self.clipboard_notice("已复制完整对象".into());
+                }
+            }
             Action::Find(text) => {
                 self.terminal_search_query = text;
                 self.terminal_search_options.regex = false;
@@ -192,6 +269,35 @@ impl DesktopApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selecting_a_context_object_uses_the_frame_captured_when_menu_opened() {
+        use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
+        let mut terminal = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(2, 20));
+        terminal.feed(b"/var/log/access.log");
+        let snapshot = Arc::new(terminal.snapshot());
+        let selection = TerminalSelection {
+            anchor: TerminalCellPoint { row: 0, column: 0 },
+            focus: TerminalCellPoint { row: 0, column: 18 },
+            mode: TerminalSelectionMode::Character,
+        };
+        let captured = CapturedSelection {
+            snapshot,
+            history: None,
+            selection,
+        };
+        terminal.feed(b"\r\nNEW OUTPUT");
+        let mut app = DesktopApp::default();
+        app.terminal_surface
+            .submit_snapshot(Arc::new(terminal.snapshot()));
+        app.handle_terminal_context_action(Action::SelectObject(captured));
+        assert_eq!(
+            app.terminal_selection_text()
+                .and_then(Result::ok)
+                .as_deref()
+                .map(str::trim),
+            Some("/var/log/access.log")
+        );
+    }
     #[test]
     fn links_and_paths_are_explicitly_resolved_without_shell_expansion() {
         assert_eq!(

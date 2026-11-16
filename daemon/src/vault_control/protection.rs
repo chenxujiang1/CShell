@@ -10,6 +10,11 @@ impl VaultController {
         self: &Arc<Self>,
         plan: &crate::ssh_route::SshConnectionPlan,
     ) -> Result<(), cshell_ssh::SshError> {
+        crate::ssh_route::ensure_jump_reuse_runtime_supported(plan).map_err(|_| {
+            cshell_ssh::SshError::ManagedPeer(
+                "跳板连接复用尚未启用；未读取认证凭据，请选择始终新建",
+            )
+        })?;
         let targets = std::iter::once(plan.target.clone())
             .chain(plan.jumps.clone())
             .collect();

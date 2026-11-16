@@ -32,7 +32,10 @@ unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Time", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSEvent"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -42,6 +45,9 @@ prost.workspace = true
 cshell-local = { path = "../../crates/cshell-local" }
 cshell-storage = { path = "../../crates/cshell-storage" }
 cshelld = { path = "../../daemon" }
+
+[build-dependencies]
+toml_edit.workspace = true
 
 [lints]
 workspace = true

@@ -33,11 +33,14 @@ fn summary(id: SessionId, profile: ProfileId) -> SessionSummary {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_controls_close_confirm_reconnect_once_and_keep_the_same_tab() {
-    for (immediate_reconnect, uncertain_close, missing_old) in [
-        (false, false, false),
-        (true, false, false),
-        (true, true, false),
-        (true, false, true),
+    for (immediate_reconnect, uncertain_close, missing_old, typing) in [
+        (false, false, false, 0),
+        (true, false, false, 0),
+        (true, true, false, 0),
+        (true, false, true, 0),
+        (false, false, false, 1),
+        (false, false, false, 2),
+        (false, false, false, 3),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let profile = ProfileId::new();
@@ -91,6 +94,12 @@ async fn ssh_controls_close_confirm_reconnect_once_and_keep_the_same_tab() {
                                             assert!(state.sessions.is_empty(),"reconnect must not leave the old server session running");
                                             state.events.push("create"); state.sessions.push(summary(new,profile));
                                             envelope::Payload::SessionCreateResponse(SessionCreateResponse{session:Some(summary(new,profile)),..Default::default()})
+                                        }
+                                        Some(envelope::Payload::TerminalInputRequest(input))=>{
+                                            assert_eq!(input.session_id,new.as_uuid().as_bytes());
+                                            assert!(matches!(input.decode_action().unwrap(), InputAction::Text(text) if text == "AFTER_RECONNECT"), "activation must never reach the new shell");
+                                            state.events.push("input");
+                                            envelope::Payload::TerminalControlResponse(cshell_ipc::TerminalControlResponse::new(new.as_uuid().as_bytes().to_vec(), cshell_ipc::TerminalControlStatus::Accepted))
                                         }
                                         Some(envelope::Payload::SnapshotRequest(snapshot))=>{
                                             let id=SessionId::from_bytes(snapshot.session_id.try_into().unwrap());
@@ -239,8 +248,43 @@ async fn ssh_controls_close_confirm_reconnect_once_and_keep_the_same_tab() {
                 );
                 assert!(!app.view_model.can_disconnect_ssh);
                 assert!(app.view_model.can_restart_ssh);
-                app.request_ssh_control(true);
-                app.request_ssh_control(true);
+                app.window_active = true;
+                if typing == 0 {
+                    app.request_ssh_control(true);
+                    app.request_ssh_control(true);
+                } else if typing == 2 {
+                    assert!(app.reconnect_from_ime("断线时的输入"));
+                    assert!(app.reconnect_from_ime("正在连接时继续输入"));
+                } else {
+                    let key = if typing == 1 {
+                        Key::Named(NamedKey::Enter)
+                    } else {
+                        Key::Character("a".into())
+                    };
+                    let physical = winit::keyboard::PhysicalKey::Code(if typing == 1 {
+                        winit::keyboard::KeyCode::Enter
+                    } else {
+                        winit::keyboard::KeyCode::KeyA
+                    });
+                    assert!(app.reconnect_from_key(
+                        DesktopKeyInput {
+                            key: &key,
+                            text: None,
+                            pressed: true,
+                            repeated: false
+                        },
+                        physical
+                    ));
+                    assert!(app.reconnect_from_key(
+                        DesktopKeyInput {
+                            key: &key,
+                            text: None,
+                            pressed: true,
+                            repeated: true
+                        },
+                        physical
+                    ));
+                }
                 tokio::time::timeout(Duration::from_secs(8), async {
                     while app.workspace.sessions.get(&tab) != Some(&new) {
                         app.sync_workspace();
@@ -266,6 +310,68 @@ async fn ssh_controls_close_confirm_reconnect_once_and_keep_the_same_tab() {
                 }
             );
             assert_eq!(shared.lock().unwrap().sessions.len(), 1);
+            if typing != 0 {
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    while app.active_terminal_session_id() != Some(new) {
+                        app.sync_workspace();
+                        app.poll_primary_terminal(std::time::Instant::now());
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                if typing != 2 {
+                    let key = if typing == 1 {
+                        Key::Named(NamedKey::Enter)
+                    } else {
+                        Key::Character("a".into())
+                    };
+                    let physical = winit::keyboard::PhysicalKey::Code(if typing == 1 {
+                        winit::keyboard::KeyCode::Enter
+                    } else {
+                        winit::keyboard::KeyCode::KeyA
+                    });
+                    assert!(app.reconnect_from_key(
+                        DesktopKeyInput {
+                            key: &key,
+                            text: None,
+                            pressed: true,
+                            repeated: true
+                        },
+                        physical
+                    ));
+                    assert!(app.reconnect_from_key(
+                        DesktopKeyInput {
+                            key: &key,
+                            text: None,
+                            pressed: false,
+                            repeated: false
+                        },
+                        physical
+                    ));
+                    assert!(!app.reconnect_from_key(
+                        DesktopKeyInput {
+                            key: &key,
+                            text: None,
+                            pressed: true,
+                            repeated: false
+                        },
+                        physical
+                    ));
+                }
+                assert!(app.submit_terminal_action(InputAction::Text("AFTER_RECONNECT".into())));
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    while shared.lock().unwrap().events.last() != Some(&"input") {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    shared.lock().unwrap().events,
+                    vec!["close", "create", "input"]
+                );
+            }
         }
         drop(app);
         server.abort();

@@ -315,11 +315,17 @@ fn terminal_tab_bypasses_ui_navigation_but_form_and_search_focus_keep_tab() {
     for terminal_available in [true, false] {
         for ui_wants_keyboard in [true, false] {
             assert_eq!(
-                terminal_tab_bypasses_egui(&tab, terminal_available, ui_wants_keyboard),
+                terminal_key_bypasses_egui(
+                    &tab,
+                    ModifiersState::empty(),
+                    terminal_available,
+                    ui_wants_keyboard
+                ),
                 terminal_available && !ui_wants_keyboard
             );
-            assert!(!terminal_tab_bypasses_egui(
+            assert!(!terminal_key_bypasses_egui(
                 &Key::Named(NamedKey::Space),
+                ModifiersState::empty(),
                 terminal_available,
                 ui_wants_keyboard
             ));
@@ -332,11 +338,137 @@ fn terminal_tab_bypasses_ui_navigation_but_form_and_search_focus_keep_tab() {
     });
     output.textures_delta.clear();
     assert!(context.egui_wants_keyboard_input());
-    assert!(!terminal_tab_bypasses_egui(
+    assert!(!terminal_key_bypasses_egui(
         &tab,
+        ModifiersState::empty(),
         true,
         context.egui_wants_keyboard_input()
     ));
+}
+
+#[test]
+fn ctrl_break_is_an_explicit_interrupt_and_ctrl_c_still_obeys_negotiation() {
+    for key in [Key::Named(NamedKey::Pause), Key::Named(NamedKey::Cancel)] {
+        assert!(terminal_key_bypasses_egui(
+            &key,
+            ModifiersState::CONTROL,
+            true,
+            false
+        ));
+        for flags in 0..32 {
+            let modes = TerminalModes {
+                kitty_keyboard_flags: flags,
+                modify_other_keys: 2,
+                ..Default::default()
+            };
+            let sent = action(
+                &key,
+                None,
+                ModifiersState::CONTROL,
+                modes,
+                true,
+                false,
+                false,
+            )
+            .unwrap();
+            assert_eq!(bytes(&sent, modes), [3]);
+            assert!(
+                action(
+                    &key,
+                    None,
+                    ModifiersState::CONTROL,
+                    modes,
+                    false,
+                    false,
+                    false
+                )
+                .is_none()
+            );
+        }
+        assert!(!is_terminal_force_interrupt_key(
+            &key,
+            ModifiersState::empty()
+        ));
+        assert!(!is_terminal_force_interrupt_key(
+            &key,
+            ModifiersState::CONTROL | ModifiersState::SHIFT
+        ));
+    }
+    let modes = TerminalModes {
+        kitty_keyboard_flags: TerminalModes::KITTY_DISAMBIGUATE,
+        ..Default::default()
+    };
+    let sent = action(
+        &Key::Character("c".into()),
+        None,
+        ModifiersState::CONTROL,
+        modes,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(bytes(&sent, modes), b"\x1b[99;5u");
+}
+
+#[test]
+fn control_chords_bypass_ui_clipboard_only_when_terminal_owns_keyboard() {
+    for letter in 'a'..='z' {
+        let key = Key::Character(letter.to_string().into());
+        for modifiers in [
+            ModifiersState::CONTROL,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ] {
+            assert!(terminal_key_bypasses_egui(&key, modifiers, true, false));
+            assert!(!terminal_key_bypasses_egui(&key, modifiers, true, true));
+            assert!(!terminal_key_bypasses_egui(&key, modifiers, false, false));
+        }
+        assert!(!terminal_key_bypasses_egui(
+            &key,
+            ModifiersState::empty(),
+            true,
+            false
+        ));
+        // A remote application gets its control character, never a paste or a
+        // clipboard command; Ctrl+Shift+C/V remain separate desktop shortcuts.
+        let a = action(
+            &key,
+            None,
+            ModifiersState::CONTROL,
+            TerminalModes::default(),
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            bytes(&a, TerminalModes::default()),
+            vec![letter as u8 - b'a' + 1]
+        );
+    }
+    for key in [Key::Named(NamedKey::Process), Key::Dead(Some('´'))] {
+        assert!(!terminal_key_bypasses_egui(
+            &key,
+            ModifiersState::CONTROL,
+            true,
+            false
+        ));
+    }
+    for letter in ["c", "v"] {
+        let key = Key::Character(letter.into());
+        assert!(!matches_terminal_copy_shortcut(
+            ElementState::Pressed,
+            false,
+            &key,
+            ModifiersState::CONTROL
+        ));
+        assert!(!matches_terminal_paste_shortcut(
+            ElementState::Pressed,
+            false,
+            &key,
+            ModifiersState::CONTROL
+        ));
+    }
 }
 
 #[test]
@@ -385,5 +517,125 @@ fn workbench_navigation_does_not_steal_shell_control_keys() {
             ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT,
             letter
         ));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires Ubuntu WSL with nano; explicit real Windows PTY editor gate"]
+fn windows_pty_nano_receives_help_cancel_and_exit_controls() {
+    use cshell_domain::TerminalSize;
+    use cshell_terminal::TerminalEngine;
+    use std::{collections::BTreeMap, io::Read, time::Duration};
+    let profile = cshell_local::LocalProfile {
+        name: "isolated nano control gate".into(),
+        program: "wsl.exe".into(),
+        args: [
+            "-d",
+            "Ubuntu",
+            "-u",
+            "root",
+            "--exec",
+            "/usr/bin/env",
+            "LC_ALL=C",
+            "TERM=xterm-256color",
+            "/usr/bin/nano",
+            "--ignorercfiles",
+            "--restricted",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        cwd_policy: cshell_local::WorkingDirectoryPolicy::Inherit,
+        env_overrides: BTreeMap::new(),
+    };
+    let size = TerminalSize::cells(24, 100);
+    let mut pty = cshell_local::PtySession::spawn(&profile, size).unwrap();
+    let mut reader = pty.take_reader().unwrap();
+    let (sent, received) = std::sync::mpsc::sync_channel(16);
+    std::thread::spawn(move || {
+        let mut buffer = [0; 8192];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 || sent.send(buffer[..count].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut terminal = cshell_terminal::AlacrittyTerminalEngine::new(size);
+    let screen = |terminal: &cshell_terminal::AlacrittyTerminalEngine| {
+        terminal
+            .snapshot()
+            .cells
+            .iter()
+            .flat_map(cshell_terminal::Cell::characters)
+            .collect::<String>()
+    };
+    let wait = |terminal: &mut cshell_terminal::AlacrittyTerminalEngine,
+                pty: &mut cshell_local::PtySession,
+                wanted: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !screen(terminal)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(wanted)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nano missing {wanted}: {}",
+                screen(terminal)
+            );
+            if let Ok(data) = received.recv_timeout(Duration::from_millis(50)) {
+                for response in terminal.feed(&data).terminal_responses {
+                    pty.write_all(&response).unwrap();
+                }
+            }
+        }
+    };
+    let control = |letter: &str, terminal: &cshell_terminal::AlacrittyTerminalEngine| {
+        let key = Key::Character(letter.into());
+        assert!(terminal_key_bypasses_egui(
+            &key,
+            ModifiersState::CONTROL,
+            true,
+            false
+        ));
+        let modes = terminal.modes();
+        bytes(
+            &action(
+                &key,
+                None,
+                ModifiersState::CONTROL,
+                modes,
+                true,
+                false,
+                false,
+            )
+            .unwrap(),
+            modes,
+        )
+    };
+    wait(&mut terminal, &mut pty, "GNU nano");
+    pty.write_all(&control("g", &terminal)).unwrap();
+    wait(&mut terminal, &mut pty, "Main nano help text");
+    pty.write_all(&control("x", &terminal)).unwrap();
+    wait(&mut terminal, &mut pty, "New Buffer");
+    assert!(!screen(&terminal).contains("Main nano help text"));
+    pty.write_all(&control("c", &terminal)).unwrap();
+    wait(&mut terminal, &mut pty, "line 1/1");
+    pty.write_all(&control("x", &terminal)).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = pty.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Ctrl+X did not exit nano"
+        );
+        // Drain ConPTY output so shutdown cannot wait on a full pipe.
+        if let Ok(data) = received.recv_timeout(Duration::from_millis(25)) {
+            terminal.feed(&data);
+        }
     }
 }

@@ -7,7 +7,7 @@ use cshell_application::{
 use std::{
     collections::BTreeSet,
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -16,15 +16,49 @@ pub(super) struct Uploads(Arc<Mutex<BTreeMap<SessionId, Arc<Job>>>>);
 struct Job {
     source_epoch: u64,
     snapshot: Mutex<Snapshot>,
-    control: TransferControl,
+    control: Mutex<TransferControl>,
     confirmed: AtomicBool,
+    active: AtomicBool,
+    revision: AtomicU64,
+    retry: Mutex<Option<RetryContext>>,
 }
 impl std::fmt::Debug for Job {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TerminalUploadJob").finish_non_exhaustive()
     }
 }
+mod retry;
+use retry::RetryContext;
+
 impl Job {
+    fn control(&self) -> TransferControl {
+        self.control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    fn finish(&self, outcome: Result<(), String>) {
+        self.update(|s| {
+            s.bytes_per_second = 0;
+            match outcome {
+                Ok(()) => {
+                    s.state = State::Succeeded;
+                    s.bytes = s.total_bytes;
+                    s.completed = s.total_files;
+                    s.detail = "上传完成".into();
+                }
+                Err(error) => {
+                    s.state = if self.control().is_cancelled() {
+                        State::Cancelled
+                    } else {
+                        State::Failed
+                    };
+                    s.detail = error;
+                }
+            }
+        });
+        self.active.store(false, Ordering::Release);
+    }
     fn update(&self, f: impl FnOnce(&mut Snapshot)) {
         f(&mut self
             .snapshot
@@ -39,9 +73,9 @@ impl Job {
     }
     fn check(&self, source: &crate::SshSession) -> Result<(), String> {
         if !source.running() || source.transport_generation() != self.source_epoch {
-            self.control.cancel();
+            self.control().cancel();
         }
-        if self.control.is_cancelled() || !source.running() {
+        if self.control().is_cancelled() || !source.running() {
             Err("上传已取消或原 SSH 会话已断开".into())
         } else {
             Ok(())
@@ -54,6 +88,14 @@ pub(super) struct Plan {
     pub(super) directories: Vec<String>,
     pub(super) bytes: u64,
     has_directories: bool,
+}
+pub(super) fn failed_queue_item(queue: &SftpQueueSnapshot) -> Option<&SftpQueueItem> {
+    queue.items.iter().find(|row| {
+        matches!(
+            row.state,
+            SftpQueueState::Unknown | SftpQueueState::CleanupRequired | SftpQueueState::Cancelled
+        ) && !(row.can_retry_verified() && queue.retry_items.contains(&row.id))
+    })
 }
 fn component(name: &str) -> bool {
     !name.is_empty()
@@ -173,7 +215,15 @@ impl SftpIpcService {
             operation: operation as i32,
             session_id: request.session_id.clone(),
             transfer_id: request.transfer_id.clone(),
-            confirmed: operation == SftpOperation::TerminalUploadStart,
+            confirmed: matches!(
+                operation,
+                SftpOperation::TerminalUploadStart | SftpOperation::TerminalUploadRetry
+            ),
+            expected_revision: if operation == SftpOperation::TerminalUploadRetry {
+                request.expected_revision
+            } else {
+                0
+            },
             document_json: if operation == SftpOperation::TerminalUploadStart {
                 request.document_json.clone()
             } else {
@@ -229,14 +279,19 @@ impl SftpIpcService {
                     "此上传请求已经提交，请查询进度，不要重复提交",
                 );
             }
-            if jobs.values().filter(|j| !j.view().state.finished()).count() >= 4 {
+            if jobs
+                .values()
+                .filter(|j| j.active.load(Ordering::Acquire))
+                .count()
+                >= 4
+            {
                 return SftpResponse::with_status(
                     SftpStatus::CapacityReached,
                     "同时上传的批次已满，请等待现有传输结束",
                 );
             }
             if jobs.len() >= 64 {
-                jobs.retain(|_, j| !j.view().state.finished());
+                jobs.retain(|_, j| j.active.load(Ordering::Acquire) || !j.view().state.finished());
             }
             let job = Arc::new(Job {
                 source_epoch: source.transport_generation(),
@@ -255,7 +310,10 @@ impl SftpIpcService {
                     bytes_per_second: 0,
                     detail: "正在确认 SSH 当前目录并整理文件…".into(),
                 }),
-                control: TransferControl::default(),
+                control: Mutex::new(TransferControl::default()),
+                active: AtomicBool::new(true),
+                revision: AtomicU64::new(1),
+                retry: Mutex::new(None),
                 confirmed: AtomicBool::new(!options.confirm_before_start),
             });
             jobs.insert(id, job.clone());
@@ -265,23 +323,7 @@ impl SftpIpcService {
                 let outcome = service
                     .run_terminal_upload(task.clone(), source, options)
                     .await;
-                task.update(|s| {
-                    s.bytes_per_second = 0;
-                    match outcome {
-                        Ok(()) => {
-                            s.state = State::Succeeded;
-                            s.detail = "上传完成".into();
-                        }
-                        Err(error) => {
-                            s.state = if task.control.is_cancelled() {
-                                State::Cancelled
-                            } else {
-                                State::Failed
-                            };
-                            s.detail = error;
-                        }
-                    }
-                });
+                task.finish(outcome);
             });
             job
         } else {
@@ -298,6 +340,14 @@ impl SftpIpcService {
                     "上传任务不存在或不属于此 SSH 会话",
                 );
             };
+            if matches!(
+                operation,
+                SftpOperation::TerminalUploadRetryInspect | SftpOperation::TerminalUploadRetry
+            ) {
+                return self
+                    .terminal_retry(&job, request.expected_revision, operation, sessions)
+                    .await;
+            }
             if !job.view().state.finished() {
                 match operation {
                     SftpOperation::TerminalUploadPause => {
@@ -307,13 +357,13 @@ impl SftpIpcService {
                                 "ZMODEM 不支持可靠暂停，可取消后重新上传",
                             );
                         }
-                        job.control.pause();
+                        job.control().pause();
                     }
                     SftpOperation::TerminalUploadContinue => {
                         job.confirmed.store(true, Ordering::Release);
-                        job.control.resume();
+                        job.control().resume();
                     }
-                    SftpOperation::TerminalUploadCancel => job.control.cancel(),
+                    SftpOperation::TerminalUploadCancel => job.control().cancel(),
                     _ => {}
                 }
             }
@@ -335,7 +385,7 @@ impl SftpIpcService {
         let directory = source.current_remote_directory().await.filter(|p| sftp_remote_path(p,true)).ok_or("无法确认此 SSH 的当前目录，未上传任何内容。请在 shell 提示符下重新尝试，或打开 SFTP 明确选择目录。")?;
         job.update(|s| s.directory = directory.clone());
         let paths = options.paths.clone();
-        let control = job.control.clone();
+        let control = job.control().clone();
         let plan = tokio::task::spawn_blocking(move || plan(&paths, &control))
             .await
             .map_err(|_| "整理文件任务失败")??;
@@ -368,15 +418,12 @@ impl SftpIpcService {
         job.check(&source)?;
         job.update(|s| s.state = State::Running);
         let result = if protocol == Protocol::Sftp {
-            self.upload_sftp(
-                &job,
-                &source,
-                &lease,
-                &plan,
-                &directory,
-                options.verification,
-            )
-            .await
+            let mut context = RetryContext::new(plan, directory.clone(), options.verification);
+            let result = self.upload_sftp(&job, &source, &lease, &mut context).await;
+            if result.is_err() && !job.control().is_cancelled() {
+                self.retain_upload_retry(&job, context);
+            }
+            result
         } else {
             self.upload_zmodem(&job, &source, &lease, &plan, &directory)
                 .await
@@ -389,10 +436,14 @@ impl SftpIpcService {
         job: &Arc<Job>,
         source: &crate::SshSession,
         lease: &crate::shared_ssh::TransportLease,
-        plan: &Plan,
-        directory: &str,
-        verification: cshell_domain::SftpVerification,
+        context: &mut RetryContext,
     ) -> Result<(), String> {
+        let plan = context.plan.clone();
+        let directory = context.directory.clone();
+        let directory = directory.as_str();
+        let verification = context.verification;
+        let registry = context.registry.clone();
+        context.queue = Some(self.upload_queue(&registry, job.view().id).await?);
         let profile = source.profile_id().ok_or("SSH 会话缺少配置身份")?;
         let client = lease
             .client()
@@ -428,7 +479,6 @@ impl SftpIpcService {
         let _ = client.close().await;
         // A private registry isolates this drop's queue from SFTP browser tabs.
         let session = job.view().id;
-        let registry = SshSessionRegistry::default();
         let target = Arc::new(crate::sftp_lifecycle::SftpTarget::Shared {
             info: SftpConnectionInfo {
                 session,
@@ -448,25 +498,30 @@ impl SftpIpcService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session, target);
         let started = Instant::now();
-        let mut base_bytes = 0u64;
-        let mut base_files = 0u32;
+        let attempt_start_bytes = job.view().bytes;
+        // Once dispatch can begin, only a newly settled journal can authorize
+        // another attempt. Never fall back to the pre-dispatch snapshot.
+        context.queue = None;
         let result = async {
             // A smaller test batch exercises rollover without 97 durable file journals.
             #[cfg(test)] const BATCH:usize=3;
             #[cfg(not(test))] const BATCH:usize=96;
-            for chunk in plan.files.chunks(BATCH) {
+            while context.next < plan.files.len() {
                 job.check(source)?;
-                let before = self.upload_queue(&registry, session).await?;
-                for row in before.items {
-                    self.upload_mutate(
-                        &registry,
-                        session,
-                        SftpOperation::QueueRemove,
-                        row.id.as_uuid().as_bytes().to_vec(),
-                    )
-                    .await?;
+                let mut before = self.upload_queue(&registry, session).await?;
+                if context.clear_completed {
+                    if before.items.iter().any(|r| r.state != SftpQueueState::Succeeded) {
+                        return Err("已完成批次状态变化，请核对原队列".into());
+                    }
+                    for row in before.items {
+                        self.upload_mutate(&registry, session, SftpOperation::QueueRemove, row.id.as_uuid().as_bytes().to_vec()).await?;
+                    }
+                    context.clear_completed = false;
+                    before = self.upload_queue(&registry, session).await?;
                 }
-                let before = self.upload_queue(&registry, session).await?;
+                let end = (context.next + BATCH).min(plan.files.len());
+                let chunk = &plan.files[context.next..end];
+                if before.items.is_empty() {
                 let drafts: Vec<_> = chunk
                     .iter()
                     .map(|(local, relative, _)| SftpQueueDraft {
@@ -497,11 +552,15 @@ impl SftpIpcService {
                 if reply.status != SftpStatus::Ok as i32 {
                     return Err(reply.detail);
                 }
+                } else {
+                    retry::validate_chunk(&before, chunk, directory)?;
+                    self.resume_upload_queue(&registry, session, &before).await?;
+                }
                 let mut paused = false;
                 loop {
                     job.check(source)?;
                     let queue = self.upload_queue(&registry, session).await?;
-                    let want_pause = job.control.is_paused();
+                    let want_pause = job.control().is_paused();
                     if want_pause != paused {
                         for row in queue
                             .items
@@ -572,8 +631,8 @@ impl SftpIpcService {
                         .unwrap_or("")
                         .to_owned();
                     job.update(|s| {
-                        s.bytes = base_bytes + bytes;
-                        s.completed = base_files + complete;
+                        s.bytes = context.base_bytes + bytes;
+                        s.completed = context.next as u32 + complete;
                         s.current_name = current;
                         s.state = if paused {
                             State::Paused
@@ -583,7 +642,7 @@ impl SftpIpcService {
                         s.bytes_per_second = if paused {
                             0
                         } else {
-                            (s.bytes as f64 / started.elapsed().as_secs_f64().max(0.1)) as u64
+                            (s.bytes.saturating_sub(attempt_start_bytes) as f64 / started.elapsed().as_secs_f64().max(0.1)) as u64
                         };
                         s.detail = if paused {
                             "上传已暂停"
@@ -592,17 +651,10 @@ impl SftpIpcService {
                         }
                         .into();
                     });
-                    if queue.paused && !want_pause && queue.items.iter().any(|r|r.state==SftpQueueState::Pending) && !queue.items.iter().any(|r|r.state==SftpQueueState::Running) {
+                    if queue.paused && !want_pause && (queue.items.iter().any(|r|r.state==SftpQueueState::Pending) || !queue.retry_items.is_empty()) && !queue.items.iter().any(|r|r.state==SftpQueueState::Running) {
                         return Err("上传队列已停止，可能达到传输容量限制；请等待其他传输结束后重新拖入未完成的文件".into());
                     }
-                    if let Some(row) = queue.items.iter().find(|r| {
-                        matches!(
-                            r.state,
-                            SftpQueueState::Unknown
-                                | SftpQueueState::CleanupRequired
-                                | SftpQueueState::Cancelled
-                        )
-                    }) {
+                    if let Some(row) = failed_queue_item(&queue) {
                         return Err(row
                             .receipt
                             .as_ref()
@@ -617,8 +669,9 @@ impl SftpIpcService {
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                base_bytes += chunk.iter().map(|r| r.2).sum::<u64>();
-                base_files += chunk.len() as u32;
+                context.base_bytes += chunk.iter().map(|r| r.2).sum::<u64>();
+                context.next = end;
+                context.clear_completed = true;
             }
             Ok(())
         }
@@ -629,14 +682,31 @@ impl SftpIpcService {
                 .upload_mutate(&registry, session, SftpOperation::QueuePause, Vec::new())
                 .await;
             self.stop_session_transfers(session);
-            let _ = self
-                .upload_mutate(
-                    &registry,
-                    session,
-                    SftpOperation::QueueCancelPending,
-                    Vec::new(),
-                )
-                .await;
+            if job.control().is_cancelled() {
+                let _ = self
+                    .upload_mutate(
+                        &registry,
+                        session,
+                        SftpOperation::QueueCancelPending,
+                        Vec::new(),
+                    )
+                    .await;
+            }
+        }
+        // Wait for journal settlement before advertising a retry; never replay a
+        // transfer whose publication or cancellation outcome is still unknown.
+        for _ in 0..30 {
+            if !self.queues.active(session)
+                && let Ok(queue) = self.upload_queue(&registry, session).await
+                && !queue
+                    .items
+                    .iter()
+                    .any(|r| r.state == SftpQueueState::Running)
+            {
+                context.queue = Some(queue);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         // Closing only the child consumer never closes the source terminal.
         if let Ok(target) = registry.get_sftp(session) {

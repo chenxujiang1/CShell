@@ -69,7 +69,7 @@ pub(crate) enum SftpTarget {
     },
     Dedicated {
         info: cshell_application::SftpConnectionInfo,
-        transport: crate::ssh_route::RoutedSshConnection,
+        transport: crate::shared_ssh::TransportLease,
         stopped: AtomicBool,
     },
 }
@@ -87,7 +87,7 @@ impl SftpTarget {
         match self {
             Self::Terminal(s) => s.checksum_connection(),
             Self::Shared { lease, .. } => Some(lease.client().clone()),
-            Self::Dedicated { transport, .. } => Some(Arc::new(transport.client.clone())),
+            Self::Dedicated { transport, .. } => Some(transport.client()),
         }
     }
     pub(crate) fn running(&self) -> bool {
@@ -98,7 +98,7 @@ impl SftpTarget {
             }
             Self::Dedicated {
                 transport, stopped, ..
-            } => !stopped.load(Ordering::Acquire) && !transport.client.transport_closed(),
+            } => !stopped.load(Ordering::Acquire) && transport.running(),
         }
     }
     pub(crate) fn clipboard_trust(&self) -> Option<&ClipboardTrust> {
@@ -114,7 +114,7 @@ impl SftpTarget {
         match self {
             Self::Terminal(s) => s.open_sftp().await,
             Self::Shared { lease, .. } => Ok(lease.client().open_sftp().await?),
-            Self::Dedicated { transport, .. } => Ok(transport.client.open_sftp().await?),
+            Self::Dedicated { transport, .. } => Ok(transport.connection().open_sftp().await?),
         }
     }
     fn info(&self) -> Option<cshell_application::SftpConnectionInfo> {
@@ -136,10 +136,7 @@ impl SftpTarget {
         } = self
         {
             stopped.store(true, Ordering::Release);
-            let _ = transport.client.disconnect_confirmed().await;
-            if let Some(jump) = &transport.jump {
-                jump.disconnect().await;
-            }
+            transport.release().await;
         }
     }
 }
@@ -336,6 +333,7 @@ impl SessionIpcService {
                 .or_else(|_| {
                     serde_json::from_slice::<ProfileId>(&request.document_json).map(|profile| {
                         cshell_application::SftpConnectRequest {
+                            jump_override: None,
                             profile,
                             source_ssh_session: None,
                             discover_directory: false,
@@ -361,6 +359,19 @@ impl SessionIpcService {
         reservation: &Reservation<'_>,
     ) -> Result<Option<cshell_application::SftpConnectionInfo>, (SftpStatus, String)> {
         let profile = options.profile;
+        if options.source_ssh_session.is_some() && options.jump_override.is_some() {
+            return Err((
+                SftpStatus::InvalidRequest,
+                "复用现有目标 SFTP 与跳板临时选择不能同时指定".into(),
+            ));
+        }
+        if options
+            .jump_override
+            .as_ref()
+            .is_some_and(|selection| !selection.is_valid())
+        {
+            return Err((SftpStatus::InvalidRequest, "跳板临时选择格式无效".into()));
+        }
         if let Some(source) = options.source_ssh_session {
             let source = self.ssh_sessions.get(source).map_err(|_| {
                 (
@@ -457,6 +468,18 @@ impl SessionIpcService {
             crate::profile_ipc::SavedSessionPlan::Ssh(plan) => plan,
             _ => return Err((SftpStatus::InvalidRequest, "请选择 SSH 服务器配置".into())),
         };
+        let plan = plan
+            .with_jump_override(options.jump_override.as_ref())
+            .map_err(|error| {
+                (
+                    if error.code == cshell_ipc::SessionFailureCode::Unsupported {
+                        SftpStatus::Unsupported
+                    } else {
+                        SftpStatus::InvalidRequest
+                    },
+                    error.detail,
+                )
+            })?;
         let known_hosts = self
             .known_hosts_path
             .clone()
@@ -465,7 +488,19 @@ impl SessionIpcService {
         let vault = &profiles.vault;
         cshell_ssh::connection_progress::peer(0, &plan.target.host, plan.target.port);
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::Credentials);
-        crate::keyboard_auth::for_sftp(session, vault.prepare_plan(&plan))
+        let mut waiting_cancel = vault.cancellation();
+        let lock_request = vault.lock_requests();
+        self.ssh_sessions.refresh_jump_sources();
+        let mut admission = tokio::select! {
+            biased;
+            _ = async { loop { if waiting_cancel.changed().await.is_err() || vault.lock_requests() != lock_request { break; } } } => return Err((SftpStatus::Cancelled, "跳板选择已取消".into())),
+            result = self.ssh_sessions.jump_reuse.prepare(&plan, options.jump_override.as_ref(), &known_hosts) =>
+                result.map_err(|failure| (if failure.code == cshell_ipc::SessionFailureCode::JumpSelectionRequired { SftpStatus::JumpSelectionRequired } else { SftpStatus::Failed }, failure.detail))?,
+        };
+        if vault.lock_requests() != lock_request {
+            return Err((SftpStatus::Cancelled, "跳板选择期间凭据库已锁定".into()));
+        }
+        crate::keyboard_auth::for_sftp(session, vault.prepare_plan(&admission.credentials()))
             .await
             .map_err(|error| {
                 (
@@ -479,10 +514,21 @@ impl SessionIpcService {
             })?;
         let mut cancellation = vault.cancellation();
         let epoch = *cancellation.borrow();
+        let reusing = admission.borrowed.is_some();
         let connect = async {
+            if reusing {
+                crate::jump_reuse::Registry::validate_binding(&plan, profiles)
+                    .await
+                    .map_err(|failure| (SftpStatus::Failed, failure.detail))?;
+            }
             let transport = crate::keyboard_auth::for_sftp(
                 session,
-                crate::ssh_route::connect_profile(&plan, &known_hosts, vault),
+                crate::ssh_route::connect_prepared(
+                    &admission.plan,
+                    &known_hosts,
+                    vault,
+                    admission.borrowed.take(),
+                ),
             )
             .await
             .map_err(|e| {
@@ -529,6 +575,13 @@ impl SessionIpcService {
             shared_from: None,
             initial_directory: directory,
         };
+        let transport = crate::shared_ssh::TransportLease::new(transport);
+        if reusing {
+            crate::jump_reuse::Registry::validate_binding(&plan, profiles)
+                .await
+                .map_err(|failure| (SftpStatus::Failed, failure.detail))?;
+        }
+        let registration = transport.clone();
         let target = Arc::new(SftpTarget::Dedicated {
             info: info.clone(),
             transport,
@@ -544,6 +597,9 @@ impl SessionIpcService {
                 "CredentialUnavailable: 凭据库已锁定".into(),
             ));
         }
+        self.ssh_sessions
+            .jump_reuse
+            .register_route(&plan, &registration);
         Ok(Some(info))
     }
 }

@@ -35,14 +35,19 @@ exclude = [
     "vendor/zbus-lockstep",
     "vendor/zbus-lockstep-macros",
     "vendor/zbus-secret-service-keyring-store",
+    "vendor/sqlx-sqlite",
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0-dev.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 publish = false
+
+[workspace.metadata.cshell]
+# Increase for each distributed build; also used as the numeric macOS build ID.
+build-number = 11001
 
 [workspace.dependencies]
 aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
@@ -72,7 +77,7 @@ regex = "=1.13.1"
 ring = "=0.17.14"
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 toml_edit = { version = "=0.25.13", default-features = false, features = ["parse"] }
-russh = { version = "=0.63.1", default-features = false, features = ["ring"] }
+russh = { version = "=0.65.1", default-features = false, features = ["ring"] }
 russh-sftp = "=3.0.0"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -88,6 +93,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "=1.26.0", features = ["serde", "v7"] }
 unicode-segmentation = "=1.13.3"
+icu_segmenter = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 unicode-width = "=0.2.2"
 wgpu = "=30.0.1"
 winit = "=0.30.13"
@@ -133,6 +139,7 @@ strip = "symbols"
 debug = true
 
 [patch.crates-io]
+sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 
 accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }

@@ -176,6 +176,7 @@ async fn first_host_key_confirmation_is_audited_and_unknown_sessions_stay_blocke
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        jump_override: None,
                         connection_diagnostics: false,
                         source_ssh_session_id: None,
                         local_launch: None,
@@ -603,6 +604,7 @@ async fn saved_ssh_profile_without_password_requires_frontend_after_host_verific
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        jump_override: None,
                         connection_diagnostics: false,
                         source_ssh_session_id: None,
                         local_launch: None,

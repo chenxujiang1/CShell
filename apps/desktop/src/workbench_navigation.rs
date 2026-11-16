@@ -30,12 +30,12 @@ impl DesktopApp {
             && !self.host_ca_panel.open
             && !self.host_panel.open
             && !self.task_panel.open
-            && !self.terminal_tools_panel.open
+            && !(self.terminal_tools_panel.open || self.resources.open)
             && !self.profile_batch_panel.open
             && !self.terminal_policy_panel.open
             && !self.workspace_recovery_panel.open
             && !self.ssh_provider_panel.open
-            && !self.view_model.about_open
+            && !self.view_model.help_open()
             && !self.view_model.confirm_terminate
     }
     pub(super) fn return_focus_from_tab_navigation(&mut self) {

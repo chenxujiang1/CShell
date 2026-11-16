@@ -132,6 +132,7 @@ impl WindowE2e {
         rows: u16,
         rendered_vertices: u32,
     ) {
+        self.check_viewport_fill(surface, rows);
         if rendered_vertices == 0 {
             self.fail("window E2E presented an empty log frame");
         }
@@ -159,6 +160,22 @@ impl WindowE2e {
                 let _previous = window.request_inner_size(size);
             }
             _ => {}
+        }
+    }
+
+    fn check_viewport_fill(&mut self, surface: &LogSurfaceModel, rows: u16) {
+        if let Some(frame) = surface.prepare_frame(rows) {
+            self.check_frame_fill(&frame, rows);
+        }
+    }
+
+    fn check_frame_fill(&mut self, frame: &cshell_render::LogSurfaceFrame, rows: u16) {
+        let first = frame.visible_rows.start + frame.first_viewport_row;
+        if frame.page.has_after
+            && frame.visual_rows.len() >= usize::from(rows)
+            && frame.visible_rows.end.saturating_sub(first) < usize::from(rows)
+        {
+            self.fail("window E2E bottom gap: loaded history does not fill the viewport while more rows exist");
         }
     }
 
@@ -279,6 +296,35 @@ fn page_around(anchor: u64, revision: u64) -> Arc<LogPage> {
 #[cfg(test)]
 mod tests {
     use super::{PAGE_ROWS, TOTAL, page_around};
+
+    #[test]
+    fn native_gate_rejects_a_nonempty_frame_with_a_blank_bottom() {
+        let mut surface = cshell_render::LogSurfaceModel::default();
+        let page = page_around(5_000, 1);
+        let last = page
+            .rows
+            .last()
+            .unwrap_or_else(|| panic!("fixture rows"))
+            .line_id;
+        surface.submit_page(page).unwrap_or_else(|e| panic!("{e}"));
+        let layout = surface
+            .request_reflow(120)
+            .unwrap_or_else(|| panic!("layout"))
+            .execute()
+            .unwrap_or_else(|e| panic!("{e}"));
+        surface.submit_reflow(layout);
+        surface.anchor(last, 0);
+        let mut frame = surface.prepare_frame(20).unwrap_or_else(|| panic!("frame"));
+        frame.visible_rows = frame.visual_rows.len() - 1..frame.visual_rows.len();
+        frame.first_viewport_row = 0;
+        let mut gate = super::WindowE2e::new_with_windows(false);
+        gate.check_frame_fill(&frame, 20);
+        assert!(
+            gate.failure
+                .as_ref()
+                .is_some_and(|failure| failure.contains("bottom gap"))
+        );
+    }
 
     #[test]
     fn premature_window_exit_cannot_report_a_passing_native_gate() {

@@ -256,9 +256,11 @@ pub enum TerminalToolsReply {
     View(TerminalToolsView),
     Raw(RawJournalSlice),
     Shell(ShellHistory),
+    Resources(ServerResources),
 }
 #[derive(Debug)]
 pub enum TerminalToolsExpectation<'a> {
+    Resources(SessionId),
     Shell {
         session: SessionId,
         id: u64,
@@ -340,6 +342,11 @@ pub fn decode_terminal_tools_reply(
         }
     }
     match (&reply, expect) {
+        (TerminalToolsReply::Resources(value), TerminalToolsExpectation::Resources(session)) => {
+            if !value.validate(session) {
+                return Err("server resources scope or limit mismatch");
+            }
+        }
         (TerminalToolsReply::Shell(value), TerminalToolsExpectation::Shell { session, id }) => {
             if !value.validate(session, id) {
                 return Err("shell history scope or limit mismatch");
@@ -394,4 +401,60 @@ pub fn decode_terminal_tools_reply(
         _ => return Err("terminal tools reply type mismatch"),
     }
     Ok(reply)
+}
+
+#[cfg(test)]
+mod resource_reply_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn resources_reply_requires_matching_scope_limits_and_exact_fields() {
+        let session = SessionId::new();
+        let sample = ServerResources {
+            session,
+            transport_generation: 0,
+            sampled_unix_ms: 1,
+            cpu_basis_points: Some(500),
+            memory_total_kib: 100,
+            memory_available_kib: 50,
+            swap_total_kib: 0,
+            swap_free_kib: 0,
+            load_milli: [0; 3],
+            uptime_seconds: 10,
+        };
+        let mut document = serde_json::to_value(TerminalToolsReply::Resources(sample)).unwrap();
+        let bytes = serde_json::to_vec(&document).unwrap();
+        assert!(
+            decode_terminal_tools_reply(&bytes, TerminalToolsExpectation::Resources(session))
+                .is_ok()
+        );
+        assert!(
+            decode_terminal_tools_reply(
+                &bytes,
+                TerminalToolsExpectation::Resources(SessionId::new())
+            )
+            .is_err()
+        );
+        assert!(
+            decode_terminal_tools_reply(&bytes, TerminalToolsExpectation::View { after: 0 })
+                .is_err()
+        );
+        document["value"]["memory_available_kib"] = serde_json::json!(101);
+        assert!(
+            decode_terminal_tools_reply(
+                &serde_json::to_vec(&document).unwrap(),
+                TerminalToolsExpectation::Resources(session)
+            )
+            .is_err()
+        );
+        document["value"]["memory_available_kib"] = serde_json::json!(50);
+        document["value"]["unexpected"] = serde_json::json!("not allowed");
+        assert!(
+            decode_terminal_tools_reply(
+                &serde_json::to_vec(&document).unwrap(),
+                TerminalToolsExpectation::Resources(session)
+            )
+            .is_err()
+        );
+    }
 }

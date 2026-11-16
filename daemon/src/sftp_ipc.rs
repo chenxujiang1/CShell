@@ -98,7 +98,9 @@ impl SftpIpcService {
             | SftpOperation::TerminalUploadGet
             | SftpOperation::TerminalUploadPause
             | SftpOperation::TerminalUploadContinue
-            | SftpOperation::TerminalUploadCancel => {
+            | SftpOperation::TerminalUploadCancel
+            | SftpOperation::TerminalUploadRetryInspect
+            | SftpOperation::TerminalUploadRetry => {
                 self.terminal_upload(request, session_id, operation, sessions)
                     .await
             }

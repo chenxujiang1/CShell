@@ -7,7 +7,10 @@
 
 use super::*;
 mod connection_diagnostics;
+mod jump_leases;
+mod jump_reuse;
 mod product_workspace;
+mod upload_retry;
 use crate::{LocalSessionRegistry, ProfileIpcService, SessionIpcService, SshSession};
 use cshell_application::{CatalogChange, ProfileService};
 use cshell_domain::{
@@ -30,6 +33,50 @@ struct Fixture {
     codes: Arc<AtomicUsize>,
     passwords: Arc<AtomicUsize>,
 }
+/// The upload tests check MFA behavior, not cold local setup latency. Match the
+/// transport's 30-second connect bound, then keep the stricter 8-second MFA bound.
+struct FixtureSetupBudget {
+    preparation: std::time::Instant,
+    authentication: Option<std::time::Instant>,
+    initial_tcp: usize,
+}
+impl FixtureSetupBudget {
+    fn new(now: std::time::Instant, initial_tcp: usize) -> Self {
+        Self {
+            preparation: now + Duration::from_secs(30),
+            authentication: None,
+            initial_tcp,
+        }
+    }
+    fn deadline(&mut self, now: std::time::Instant, tcp: usize) -> std::time::Instant {
+        if self.authentication.is_none() && now < self.preparation && tcp > self.initial_tcp {
+            self.authentication = Some(now + Duration::from_secs(8));
+        }
+        self.authentication.unwrap_or(self.preparation)
+    }
+}
+#[test]
+fn setup_and_mfa_budgets_are_separate_bounded_and_never_extended_by_polling() {
+    let now = std::time::Instant::now();
+    let mut budget = FixtureSetupBudget::new(now, 2);
+    assert_eq!(
+        budget.deadline(now + Duration::from_secs(9), 2),
+        now + Duration::from_secs(30)
+    );
+    assert_eq!(
+        budget.deadline(now + Duration::from_secs(12), 3),
+        now + Duration::from_secs(20)
+    );
+    assert_eq!(
+        budget.deadline(now + Duration::from_secs(19), 4),
+        now + Duration::from_secs(20)
+    );
+    let mut expired = FixtureSetupBudget::new(now, 0);
+    assert_eq!(
+        expired.deadline(now + Duration::from_secs(31), 1),
+        now + Duration::from_secs(30)
+    );
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.server.abort();
@@ -37,6 +84,13 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new(terminal_limit: Option<usize>) -> Self {
+        Self::with_routes(terminal_limit, None, None).await
+    }
+    async fn with_routes(
+        terminal_limit: Option<usize>,
+        forward: Option<std::net::SocketAddr>,
+        bridge: Option<Arc<cshell_ssh::SshConnection>>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let key = russh::keys::ssh_key::PrivateKey::random(
             &mut rand::rng(),
@@ -64,6 +118,8 @@ impl Fixture {
                 handler.mfa_codes = Some(otp.clone());
                 handler.mfa_passwords = Some(pw.clone());
                 handler.terminal_limit = terminal_limit;
+                handler.jump_forward = forward;
+                handler.exec_bridge = bridge.clone();
                 handler.enable_upload_test_commands();
                 let config = config.clone();
                 tasks.spawn(async move {
@@ -153,10 +209,13 @@ impl Fixture {
     async fn create(&self) -> SessionSummary {
         let service = self.service.clone();
         let profile = self.profile;
-        let job = tokio::spawn(async move {
+        let mut budget =
+            FixtureSetupBudget::new(std::time::Instant::now(), self.tcp.load(Ordering::SeqCst));
+        let mut job = tokio::spawn(async move {
             ipc(
                 &service,
                 envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                    jump_override: None,
                     rows: 24,
                     cols: 80,
                     profile_id: Some(profile.as_uuid().as_bytes().to_vec()),
@@ -165,24 +224,35 @@ impl Fixture {
             )
             .await
         });
-        let prompt = tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                let envelope::Payload::VaultResponse(reply) = self
-                    .call(envelope::Payload::VaultRequest(VaultRequest::new(
-                        VaultOperation::KeyboardAuthPoll,
-                    )))
-                    .await
-                else {
-                    panic!()
-                };
-                if let Some(prompt) = reply.auth_challenge {
-                    break prompt;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut last_status = None;
+        let prompt = loop {
+            if job.is_finished() {
+                let reply = (&mut job).await.unwrap();
+                panic!("SSH setup ended before the expected MFA challenge: {reply:?}");
             }
-        })
-        .await
-        .unwrap();
+            let now = std::time::Instant::now();
+            let deadline = budget.deadline(now, self.tcp.load(Ordering::SeqCst));
+            assert!(
+                now < deadline,
+                "SSH fixture timed out; TCP accepted={}, last poll: {last_status:?}",
+                budget.authentication.is_some()
+            );
+            let reply = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), self.call(envelope::Payload::VaultRequest(VaultRequest::new(VaultOperation::KeyboardAuthPoll))))
+                .await.unwrap_or_else(|_| panic!("SSH fixture timed out; TCP accepted={}, last poll (status, TCP, challenges, passwords): {last_status:?}", budget.authentication.is_some()));
+            let envelope::Payload::VaultResponse(reply) = reply else {
+                panic!()
+            };
+            last_status = Some((
+                reply.status,
+                self.tcp.load(Ordering::SeqCst),
+                self.codes.load(Ordering::SeqCst),
+                self.passwords.load(Ordering::SeqCst),
+            ));
+            if let Some(prompt) = reply.auth_challenge {
+                break prompt;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         assert!(!prompt.login);
         assert!(prompt.prompts[0].text.contains("Verification"));
         let mut reply = VaultRequest::new(VaultOperation::KeyboardAuthRespond);
@@ -213,6 +283,7 @@ impl Fixture {
         let envelope::Payload::SessionCreateResponse(reply) = self
             .call(envelope::Payload::SessionCreateRequest(
                 SessionCreateRequest {
+                    jump_override: None,
                     rows: 24,
                     cols: 80,
                     source_ssh_session_id: Some(source.as_uuid().as_bytes().to_vec()),
@@ -237,6 +308,7 @@ impl Fixture {
                 session_id: id.as_uuid().as_bytes().to_vec(),
                 document_json: if operation == SftpOperation::ConnectProfile {
                     serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                        jump_override: None,
                         profile: self.profile,
                         source_ssh_session: source,
                         discover_directory: true,
@@ -315,6 +387,7 @@ async fn cancelling_mfa_reports_cancelled_for_ssh_and_sftp_and_creates_no_sessio
                 operation: SftpOperation::ConnectProfile as i32,
                 session_id: session.as_uuid().as_bytes().to_vec(),
                 document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    jump_override: None,
                     profile,
                     source_ssh_session: None,
                     discover_directory: true,
@@ -324,6 +397,7 @@ async fn cancelling_mfa_reports_cancelled_for_ssh_and_sftp_and_creates_no_sessio
             })
         } else {
             envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                jump_override: None,
                 profile_id: Some(profile.as_uuid().as_bytes().to_vec()),
                 rows: 24,
                 cols: 80,
@@ -532,6 +606,7 @@ async fn invalid_source_and_channel_denial_never_reauthenticate_or_damage_source
     let original = f.service.ssh_sessions.get(source).unwrap();
     echo(&original, "after-channel-denied").await;
     let request = SessionCreateRequest {
+        jump_override: None,
         rows: 24,
         cols: 80,
         profile_id: Some(f.profile.as_uuid().as_bytes().to_vec()),
@@ -546,6 +621,7 @@ async fn invalid_source_and_channel_denial_never_reauthenticate_or_damage_source
     };
     assert!(invalid.session.is_none());
     let invalid = cshell_application::SftpConnectRequest {
+        jump_override: None,
         profile: ProfileId::new(),
         source_ssh_session: Some(source),
         discover_directory: true,
@@ -1606,6 +1682,7 @@ async fn vault_protection_unlock_precedes_ssh_and_sftp_mfa_and_never_reaches_the
                 operation: SftpOperation::ConnectProfile as i32,
                 session_id: file_id.as_uuid().as_bytes().to_vec(),
                 document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    jump_override: None,
                     profile: f.profile,
                     source_ssh_session: None,
                     discover_directory: true,
@@ -1615,6 +1692,7 @@ async fn vault_protection_unlock_precedes_ssh_and_sftp_mfa_and_never_reaches_the
             })
         } else {
             envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                jump_override: None,
                 profile_id: Some(f.profile.as_uuid().as_bytes().to_vec()),
                 rows: 24,
                 cols: 80,
@@ -1680,6 +1758,7 @@ async fn vault_protection_cancelled_sftp_unlock_closes_attempt_without_contactin
                 operation: SftpOperation::ConnectProfile as i32,
                 session_id: file_id.as_uuid().as_bytes().to_vec(),
                 document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    jump_override: None,
                     profile,
                     source_ssh_session: None,
                     discover_directory: true,

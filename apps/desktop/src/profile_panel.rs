@@ -1301,6 +1301,7 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
         }
         2 => {
             ui.heading("代理与跳板");
+            let previous_route = draft.route_kind;
             cshell_ui::form::combo(ui, "连接方式")
                 .truncate()
                 .selected_text(match draft.route_kind {
@@ -1316,6 +1317,16 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
                     ui.selectable_value(&mut draft.route_kind, 2, "HTTP CONNECT 代理");
                     ui.selectable_value(&mut draft.route_kind, 3, "跳板连接");
                 });
+            if previous_route != draft.route_kind {
+                draft.ssh_options.jump_reuse_policy = if draft.route_kind == 3 {
+                    cshell_domain::JumpReusePolicy::for_new_jump()
+                } else {
+                    cshell_domain::JumpReusePolicy::AlwaysNew
+                };
+                if draft.route_kind == 3 {
+                    draft.ssh_options.auto_reconnect = false;
+                }
+            }
             if matches!(draft.route_kind, 1 | 2) {
                 ui.label("使用无认证代理；仍会严格核对目标 SSH 服务器的主机密钥。");
                 cshell_ui::form::text(ui, "代理主机", &mut draft.proxy_host);
@@ -1324,6 +1335,36 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
                     ui.add(egui::DragValue::new(&mut draft.proxy_port).range(1..=65535));
                 });
             } else if draft.route_kind == 3 {
+                let previous_policy = draft.ssh_options.jump_reuse_policy;
+                cshell_ui::form::combo(ui, "跳板连接方式")
+                    .selected_text(match draft.ssh_options.jump_reuse_policy {
+                        cshell_domain::JumpReusePolicy::AlwaysNew => "始终新建独立连接",
+                        cshell_domain::JumpReusePolicy::PreferExisting => "优先复用已有连接",
+                        cshell_domain::JumpReusePolicy::OnlyExisting => "仅使用已有连接",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut draft.ssh_options.jump_reuse_policy,
+                            cshell_domain::JumpReusePolicy::PreferExisting,
+                            "优先复用已有连接",
+                        );
+                        ui.selectable_value(
+                            &mut draft.ssh_options.jump_reuse_policy,
+                            cshell_domain::JumpReusePolicy::AlwaysNew,
+                            "始终新建独立连接",
+                        );
+                        ui.selectable_value(
+                            &mut draft.ssh_options.jump_reuse_policy,
+                            cshell_domain::JumpReusePolicy::OnlyExisting,
+                            "仅使用已有连接",
+                        );
+                    });
+                if previous_policy != draft.ssh_options.jump_reuse_policy
+                    && !draft.ssh_options.jump_reuse_policy.is_always_new()
+                {
+                    draft.ssh_options.auto_reconnect = false;
+                }
+                ui.weak("复用已认证的单层跳板，无需再次输入动态码；多个候选时由你选择。多级跳板请选择独立连接。");
                 let selected = draft
                     .jump_profile_id
                     .and_then(|id| catalog.profiles.iter().find(|item| item.id == id))
@@ -1334,7 +1375,9 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
                     .show_ui(ui, |ui| {
                         cshell_ui::form::menu(ui);
                         for candidate in &catalog.ssh_connections {
-                            if candidate.profile_id == draft.record.id {
+                            if candidate.profile_id == draft.record.id
+                                || candidate.options.authentication_on_jump
+                            {
                                 continue;
                             }
                             if let Some(profile) = catalog
@@ -1382,6 +1425,9 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
         }
         5 => {
             ui.heading("连接选项");
+            if draft.route_kind == 3 && !draft.ssh_options.jump_reuse_policy.is_always_new() {
+                ui.weak("共享跳板断开后，目标会话需手动重连；不会自动迁移或重放输入。");
+            }
             ui.checkbox(
                 &mut draft.ssh_options.keepalive_enabled,
                 "保持连接活跃（SSH 保活）",
@@ -1401,7 +1447,13 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
             });
             ui.weak("空闲时发送 SSH 协议保活请求，不向终端输入字符。");
             ui.separator();
-            ui.checkbox(&mut draft.ssh_options.auto_reconnect, "断线自动重连");
+            ui.add_enabled(
+                !draft.ssh_options.authentication_on_jump,
+                egui::Checkbox::new(&mut draft.ssh_options.auto_reconnect, "断线自动重连"),
+            );
+            if draft.ssh_options.authentication_on_jump {
+                ui.weak("A 端认证模式断开后请手动重连；不会自动重放终端输入。");
+            }
             ui.add_enabled_ui(draft.ssh_options.auto_reconnect, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("重试间隔（秒）");
@@ -1416,7 +1468,7 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
                     );
                 });
             });
-            ui.weak("仅意外断线时重连。手动断开、关闭标签或退出远端 shell 不会重连。重连会打开新的远端 shell，不重放之前的输入。");
+            ui.weak("仅意外断线时自动重连。手动断开、关闭标签或退出远端 shell 不会自动重连。重连会打开新的远端 shell，不重放之前的输入。");
             ui.weak("保存后对新连接生效。");
             ui.separator();
             ui.label("SFTP 校验策略");
@@ -1463,6 +1515,11 @@ Err(error) => { ui.colored_label(cshell_ui::theme::WARNING, error); }
         }
         3 => {
             ui.heading("服务器主机密钥");
+            if draft.ssh_options.authentication_on_jump {
+                ui.label("此连接的 B 指纹由 A 上的 OpenSSH 和 known_hosts 核对。本机不会自动修改 A 的信任记录，也不会跳过变化的指纹。");
+                ui.label("请先在 A 通过可信渠道核对 B 的指纹并成功免密登录，再由 CShell 创建受管理 B 会话。");
+                return command;
+            }
             ui.label("默认阻止未知或已变化的服务器主机密钥。请先保存常规配置，再预览并核对指纹。");
             let saved_key_target = catalog.ssh_connections.iter().any(|item| {
                 item.profile_id == draft.record.id
@@ -1625,6 +1682,12 @@ fn draw_profile_actions(
             .clicked()
         {
             command = Some(ProfileClientCommand::OpenProfile(draft.record.id));
+        }
+        if catalog.ssh_connections.iter().any(|target| {
+            target.profile_id == draft.record.id && matches!(target.route, SshRoute::Jump { .. })
+        }) && ui.button("本次连接选项…").clicked()
+        {
+            command = Some(ProfileClientCommand::OpenProfileOptions(draft.record.id));
         }
         if catalog
             .profiles

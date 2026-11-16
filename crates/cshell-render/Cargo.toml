@@ -25,6 +25,7 @@ guillotiere.workspace = true
 regex.workspace = true
 thiserror.workspace = true
 unicode-segmentation.workspace = true
+icu_segmenter.workspace = true
 unicode-width.workspace = true
 wgpu.workspace = true
 winit.workspace = true

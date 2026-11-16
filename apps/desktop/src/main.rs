@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod app_icon;
 mod clipboard_connection;
 mod clipboard_policy;
@@ -26,6 +28,7 @@ mod interaction_regressions;
     clippy::field_reassign_with_default
 )]
 mod interactive_workbench_gate;
+mod jump_reuse_panel;
 mod keyboard_auth;
 mod managed_keys_panel;
 mod mixed_connection;
@@ -52,6 +55,7 @@ mod replay_worker;
 mod script_authoring_panel;
 mod script_live_panel;
 mod secret_edit;
+mod server_resources;
 mod sftp_connection;
 mod sftp_panel;
 mod sftp_settings;
@@ -69,6 +73,7 @@ mod terminal_accessibility;
 mod terminal_appearance;
 mod terminal_clipboard;
 mod terminal_clipboard_settings;
+mod terminal_ime;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -80,6 +85,7 @@ mod terminal_mouse;
 mod terminal_policy_connection;
 mod terminal_policy_panel;
 mod terminal_reading;
+mod terminal_reconnect;
 mod terminal_scrollback;
 mod terminal_search;
 mod terminal_tools_connection;
@@ -149,12 +155,14 @@ impl From<egui_winit::accesskit_winit::Event> for DesktopEvent {
 }
 
 const SESSION_LOG_ARGUMENT: &str = "--session-log";
+#[cfg(test)]
 const TERMINAL_MULTI_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Default)]
 struct TerminalClickState {
     last: Option<(std::time::Instant, TerminalCellPoint)>,
     count: u8,
+    last_position: Option<winit::dpi::PhysicalPosition<f64>>,
 }
 
 #[derive(Default)]
@@ -203,6 +211,8 @@ struct DesktopApp {
     profile_batch_panel: profile_batch_panel::ProfileBatchPanel,
     last_profile_batch_generation: Option<u64>,
     terminal_tools_panel: terminal_tools_panel::TerminalToolsPanel,
+    resources: server_resources::Panel,
+    resource_occluded: bool,
     highlight_worker: Option<cshell_render::HighlightWorker>,
     highlight_attempted: bool,
     last_highlight_generation: u64,
@@ -258,10 +268,13 @@ struct DesktopApp {
     viewport_rows: u16,
     cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
     terminal_selecting: bool,
+    select_all_key: Option<winit::keyboard::PhysicalKey>,
     terminal_click: TerminalClickState,
     terminal_clipboard: terminal_clipboard::State,
     command_center: command_center::State,
     terminal_mouse: terminal_mouse::State,
+    terminal_ime: terminal_ime::State,
+    terminal_reconnect: terminal_reconnect::State,
     pending_paste: Option<PendingPaste>,
     wheel_row_accumulator: f64,
     modifiers: ModifiersState,
@@ -371,6 +384,9 @@ impl DesktopApp {
     fn terminal_selection_text(
         &self,
     ) -> Option<Result<String, cshell_render::TerminalInteractionError>> {
+        if let Some(selection) = &self.terminal_clipboard.all {
+            return Some(selection.text());
+        }
         if let Some(text) = self.cross_selection_text() {
             return Some(text);
         }
@@ -977,6 +993,10 @@ impl DesktopApp {
             return;
         }
         self.release_remote_mouse();
+        self.terminal_click = TerminalClickState::default();
+        if self.terminal_clipboard.all.is_some() {
+            self.clear_clipboard_selection();
+        }
         if self.window_active
             && let Some(sync) = &self.sync_input
         {
@@ -985,7 +1005,8 @@ impl DesktopApp {
                 .source_changed(tab);
         }
         if let Some(window) = &self.window {
-            window.set_ime_allowed(false);
+            terminal_ime::disable(window, self.egui_state.as_mut());
+            self.terminal_ime.cancel();
         }
         if let Some(previous) = self.current_workspace_tab {
             if let Some(connection) = self.daemon.take() {
@@ -1150,6 +1171,11 @@ impl DesktopApp {
         match completed.result {
             Ok(layout) => {
                 let promoted = surface.submit_reflow(layout);
+                let reached_tail =
+                    promoted && matches!(surface.mode(), cshell_render::ScrollMode::FollowTail);
+                if reached_tail {
+                    self.finish_async_history_scroll(completed.tab_id);
+                }
                 if let Some(e2e) = &mut self.window_e2e {
                     e2e.note_reflow(promoted);
                 }
@@ -1572,6 +1598,31 @@ impl DesktopApp {
             })
     }
 
+    fn send_current_terminal_interrupt(&mut self, target: SessionId) -> bool {
+        if self.active_terminal_session_id() != Some(target) || !self.terminal_keyboard_available()
+        {
+            self.view_model.input_warning = Some("终端已切换或当前输入被阻止，中断未发送。".into());
+            return false;
+        }
+        self.clear_clipboard_selection();
+        self.return_to_live_terminal();
+        // This explicit context action belongs only to the captured terminal,
+        // even when synchronized typing is armed for other sessions.
+        let accepted = self.daemon.as_ref().is_some_and(|daemon| {
+            daemon.send_input(InputAction::Control(
+                cshell_domain::ControlAction::Interrupt,
+            ))
+        });
+        if accepted {
+            self.terminal_tools_panel
+                .record_input_omission(target, false);
+        } else {
+            self.view_model.input_warning =
+                Some("中断未发送：连接不可用或输入队列繁忙，请重试。".into());
+        }
+        accepted
+    }
+
     fn submit_terminal_action(&mut self, action: InputAction) -> bool {
         self.clear_clipboard_selection();
         self.return_to_live_terminal();
@@ -1880,11 +1931,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         == terminal_accessibility::terminal_node_id().accesskit_id()
                     && (self.log_surface.is_none() || self.terminal_scrollback)
                     && self.pending_paste.is_none()
-                    && !self.terminal_tools_panel.open
+                    && !(self.terminal_tools_panel.open || self.resources.open)
                     && !self.profile_batch_panel.open
                     && !self.terminal_policy_panel.open
                     && !self.workspace_recovery_panel.open
-                    && !self.view_model.about_open
+                    && !self.view_model.help_open()
                     && !self.view_model.confirm_terminate
                     && !self.view_model.tab_navigator.open
                 {
@@ -1907,6 +1958,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = std::time::Instant::now();
         let mut redraw_needed = self.sync_workspace();
+        redraw_needed |= self.poll_terminal_all();
         redraw_needed |= self.zmodem.poll(
             self.daemon_config
                 .as_ref()
@@ -2205,19 +2257,98 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         {
             return;
         }
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic,
+            ..
+        } = &event
+            && self.terminal_reconnect.consume_held(
+                event.physical_key,
+                event.state,
+                event.repeat || *is_synthetic,
+            )
+        {
+            window.request_redraw();
+            return;
+        }
+        if let WindowEvent::Ime(Ime::Commit(text)) = &event
+            && self.reconnect_from_ime(text)
+        {
+            window.request_redraw();
+            return;
+        }
+        let ime_target = self.ime_target();
+        self.terminal_ime.set_target(ime_target);
+        if let WindowEvent::Ime(ime) = &event {
+            let (handled, action) = self.terminal_ime.event(ime_target, ime);
+            if let Some(action) = action {
+                if self.submit_terminal_action(action) {
+                    self.cursor_blink.note_activity(std::time::Instant::now());
+                } else {
+                    self.view_model.input_warning =
+                        Some("输入法文字未发送：连接不可用或输入队列已满，请重试。".into());
+                }
+            }
+            if handled {
+                window.request_redraw();
+                return;
+            }
+        }
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } = &event
+            && self.terminal_ime.suppress_key(
+                event.physical_key,
+                event.state,
+                event.logical_key == Key::Named(NamedKey::Process),
+                is_terminal_force_interrupt_key(&event.logical_key, self.modifiers),
+            )
+        {
+            window.request_redraw();
+            return;
+        }
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } = &event
+        {
+            let matching = self.terminal_keyboard_available()
+                && !self.egui_context.egui_wants_keyboard_input()
+                && matches_terminal_select_all(
+                    &event.logical_key,
+                    self.modifiers,
+                    cfg!(target_os = "macos"),
+                );
+            if terminal_clipboard::consume_select_all_key(
+                &mut self.select_all_key,
+                event.physical_key,
+                event.state,
+                matching,
+            ) {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.select_terminal_all();
+                }
+                window.request_redraw();
+                return;
+            }
+        }
         let modal_input_blocked = (self.profile_panel.is_dialog_open()
             || self.zmodem.blocks_input()
-            || self.keyboard_auth.blocks_input())
+            || (self.keyboard_auth.blocks_input() || jump_reuse_panel::active()))
             || self.tunnel_panel.open
             || self.host_ca_panel.open
             || self.terminal_tools_panel.open
+            || self.resources.open
             || self.profile_batch_panel.open
             || self.terminal_policy_panel.open
             || self.workspace_recovery_panel.open
             || self.ssh_provider_panel.open
             || self.host_panel.open
             || self.task_panel.open
-            || self.view_model.about_open
+            || self.view_model.help_open()
             || self.view_model.confirm_terminate
             || self.view_model.tab_navigator.open
             || self.command_center.blocks_input();
@@ -2268,7 +2399,25 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             window.request_redraw();
             return;
         }
-        if !self.command_center.blocks_input()
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } = &event
+            && self.reconnect_from_key(
+                DesktopKeyInput {
+                    key: &event.logical_key,
+                    text: event.text.as_deref(),
+                    pressed: event.state == ElementState::Pressed,
+                    repeated: event.repeat,
+                },
+                event.physical_key,
+            )
+        {
+            window.request_redraw();
+            return;
+        }
+        if !modal_input_blocked
             && matches!(
                 &event,
                 WindowEvent::MouseInput {
@@ -2281,28 +2430,20 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         {
             let scale = window.scale_factor() as f32;
             let point = egui::pos2(position.x as f32 / scale, position.y as f32 / scale);
-            if self
-                .view_model
-                .pane_views
-                .iter()
-                .any(|pane| pane.rect.contains(point))
-                && let Some(sync) = &self.sync_input
-                && sync
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .focus_terminal()
-            {
-                self.egui_context.memory_mut(|memory| {
-                    if let Some(id) = memory.focused() {
-                        memory.surrender_focus(id);
-                    }
-                });
-            }
+            self.focus_terminal_at(point);
         }
-        // egui-winit consumes Tab even without a focused widget. A terminal Tab
-        // must bypass egui entirely, or it also focuses the first toolbar button.
-        let terminal_tab = matches!(&event, WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
-            if terminal_tab_bypasses_egui(&event.logical_key,
+        // egui translates Ctrl+C/X/V into clipboard commands and Tab into UI
+        // navigation. When the terminal owns input, neither may reach egui.
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } = &event
+        {
+            self.release_menu_for_control_key(event.state, &event.logical_key);
+        }
+        let terminal_key = matches!(&event, WindowEvent::KeyboardInput { event, is_synthetic: false, .. }
+            if terminal_key_bypasses_egui(&event.logical_key, self.modifiers,
                 self.terminal_keyboard_available(), self.egui_context.egui_wants_keyboard_input()));
         // The transparent CentralPanel is an egui area too. Its generic
         // `consumed` flag cannot decide whether the GPU terminal owns a wheel.
@@ -2317,7 +2458,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 && terminal_scrollback::history_shortcut(event, self.modifiers,
                     self.terminal_scrollback || self.terminal_clipboard.snapshot.is_some()).is_some());
         let mut egui_consumed = false;
-        if !terminal_tab
+        if !terminal_key
             && !terminal_history_key
             && !terminal_wheel
             && !interaction_regressions::intercepts_native_press(&event, terminal_mouse)
@@ -2365,11 +2506,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if !egui_consumed
             && !self.task_panel.open
             && self.pending_paste.is_none()
-            && !self.terminal_tools_panel.open
+            && !(self.terminal_tools_panel.open || self.resources.open)
             && !self.profile_batch_panel.open
             && !self.terminal_policy_panel.open
             && !self.workspace_recovery_panel.open
-            && !self.view_model.about_open
+            && !self.view_model.help_open()
             && !self.view_model.confirm_terminate
             && !self.view_model.tab_navigator.open
             && matches!(
@@ -2421,7 +2562,17 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
                 event_loop.exit();
             }
+            WindowEvent::Occluded(occluded) => {
+                self.resource_occluded = occluded;
+                if occluded {
+                    self.resources.suspend();
+                }
+                window.request_redraw();
+            }
             WindowEvent::Resized(size) => {
+                if size.width == 0 || size.height == 0 {
+                    self.resources.suspend();
+                }
                 self.clear_clipboard_selection();
                 if let Some(e2e) = &mut self.window_e2e {
                     e2e.note_resize(size);
@@ -2506,6 +2657,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::Focused(active) => {
+                if !active {
+                    self.terminal_ime.cancel();
+                }
                 self.restore_window_focus(active);
                 if active {
                     self.key_picker_focus_deferred = false;
@@ -2557,21 +2711,21 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 event,
                 is_synthetic: false,
                 ..
-            } if !self.view_model.about_open
+            } if !self.view_model.help_open()
                 && !self.view_model.confirm_terminate
                 && !self.view_model.tab_navigator.open
                 && !(self.profile_panel.is_dialog_open()
                     || self.zmodem.blocks_input()
-                    || self.keyboard_auth.blocks_input())
+                    || (self.keyboard_auth.blocks_input() || jump_reuse_panel::active()))
                 && !self.tunnel_panel.open
                 && !self.host_ca_panel.open
-                && !self.terminal_tools_panel.open
+                && !(self.terminal_tools_panel.open || self.resources.open)
                 && !self.profile_batch_panel.open
                 && !self.terminal_policy_panel.open
                 && !self.workspace_recovery_panel.open
                 && !self.ssh_provider_panel.open
                 && self.pending_paste.is_none()
-                && !self.terminal_tools_panel.open
+                && !(self.terminal_tools_panel.open || self.resources.open)
                 && !self.profile_batch_panel.open
                 && !self.terminal_policy_panel.open
                 && !self.workspace_recovery_panel.open
@@ -2588,7 +2742,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 is_synthetic: false,
                 ..
             } if self.terminal_search_open
-                && !self.view_model.about_open
+                && !self.view_model.help_open()
                 && !self.view_model.confirm_terminate
                 && !self.view_model.tab_navigator.open
                 && event.state == ElementState::Pressed
@@ -2631,22 +2785,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 && !self.terminal_search_open
                 && (self.log_surface.is_none() || self.terminal_scrollback)
                 && self.pending_paste.is_none()
-                && !self.terminal_tools_panel.open
+                && !(self.terminal_tools_panel.open || self.resources.open)
                 && !self.profile_batch_panel.open
                 && !self.terminal_policy_panel.open
                 && !self.workspace_recovery_panel.open
                 && !self.sync_blocks_input()
                 && !(self.profile_panel.is_dialog_open()
                     || self.zmodem.blocks_input()
-                    || self.keyboard_auth.blocks_input())
+                    || (self.keyboard_auth.blocks_input() || jump_reuse_panel::active()))
                 && !self.tunnel_panel.open
                 && !self.host_ca_panel.open
-                && !self.terminal_tools_panel.open
+                && !(self.terminal_tools_panel.open || self.resources.open)
                 && !self.profile_batch_panel.open
                 && !self.terminal_policy_panel.open
                 && !self.workspace_recovery_panel.open
                 && !self.ssh_provider_panel.open
-                && !self.view_model.about_open
+                && !self.view_model.help_open()
                 && !self.view_model.confirm_terminate
                 && !self.view_model.tab_navigator.open =>
             {
@@ -2682,49 +2836,24 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 });
                 if let Some(action) =
                     terminal_key_action(&event, self.modifiers, terminal_modes, broadcast)
-                    && self.active_terminal_session_id().is_some()
+                    && let Some(session) = self.active_terminal_session_id()
                 {
-                    if self.submit_terminal_action(action) {
+                    let accepted = if matches!(
+                        action,
+                        InputAction::Control(cshell_domain::ControlAction::Interrupt)
+                    ) {
+                        self.send_current_terminal_interrupt(session)
+                    } else {
+                        self.submit_terminal_action(action)
+                    };
+                    if accepted {
                         if self.cursor_blink.note_activity(std::time::Instant::now()) {
                             window.request_redraw();
                         }
                     } else {
+                        self.view_model.input_warning =
+                            Some("终端输入未发送：连接不可用或输入队列繁忙，请重试。".into());
                         tracing::warn!("terminal input was not accepted by the daemon client");
-                    }
-                }
-            }
-            WindowEvent::Ime(Ime::Commit(text))
-                if !egui_consumed
-                    && !self.terminal_search_open
-                    && (self.log_surface.is_none() || self.terminal_scrollback)
-                    && self.pending_paste.is_none()
-                    && !self.terminal_tools_panel.open
-                    && !self.profile_batch_panel.open
-                    && !self.terminal_policy_panel.open
-                    && !self.workspace_recovery_panel.open
-                    && !self.sync_blocks_input()
-                    && !(self.profile_panel.is_dialog_open()
-                        || self.zmodem.blocks_input()
-                        || self.keyboard_auth.blocks_input())
-                    && !self.tunnel_panel.open
-                    && !self.host_ca_panel.open
-                    && !self.terminal_tools_panel.open
-                    && !self.profile_batch_panel.open
-                    && !self.terminal_policy_panel.open
-                    && !self.workspace_recovery_panel.open
-                    && !self.ssh_provider_panel.open
-                    && !self.view_model.about_open
-                    && !self.view_model.confirm_terminate
-                    && !self.view_model.tab_navigator.open
-                    && !text.is_empty() =>
-            {
-                if self.active_terminal_session_id().is_some() {
-                    if self.submit_terminal_action(InputAction::Text(text)) {
-                        if self.cursor_blink.note_activity(std::time::Instant::now()) {
-                            window.request_redraw();
-                        }
-                    } else {
-                        tracing::warn!("IME commit was not accepted by the daemon client");
                     }
                 }
             }
@@ -2784,6 +2913,30 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     self.view_model.terminal_zoom_pixels = self.terminal_mouse.zoom;
                     cshell_ui::draw_workbench_chrome(ui, &mut self.view_model);
                     self.draw_connection_diagnostics(ui);
+                    let resource_session = sftp_session
+                        .filter(|id| self.view_model.reusable_ssh_sessions.contains(id));
+                    let resource_target = self
+                        .resources
+                        .open
+                        .then(|| {
+                            self.active_ssh_profile().and_then(|(_, profile)| {
+                                self.view_model
+                                    .saved_ssh_profiles
+                                    .iter()
+                                    .find(|p| p.id == profile)
+                                    .map(|p| format!("配置：{} · {}", p.name, p.target))
+                            })
+                        })
+                        .flatten();
+                    return_auxiliary_focus |= self.resources.draw(
+                        ui.ctx(),
+                        self.daemon_config
+                            .as_ref()
+                            .or(self.workspace_config.as_ref()),
+                        resource_session,
+                        resource_target.as_deref(),
+                        !self.resource_occluded && window.is_minimized() != Some(true),
+                    );
                     self.terminal_mouse.zoom = self.view_model.terminal_zoom_pixels;
                     if let Some(hosts) = &self.host_groups {
                         self.host_panel.draw(ui.ctx(), hosts, &hosts.view());
@@ -2795,17 +2948,19 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         sync.set_modal_blocked(
                             (self.profile_panel.is_dialog_open()
                                 || self.zmodem.blocks_input()
-                                || self.keyboard_auth.blocks_input())
+                                || (self.keyboard_auth.blocks_input()
+                                    || jump_reuse_panel::active()))
                                 || self.tunnel_panel.open
                                 || self.host_ca_panel.open
                                 || self.terminal_tools_panel.open
+                                || self.resources.open
                                 || self.profile_batch_panel.open
                                 || self.terminal_policy_panel.open
                                 || self.workspace_recovery_panel.open
                                 || self.ssh_provider_panel.open
                                 || self.host_panel.open
                                 || self.task_panel.open
-                                || self.view_model.about_open
+                                || self.view_model.help_open()
                                 || self.view_model.confirm_terminate
                                 || self.view_model.tab_navigator.open
                                 || self.command_center.blocks_input(),
@@ -2841,12 +2996,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         && !self.task_panel.open
                         && !self.tunnel_panel.open
                         && !self.host_ca_panel.open
-                        && !self.terminal_tools_panel.open
+                        && !(self.terminal_tools_panel.open || self.resources.open)
                         && !self.profile_batch_panel.open
                         && !self.terminal_policy_panel.open
                         && !self.workspace_recovery_panel.open
                         && !self.ssh_provider_panel.open
-                        && !self.view_model.about_open
+                        && !self.view_model.help_open()
                         && !self.view_model.confirm_terminate
                         && !self.view_model.tab_navigator.open
                     {
@@ -2983,7 +3138,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         .map_or(terminal_rect, |p| p.rect);
                     let drop_source = sftp_session.filter(|_| self.view_model.can_disconnect_ssh);
                     let drop_blocked = self.profile_panel.is_dialog_open()
-                        || self.keyboard_auth.blocks_input()
+                        || (self.keyboard_auth.blocks_input() || jump_reuse_panel::active())
                         || self.zmodem.blocks_input()
                         || self.task_panel.open
                         || self.view_model.confirm_terminate
@@ -3132,12 +3287,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         && !self.task_panel.open
                         && !self.tunnel_panel.open
                         && !self.host_ca_panel.open
-                        && !self.terminal_tools_panel.open
+                        && !(self.terminal_tools_panel.open || self.resources.open)
                         && !self.profile_batch_panel.open
                         && !self.terminal_policy_panel.open
                         && !self.workspace_recovery_panel.open
                         && !self.ssh_provider_panel.open
-                        && !self.view_model.about_open
+                        && !self.view_model.help_open()
                         && !self.view_model.confirm_terminate
                         && !self.view_model.tab_navigator.open
                     {
@@ -3149,7 +3304,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         );
                     }
                     if let Some(pending) = &self.pending_paste
-                        && !self.view_model.about_open
+                        && !self.view_model.help_open()
                         && !self.view_model.confirm_terminate
                         && !self.view_model.tab_navigator.open
                         && let Some(tab) = self.current_workspace_tab
@@ -3185,7 +3340,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     }
                     clipboard_action = self.draw_clipboard_ui(ui.ctx());
                     self.keyboard_auth.draw(ui.ctx());
-                    if self.keyboard_auth.blocks_input()
+                    jump_reuse_panel::draw(ui.ctx());
+                    if (self.keyboard_auth.blocks_input() || jump_reuse_panel::active())
+                        || jump_reuse_panel::active()
                         || self.profile_panel.is_dialog_open()
                         || self.pending_paste.is_some()
                     {
@@ -3204,6 +3361,12 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                         self.command_center.draw(ui.ctx(), &mut self.view_model);
                     }
+                    self.terminal_ime.set_target(self.ime_target());
+                    self.terminal_ime.paint(
+                        ui.ctx(),
+                        self.ime_rect(terminal_rect, ui.ctx().pixels_per_point()),
+                        terminal_rect,
+                    );
                 });
                 if let Some(text) = self.terminal_tools_panel.take_command_load() {
                     let loaded = self.sync_input.as_ref().is_some_and(|sync| {
@@ -3302,8 +3465,14 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         }
                     }
                 }
-                if self.view_model.about_open {
+                if self.view_model.help_open() {
                     self.terminal_selecting = false;
+                    self.terminal_click = TerminalClickState::default();
+                    if self.terminal_decorations.selection.is_some()
+                        || self.terminal_clipboard.all.is_some()
+                    {
+                        self.clear_clipboard_selection();
+                    }
                     self.terminal_clipboard = terminal_clipboard::State::default();
                 }
                 let paused = self
@@ -3513,7 +3682,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     Some(WorkbenchMenuCommand::ProfileBatch) => {
                         self.pending_paste = None;
                         self.profile_batch_panel.open = true;
-                        window.set_ime_allowed(false);
+                        terminal_ime::disable(&window, self.egui_state.as_mut());
+                        self.terminal_ime.cancel();
                         if let Some(profiles) = &self.profiles {
                             profiles.request(profile_connection::ProfileClientCommand::Refresh);
                         }
@@ -3530,7 +3700,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             }
                             self.workspace_recovery_panel.open = true;
                             self.pending_paste = None;
-                            window.set_ime_allowed(false);
+                            terminal_ime::disable(&window, self.egui_state.as_mut());
+                            self.terminal_ime.cancel();
                             window.request_redraw();
                         } else {
                             self.view_model.input_warning = Some(
@@ -3552,13 +3723,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     Some(WorkbenchMenuCommand::TerminalPolicies) => {
                         self.pending_paste = None;
                         self.terminal_policy_panel.open = true;
-                        window.set_ime_allowed(false);
+                        terminal_ime::disable(&window, self.egui_state.as_mut());
+                        self.terminal_ime.cancel();
+                        window.request_redraw();
+                    }
+                    Some(WorkbenchMenuCommand::ServerResources) => {
+                        self.pending_paste = None;
+                        self.resources.show();
+                        terminal_ime::disable(&window, self.egui_state.as_mut());
+                        self.terminal_ime.cancel();
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::TerminalTools) => {
                         self.pending_paste = None;
                         self.terminal_tools_panel.open = true;
-                        window.set_ime_allowed(false);
+                        terminal_ime::disable(&window, self.egui_state.as_mut());
+                        self.terminal_ime.cancel();
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::SshProviders) => {
@@ -3748,11 +3928,27 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
                 if let Some(command) = profile_command {
                     match command {
-                        profile_connection::ProfileClientCommand::OpenProfile(id) => {
+                        action @ (profile_connection::ProfileClientCommand::OpenProfile(_)
+                        | profile_connection::ProfileClientCommand::OpenProfileOptions(
+                            _,
+                        )) => {
+                            let (id, options) = match action {
+                                profile_connection::ProfileClientCommand::OpenProfile(id) => {
+                                    (id, false)
+                                }
+                                profile_connection::ProfileClientCommand::OpenProfileOptions(
+                                    id,
+                                ) => (id, true),
+                                _ => unreachable!(),
+                            };
                             let prepared = self.prepare_profile_tab(id);
                             if prepared && let Some(daemon) = &self.daemon {
                                 self.pending_tab = None;
-                                if daemon.open_profile(id) {
+                                if if options {
+                                    daemon.open_profile_options(id)
+                                } else {
+                                    daemon.open_profile(id)
+                                } {
                                     self.profile_panel.finish_open();
                                     self.terminal_surface = TerminalSurfaceModel::default();
                                     self.terminal_decorations = TerminalDecorations::default();
@@ -3809,7 +4005,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     pixels_per_point,
                     ..
                 } = full_output;
-                let egui_ime_active = platform_output.ime.is_some();
+                self.terminal_ime.set_target(self.ime_target());
+                let ime_rect = self.ime_rect(terminal_rect, pixels_per_point);
+                self.terminal_ime.output(&mut platform_output, ime_rect);
                 if self.renderer_needs_font_upload {
                     let image = self.egui_context.fonts(|fonts| fonts.image());
                     textures_delta.push(
@@ -3820,11 +4018,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 if self.window_active
                     && (self.log_surface.is_none() || self.terminal_scrollback)
                     && self.pending_paste.is_none()
-                    && !self.terminal_tools_panel.open
+                    && !(self.terminal_tools_panel.open || self.resources.open)
                     && !self.profile_batch_panel.open
                     && !self.terminal_policy_panel.open
                     && !self.workspace_recovery_panel.open
-                    && !self.view_model.about_open
+                    && !self.view_model.help_open()
                     && !self.view_model.confirm_terminate
                     && !self.view_model.tab_navigator.open
                     && self
@@ -3851,6 +4049,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 }
                 match clipboard_action {
                     Some(terminal_clipboard::Action::Copy) => self.copy_terminal_selection(),
+                    Some(terminal_clipboard::Action::Interrupt(session)) => {
+                        self.send_current_terminal_interrupt(session);
+                    }
                     Some(terminal_clipboard::Action::Paste) => {
                         self.paste_from_clipboard(&window, false)
                     }
@@ -3994,19 +4195,6 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     textures_delta: &mut textures_delta,
                     pixels_per_point,
                 };
-                if self.log_surface.is_none()
-                    && !self.task_panel.open
-                    && !egui_ime_active
-                    && !self.terminal_tools_panel.open
-                    && !self.profile_batch_panel.open
-                    && !self.terminal_policy_panel.open
-                    && !self.workspace_recovery_panel.open
-                {
-                    window.set_ime_allowed(true);
-                    if let Some(snapshot) = self.terminal_surface.latest_snapshot() {
-                        position_terminal_ime(&window, viewport, snapshot);
-                    }
-                }
                 let render_result = if self.task_panel.open {
                     let frame = self
                         .task_panel
@@ -4101,17 +4289,6 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             frame.snapshot.clone(),
                             &mut self.terminal_decorations,
                         );
-                    }
-                    if !egui_ime_active
-                        && !self.terminal_tools_panel.open
-                        && !self.profile_batch_panel.open
-                        && !self.terminal_policy_panel.open
-                        && !self.workspace_recovery_panel.open
-                    {
-                        window.set_ime_allowed(true);
-                        if let Some(frame) = &frame {
-                            position_terminal_ime(&window, viewport, &frame.snapshot);
-                        }
                     }
                     renderer.render(
                         frame.as_ref(),
@@ -4517,48 +4694,38 @@ fn truncate_utf8_bytes(text: &mut String, maximum: usize) {
     text.truncate(boundary);
 }
 
+#[cfg(test)]
 fn register_terminal_click(
     state: &mut TerminalClickState,
     point: TerminalCellPoint,
     now: std::time::Instant,
 ) -> u8 {
-    let continues = state.last.is_some_and(|(last_at, last_point)| {
-        last_point == point && now.duration_since(last_at) <= TERMINAL_MULTI_CLICK_INTERVAL
-    });
-    state.count = if continues && state.count < 3 {
-        state.count + 1
-    } else {
-        1
-    };
-    state.last = Some((now, point));
-    state.count
+    terminal_clipboard::click_policy::register(
+        state,
+        point,
+        None,
+        now,
+        TERMINAL_MULTI_CLICK_INTERVAL,
+        [0.0; 2],
+    )
 }
 
-fn position_terminal_ime(
-    window: &Window,
-    viewport: TerminalViewport,
-    snapshot: &cshell_terminal::FrameSnapshot,
-) {
-    let cell_width = (viewport.width / u32::from(snapshot.cols.max(1))).max(1);
-    let cell_height = (viewport.height / u32::from(snapshot.rows.max(1))).max(1);
-    let x = viewport
-        .x
-        .saturating_add(u32::from(snapshot.cursor_col).saturating_mul(cell_width));
-    let y = viewport.y.saturating_add(
-        u32::from(snapshot.cursor_row)
-            .saturating_add(1)
-            .saturating_mul(cell_height),
-    );
-    window.set_ime_cursor_area(
-        winit::dpi::PhysicalPosition::new(x, y),
-        winit::dpi::PhysicalSize::new(cell_width, cell_height),
-    );
+fn matches_terminal_select_all(key: &Key, modifiers: ModifiersState, mac: bool) -> bool {
+    matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("a"))
+        && ((!modifiers.alt_key()
+            && !modifiers.super_key()
+            && modifiers.control_key()
+            && modifiers.shift_key())
+            || (mac && modifiers == ModifiersState::SUPER))
 }
 
 impl DesktopApp {
     fn terminal_keyboard_available(&self) -> bool {
+        self.active_terminal_session_id().is_some() && self.terminal_keyboard_context_available()
+    }
+
+    fn terminal_keyboard_context_available(&self) -> bool {
         !self.command_center.blocks_input()
-            && self.active_terminal_session_id().is_some()
             && (self.log_surface.is_none() || self.terminal_scrollback)
             && self.pending_paste.is_none()
             && !self.task_panel.open
@@ -4566,27 +4733,42 @@ impl DesktopApp {
             && !self.terminal_search_open
             && !(self.profile_panel.is_dialog_open()
                 || self.zmodem.blocks_input()
-                || self.keyboard_auth.blocks_input())
+                || (self.keyboard_auth.blocks_input() || jump_reuse_panel::active()))
             && !self.tunnel_panel.open
             && !self.host_ca_panel.open
-            && !self.terminal_tools_panel.open
+            && !(self.terminal_tools_panel.open || self.resources.open)
             && !self.profile_batch_panel.open
             && !self.terminal_policy_panel.open
             && !self.workspace_recovery_panel.open
             && !self.ssh_provider_panel.open
-            && !self.view_model.about_open
+            && !self.view_model.help_open()
             && !self.view_model.confirm_terminate
             && !self.view_model.tab_navigator.open
             && !self.sync_blocks_input()
     }
 }
 
-fn terminal_tab_bypasses_egui(
+fn terminal_key_bypasses_egui(
     key: &Key,
+    modifiers: ModifiersState,
     terminal_available: bool,
     egui_wants_keyboard: bool,
 ) -> bool {
-    terminal_available && !egui_wants_keyboard && key == &Key::Named(NamedKey::Tab)
+    terminal_available
+        && !egui_wants_keyboard
+        && (key == &Key::Named(NamedKey::Tab)
+            || is_terminal_force_interrupt_key(key, modifiers)
+            || (modifiers.control_key()
+                && !modifiers.super_key()
+                && matches!(key, Key::Character(_))))
+}
+
+fn is_terminal_force_interrupt_key(key: &Key, modifiers: ModifiersState) -> bool {
+    modifiers.control_key()
+        && !modifiers.shift_key()
+        && !modifiers.alt_key()
+        && !modifiers.super_key()
+        && matches!(key, Key::Named(NamedKey::Pause | NamedKey::Cancel))
 }
 
 fn terminal_key_action(
@@ -4622,6 +4804,11 @@ fn desktop_key_action(
     broadcast: bool,
 ) -> Option<InputAction> {
     let pressed = event.pressed;
+    if is_terminal_force_interrupt_key(event.key, modifiers) {
+        return pressed.then_some(InputAction::Control(
+            cshell_domain::ControlAction::Interrupt,
+        ));
+    }
     let report_events =
         broadcast || modes.kitty_enabled(cshell_terminal::TerminalModes::KITTY_REPORT_EVENTS);
     let report_all =
@@ -5224,7 +5411,8 @@ impl DesktopApp {
             );
         }
         if let Some(window) = &self.window {
-            window.set_ime_allowed(false);
+            terminal_ime::disable(window, self.egui_state.as_mut());
+            self.terminal_ime.cancel();
         }
         self.current_workspace_tab = None;
         self.pending_tab = None;
@@ -5431,6 +5619,11 @@ impl ApplicationHandler<DesktopEvent> for DesktopWindows {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if matches!(arguments.as_slice(), [value] if value == "--version" || value == "-V") {
+        println!("cshell-gui {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     diagnostics::install();
     run()
 }

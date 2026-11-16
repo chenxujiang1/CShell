@@ -261,7 +261,8 @@ impl DesktopApp {
             self.view_model.can_sftp = false;
             self.cursor_blink
                 .synchronize(None, false, std::time::Instant::now());
-            self.view_model.daemon_status_detail = "SSH 已断开，可点击重新连接。".into();
+            self.view_model.daemon_status_detail =
+                "SSH 已断开，可输入文字或按 Enter 重新连接。".into();
             // Preserve the binding, tab ID, terminal snapshot and scrollback.
             self.refresh_workspace_tabs();
             if control.reconnect {

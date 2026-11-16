@@ -230,7 +230,8 @@ fn disconnected_ssh_is_visible_in_tab_banner_and_status_and_reconnect_targets_th
                 state == SshConnectionState::Disconnected
             );
             if state == SshConnectionState::Disconnected {
-                assert!(visible.contains("输入不会发送到服务器"));
+                assert!(visible.contains("输入文字或按 Enter 重新连接"));
+                assert!(visible.contains("本次输入不会发送到新终端"));
                 assert!(
                     tree.nodes
                         .iter()
@@ -288,6 +289,7 @@ fn toolbar_keeps_core_actions_in_bounds_at_supported_widths_and_scales() {
                 "断开",
                 "重新连接",
                 "SFTP",
+                "资源",
                 "分屏",
                 "更多",
             ] {
@@ -305,6 +307,47 @@ fn toolbar_keeps_core_actions_in_bounds_at_supported_widths_and_scales() {
                     "{label} overlaps or leaves {width} at {scale}: {b:?}"
                 );
                 previous = b.x1;
+            }
+        }
+    }
+}
+
+#[test]
+fn resource_toolbar_uses_the_active_authenticated_session_and_respects_busy_state() {
+    for width in [720.0, 1280.0] {
+        for enabled in [false, true] {
+            for busy in [false, true] {
+                let context = classic_context();
+                context.enable_accesskit();
+                let size = egui::vec2(width, 600.0);
+                let tab = TabId::new();
+                let session = SessionId::new();
+                let mut model = WorkbenchViewModel {
+                    selected_tab: Some(tab),
+                    selected_profile: Some(cshell_domain::ProfileId::new()),
+                    tabs: vec![WorkspaceTabViewModel {
+                        id: tab,
+                        title: "SSH".into(),
+                        session_id: Some(session),
+                    }],
+                    reusable_ssh_sessions: if enabled { vec![session] } else { vec![] },
+                    ssh_control_busy: busy,
+                    ..Default::default()
+                };
+                for _ in 0..3 {
+                    frame(&context, &mut model, size, vec![]);
+                }
+                let tree = frame(&context, &mut model, size, vec![]);
+                let pos = button_center(&tree, "资源");
+                click(&context, &mut model, size, pos);
+                assert_eq!(
+                    model.menu_command,
+                    if enabled && !busy {
+                        Some(WorkbenchMenuCommand::ServerResources)
+                    } else {
+                        None
+                    }
+                );
             }
         }
     }

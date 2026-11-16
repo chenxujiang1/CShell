@@ -637,6 +637,7 @@ fn every_ssh_settings_page_keeps_save_and_connect_visible() {
 #[test]
 fn keyboard_interactive_option_saves_and_reloads_with_account_settings() {
     let context = context();
+    context.all_styles_mut(|style| style.animation_time = 0.0);
     let mut panel = panel();
     panel.editor_tab = 1;
     panel
@@ -726,6 +727,7 @@ fn keyboard_interactive_option_saves_and_reloads_with_account_settings() {
     for _ in 0..3 {
         render(&context, &mut panel, vec![]);
     }
+    login_page_scroll(&context, &mut panel);
     click(&context, &mut panel, "键盘交互验证（验证码 / 密码）");
     assert!(
         panel
@@ -762,6 +764,79 @@ fn keyboard_interactive_option_saves_and_reloads_with_account_settings() {
     );
 }
 
+#[test]
+fn managed_jump_authentication_clears_local_secrets_and_saves_remote_identity() {
+    let context = context();
+    let mut panel = panel();
+    panel.editor_tab = 1;
+    let a_id = ProfileId::new();
+    let draft = panel.profile_draft.as_mut().unwrap();
+    draft.record.name = "B via A".into();
+    draft.ssh_host = "server-b".into();
+    draft.ssh_username = "operator".into();
+    draft.route_kind = 3;
+    draft.jump_profile_id = Some(a_id);
+    draft.password = "local-password-must-not-be-sent".into();
+    draft.key_passphrase = "local-passphrase-must-not-be-sent".into();
+    for _ in 0..3 {
+        login_page_frame(&context, &mut panel, vec![]);
+    }
+    login_page_click(
+        &context,
+        &mut panel,
+        "由跳板服务器的 OpenSSH 认证目标服务器",
+    );
+    let draft = panel.profile_draft.as_mut().unwrap();
+    assert!(draft.ssh_options.authentication_on_jump);
+    assert!(!draft.ssh_options.auto_reconnect);
+    assert!(draft.password.is_empty() && draft.key_passphrase.is_empty());
+    assert!(draft.private_key_path.is_empty());
+    assert!(draft.certificate_path.is_empty() && draft.agent_identity.is_empty());
+    draft.private_key_path = "/home/operator/.ssh/id_ed25519".into();
+    let (tree, _) = login_page_frame(&context, &mut panel, vec![]);
+    assert!(tree.nodes.iter().any(|(_, node)| {
+        node.label() == Some("目标服务器用户名（必填）")
+            || node.value() == Some("目标服务器用户名（必填）")
+    }));
+    assert!(
+        !tree
+            .nodes
+            .iter()
+            .any(|(_, node)| { node.role() == egui::accesskit::Role::PasswordInput })
+    );
+    let Some(ProfileClientCommand::Apply { changes, .. }) =
+        login_page_click(&context, &mut panel, "保存配置")
+    else {
+        panic!("managed settings must save without local secret mutation")
+    };
+    let connection = changes
+        .into_iter()
+        .find_map(|change| match change.change {
+            Some(profile_change::Change::UpsertSshConnection(data)) => {
+                Some(SshConnectionRecord::try_from(data).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(connection.options.authentication_on_jump);
+    assert_eq!(
+        connection.route,
+        cshell_domain::SshRoute::Jump { profile_id: a_id }
+    );
+    assert_eq!(
+        connection.private_key_path.as_deref(),
+        Some("/home/operator/.ssh/id_ed25519")
+    );
+    assert!(!connection.uses_password() && !connection.uses_private_key());
+    panel.catalog.as_mut().unwrap().ssh_connections[0] = connection;
+    let record = panel.profile_draft.as_ref().unwrap().record.clone();
+    panel.select_profile(record);
+    let draft = panel.profile_draft.as_ref().unwrap();
+    assert!(draft.ssh_options.authentication_on_jump);
+    assert_eq!(draft.private_key_path, "/home/operator/.ssh/id_ed25519");
+    assert_eq!(draft.jump_profile_id, Some(a_id));
+}
+
 fn login_page_frame(
     context: &egui::Context,
     panel: &mut ProfilePanel,
@@ -792,7 +867,11 @@ fn login_page_click(
     let node = &tree
         .nodes
         .iter()
-        .find(|(_, n)| n.label() == Some(label) && !n.is_disabled())
+        .find(|(_, n)| {
+            !n.is_disabled()
+                && (n.label() == Some(label)
+                    || (n.role() == egui::accesskit::Role::ComboBox && n.value() == Some(label)))
+        })
         .unwrap_or_else(|| {
             panic!(
                 "missing enabled {label}: {:?}",
@@ -963,5 +1042,94 @@ fn login_order_controls_reorder_and_save_the_method_sequence() {
             cshell_domain::SshAuthStep::KeyboardInteractive,
             cshell_domain::SshAuthStep::Password
         ]
+    );
+}
+
+#[test]
+fn saved_jump_policy_is_editable_and_connection_options_do_not_mutate_saved_policy() {
+    let context = context();
+    let mut panel = panel();
+    panel.editor_tab = 2;
+    let a = ProfileId::new();
+    let draft = panel.profile_draft.as_mut().unwrap();
+    draft.record.name = "B via A".into();
+    draft.ssh_host = "server-b".into();
+    draft.route_kind = 3;
+    draft.jump_profile_id = Some(a);
+    draft.private_key_path.clear();
+    let mut a_profile = panel.catalog.as_ref().unwrap().profiles[0].clone();
+    a_profile.id = a;
+    a_profile.name = "Jump A".into();
+    let mut a_target = panel.catalog.as_ref().unwrap().ssh_connections[0].clone();
+    a_target.profile_id = a;
+    a_target.host = "server-a".into();
+    panel.catalog.as_mut().unwrap().profiles.push(a_profile);
+    panel
+        .catalog
+        .as_mut()
+        .unwrap()
+        .ssh_connections
+        .push(a_target);
+    panel.catalog.as_mut().unwrap().ssh_connections[0].route = SshRoute::Jump { profile_id: a };
+    for _ in 0..3 {
+        login_page_frame(&context, &mut panel, vec![]);
+    }
+    login_page_click(&context, &mut panel, "始终新建独立连接");
+    login_page_click(&context, &mut panel, "仅使用已有连接");
+    assert_eq!(
+        panel
+            .profile_draft
+            .as_ref()
+            .unwrap()
+            .ssh_options
+            .jump_reuse_policy,
+        cshell_domain::JumpReusePolicy::OnlyExisting
+    );
+    let Some(ProfileClientCommand::Apply { changes, .. }) =
+        login_page_click(&context, &mut panel, "保存配置")
+    else {
+        panic!("save jump policy")
+    };
+    let connection = changes
+        .into_iter()
+        .find_map(|change| match change.change {
+            Some(profile_change::Change::UpsertSshConnection(data)) => {
+                Some(SshConnectionRecord::try_from(data).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        connection.options.jump_reuse_policy,
+        cshell_domain::JumpReusePolicy::OnlyExisting
+    );
+    panel.catalog.as_mut().unwrap().ssh_connections[0] = connection;
+    panel.sync(&DesktopProfileView {
+        generation: panel.seen_generation + 1,
+        catalog: panel.catalog.clone(),
+        status: "配置已保存".into(),
+        ..Default::default()
+    });
+    let record = panel.profile_draft.as_ref().unwrap().record.clone();
+    panel.select_profile(record);
+    panel.editor_tab = 2;
+    assert_eq!(
+        panel
+            .profile_draft
+            .as_ref()
+            .unwrap()
+            .ssh_options
+            .jump_reuse_policy,
+        cshell_domain::JumpReusePolicy::OnlyExisting
+    );
+    assert!(matches!(
+        login_page_click(&context, &mut panel, "本次连接选项…"),
+        Some(ProfileClientCommand::OpenProfileOptions(_))
+    ));
+    assert_eq!(
+        panel.catalog.as_ref().unwrap().ssh_connections[0]
+            .options
+            .jump_reuse_policy,
+        cshell_domain::JumpReusePolicy::OnlyExisting
     );
 }

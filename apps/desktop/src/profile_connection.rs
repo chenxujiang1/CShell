@@ -169,6 +169,7 @@ pub enum ProfileClientCommand {
     Refresh,
     DiscoverLocalShells,
     OpenProfile(ProfileId),
+    OpenProfileOptions(ProfileId),
     OpenLocal(ProfileId, cshell_ipc::LocalLaunchOptions),
     SetPassword {
         profile_id: ProfileId,
@@ -293,6 +294,7 @@ impl std::fmt::Debug for ProfileClientCommand {
             Self::Refresh => "Refresh",
             Self::DiscoverLocalShells => "DiscoverLocalShells",
             Self::OpenProfile(_) => "OpenProfile",
+            Self::OpenProfileOptions(_) => "OpenProfileOptions",
             Self::OpenLocal(..) => "OpenLocal([REDACTED])",
             Self::SetPassword { .. } => "SetPassword([REDACTED])",
             Self::DeletePassword { .. } => "DeletePassword",
@@ -501,7 +503,7 @@ async fn profile_worker(
                         let mutation = request.operation != cshell_ipc::VaultOperation::Status as i32;
                         publish_vault(&shared, send_vault(&config, request).await, mutation);
                     }
-                    ProfileClientCommand::OpenProfile(_) | ProfileClientCommand::OpenLocal(..) => {}
+                    ProfileClientCommand::OpenProfile(_) | ProfileClientCommand::OpenProfileOptions(_) | ProfileClientCommand::OpenLocal(..) => {}
                     ProfileClientCommand::DiscoverLocalShells => { discover_local_shells(&config, &shared).await; }
                     ProfileClientCommand::SetPassword { profile_id, expected_revision, mut password } => {
                         let mut outgoing = request(ProfileOperation::SetPassword);
@@ -1192,6 +1194,20 @@ async fn send_inner(
         .map_err(|error| error.to_string())?;
     if negotiated.feature_bits & features::PROFILE_CONTROL == 0 {
         return Err("daemon does not support Profile control".into());
+    }
+    if negotiated.protocol_minor < cshell_ipc::JUMP_REUSE_SCHEMA_MINOR && request.changes.iter().any(|change| {
+        matches!(&change.change, Some(cshell_ipc::profile_change::Change::UpsertSshConnection(target))
+            if target.options.as_ref().is_some_and(|options| options.jump_reuse_policy != 0))
+    }) {
+        return Err("请先一起更新 GUI 和后台，以保存跳板连接复用策略".into());
+    }
+    if negotiated.protocol_minor < 79 && request.changes.iter().any(|change| {
+        matches!(
+            &change.change, Some(cshell_ipc::profile_change::Change::UpsertSshConnection(target))
+                if target.options.as_ref().is_some_and(|options| options.authentication_on_jump)
+        )
+    }) {
+        return Err("请先一起更新 GUI 和后台，以保存由 A 认证的受管理 B 连接".into());
     }
     if negotiated.protocol_minor<65 && request.changes.iter().any(|change|matches!(&change.change,Some(cshell_ipc::profile_change::Change::UpsertSshConnection(target)) if target.options.as_ref().is_some_and(|options|options.sftp_verification.is_some()))) {
         return Err("请先一起更新 GUI 和后台，以保存会话的 SFTP 校验策略".into());

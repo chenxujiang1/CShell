@@ -15,6 +15,7 @@ async fn cancelled_creation_is_confirmed_disconnected_and_retry_clears_marker() 
     let profile = cshell_domain::ProfileId::new();
     let session = SessionId::new();
     assert!(connection.request(SftpClientCommand::ConnectProfile {
+        jump_options: false,
         session,
         profile,
         previous: None,
@@ -229,6 +230,7 @@ async fn connect_loads_both_panes_and_reconnect_closes_old_transport_before_new_
         }
     });
     assert!(connection.request(SftpClientCommand::ConnectProfile {
+        jump_options: false,
         source_ssh_session: None,
         session: first,
         profile,
@@ -277,6 +279,7 @@ async fn connect_loads_both_panes_and_reconnect_closes_old_transport_before_new_
         "disconnected identity remains visible"
     );
     assert!(connection.request(SftpClientCommand::ConnectProfile {
+        jump_options: false,
         source_ssh_session: None,
         session: second,
         profile,
@@ -297,6 +300,7 @@ async fn closing_while_connecting_disconnects_immediately_after_reply_without_lo
     let profile = cshell_domain::ProfileId::new();
     let session = SessionId::new();
     assert!(connection.request(SftpClientCommand::ConnectProfile {
+        jump_options: false,
         source_ssh_session: None,
         session,
         profile,
@@ -372,6 +376,7 @@ async fn failed_old_disconnect_keeps_cleanup_identity_and_does_not_open_a_new_tr
         respond(&listener, SftpOperation::Disconnect, new, profile).await;
     });
     assert!(connection.request(SftpClientCommand::ConnectProfile {
+        jump_options: false,
         source_ssh_session: None,
         session: new,
         profile,
@@ -472,6 +477,7 @@ async fn fresh_independent_and_shared_sftp_connections_accept_and_acknowledge_fi
             }
         });
         assert!(connection.request(SftpClientCommand::ConnectProfile {
+            jump_options: false,
             session,
             profile,
             previous: None,

@@ -27,11 +27,15 @@ pub use task_ssh::SshTaskExecutor;
 pub use upload_service::BatchUploadService;
 mod host_ca_ipc;
 mod host_ca_store;
+mod jump_reuse;
 mod keyboard_auth;
+#[cfg(test)]
+mod managed_peer_tests;
 mod profile_batch_ipc;
 mod profile_ipc;
 mod quick_command_ipc;
 mod script_control;
+mod server_resources;
 mod session_lock;
 mod shared_ssh;
 mod ssh_provider_ipc;

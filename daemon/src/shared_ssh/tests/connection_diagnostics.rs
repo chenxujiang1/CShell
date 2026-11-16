@@ -21,6 +21,7 @@ async fn diagnostics_heartbeat_detects_closed_client_and_releases_pending_mfa() 
             request_id: 2,
             payload: Some(envelope::Payload::SessionCreateRequest(
                 SessionCreateRequest {
+                    jump_override: None,
                     connection_diagnostics: true,
                     profile_id: Some(f.profile.as_uuid().as_bytes().to_vec()),
                     rows: 24,
@@ -206,6 +207,7 @@ async fn diagnostics_stream_before_mfa_completion_and_shared_sftp_never_reauthen
     let job = tokio::spawn(observed(
         f.service.clone(),
         envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            jump_override: None,
             connection_diagnostics: true,
             profile_id: Some(f.profile.as_uuid().as_bytes().to_vec()),
             rows: 24,
@@ -265,6 +267,7 @@ async fn diagnostics_stream_before_mfa_completion_and_shared_sftp_never_reauthen
             operation: SftpOperation::ConnectProfile as i32,
             session_id: session.as_uuid().as_bytes().to_vec(),
             document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                jump_override: None,
                 profile: f.profile,
                 source_ssh_session: Some(original),
                 discover_directory: true,
@@ -301,6 +304,7 @@ async fn diagnostics_stream_before_mfa_completion_and_shared_sftp_never_reauthen
     let (payload, trace) = observed(
         f.service.clone(),
         envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            jump_override: None,
             connection_diagnostics: true,
             source_ssh_session_id: Some(original.as_uuid().as_bytes().to_vec()),
             rows: 24,
@@ -338,6 +342,7 @@ async fn diagnostics_cancel_mfa_and_host_key_failure_keep_the_actual_stage() {
                 operation: SftpOperation::ConnectProfile as i32,
                 session_id: session.as_uuid().as_bytes().to_vec(),
                 document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    jump_override: None,
                     profile: f.profile,
                     source_ssh_session: None,
                     discover_directory: true,
@@ -347,6 +352,7 @@ async fn diagnostics_cancel_mfa_and_host_key_failure_keep_the_actual_stage() {
             })
         } else {
             envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                jump_override: None,
                 connection_diagnostics: true,
                 profile_id: Some(f.profile.as_uuid().as_bytes().to_vec()),
                 rows: 24,
@@ -369,6 +375,7 @@ async fn diagnostics_cancel_mfa_and_host_key_failure_keep_the_actual_stage() {
     let (payload, trace) = observed(
         service,
         envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            jump_override: None,
             connection_diagnostics: true,
             profile_id: Some(f.profile.as_uuid().as_bytes().to_vec()),
             rows: 24,

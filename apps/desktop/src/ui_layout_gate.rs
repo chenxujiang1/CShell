@@ -2,6 +2,74 @@
 type LayoutCase<'a> = (&'a str, Box<dyn FnMut(&Context) + 'a>);
 use egui::{Context, Rect, Vec2, accesskit};
 
+#[test]
+#[ignore = "explicit fixed offline help preview with production fonts"]
+fn render_help_readability_preview() {
+    mod raster {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/cshell-ui/examples/support/raster.rs"
+        ));
+    }
+    for (name, size, about) in [
+        ("help-shortcuts", egui::vec2(1000.0, 760.0), false),
+        ("help-shortcuts-small", egui::vec2(640.0, 480.0), false),
+        ("help-about", egui::vec2(1000.0, 760.0), true),
+        ("help-about-small", egui::vec2(640.0, 480.0), true),
+    ] {
+        let ctx = context();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let mut model = cshell_ui::WorkbenchViewModel {
+            about_open: about,
+            shortcut_help_open: !about,
+            ..Default::default()
+        };
+        let mut textures = std::collections::HashMap::new();
+        let mut primitives = Vec::new();
+        for frame in 0..4 {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(f64::from(frame)),
+                    ..Default::default()
+                },
+                |ui| {
+                    cshell_ui::draw_workbench_chrome(ui, &mut model);
+                    let _ = cshell_ui::draw_workbench_content(ui, &mut model);
+                },
+            );
+            for (id, deltas) in out.textures_delta.set.drain() {
+                for delta in deltas {
+                    let egui::ImageData::Color(image) = delta.image;
+                    if let Some([x, y]) = delta.pos {
+                        let target: &mut egui::ColorImage = textures.get_mut(&id).unwrap();
+                        for row in 0..image.size[1] {
+                            let start = (y + row) * target.size[0] + x;
+                            target.pixels[start..start + image.size[0]].copy_from_slice(
+                                &image.pixels[row * image.size[0]..(row + 1) * image.size[0]],
+                            );
+                        }
+                    } else {
+                        textures.insert(id, (*image).clone());
+                    }
+                }
+            }
+            primitives = ctx.tessellate(out.shapes, 1.0);
+        }
+        raster::write(
+            &format!(
+                "{}/../../artifacts/ui-refresh-20261015/{name}.ppm",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            size.x as usize,
+            size.y as usize,
+            primitives,
+            &textures,
+        )
+        .unwrap();
+    }
+}
+
 pub(crate) fn context() -> Context {
     let context = Context::default();
     crate::ui_fonts::install(&context);

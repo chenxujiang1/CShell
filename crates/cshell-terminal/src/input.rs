@@ -615,6 +615,34 @@ mod tests {
     }
 
     #[test]
+    fn explicit_interrupt_is_etx_in_all_negotiated_keyboard_modes() {
+        let interrupt = InputAction::Control(cshell_domain::ControlAction::Interrupt);
+        for flags in 0..32 {
+            for level in 0..4 {
+                let modes = TerminalModes {
+                    kitty_keyboard_flags: flags,
+                    modify_other_keys: level,
+                    format_other_keys: true,
+                    ..Default::default()
+                };
+                assert_eq!(InputEncoder::encode(&interrupt, modes).unwrap(), [3]);
+            }
+        }
+        let key = key(
+            KeyCode::Character("c".into()),
+            Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        );
+        let modes = TerminalModes {
+            kitty_keyboard_flags: TerminalModes::KITTY_DISAMBIGUATE,
+            ..Default::default()
+        };
+        assert_eq!(InputEncoder::encode(&key, modes).unwrap(), b"\x1b[99;5u");
+    }
+
+    #[test]
     fn application_cursor_and_xterm_modifiers_are_encoded() {
         let application = TerminalModes {
             application_cursor: true,

@@ -11,6 +11,18 @@ permissions:
   contents: read
 
 jobs:
+  release-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Verify development/stable version and package integrity contracts
+        run: python3 -B .github/scripts/test_trial_metadata.py
+      - name: Validate inherited workspace versions and numeric platform fields
+        run: python3 -B .github/scripts/trial_metadata.py version
+      - name: Check macOS package script syntax
+        run: bash -n .github/scripts/package-trial-macos.sh
+
   quality:
     runs-on: ubuntu-latest
     env:
@@ -56,6 +68,11 @@ jobs:
         with:
           cache-on-failure: true
       - run: bash .github/scripts/run-with-diagnostics.sh cargo test --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
+      - name: Isolated terminal drop upload and retry
+        env:
+          CSHELL_RUNTIME_DIR: ${{ github.workspace }}/target/ssh-audit-fixtures/terminal-drop-runtime
+          CSHELL_DATA_DIR: ${{ github.workspace }}/target/ssh-audit-fixtures/terminal-drop-data
+        run: bash .github/scripts/run-with-diagnostics.sh cargo test -p cshelld --lib --all-features --locked --target ${{ matrix.target }} terminal_drop -- --ignored --test-threads=1
       - name: Install Linux Secret Service
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes dbus-user-session gnome-keyring libsecret-tools
@@ -207,6 +224,7 @@ jobs:
 
   trial-package:
     needs:
+      - release-metadata
       - quality
       - platform-test
       - native-resource-gates
@@ -258,11 +276,13 @@ jobs:
           $archive = Get-Item -LiteralPath artifacts/ui-refresh-20261015/bin/CShell-trial-windows-x64.zip
           $destination = Join-Path $env:RUNNER_TEMP 'cshell-trial-package-check'
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
-          foreach ($file in @('CShell.exe', 'cshelld.exe', 'cshell-script-worker.exe', 'README-first-run.txt')) {
+          foreach ($file in @('CShell.exe', 'cshelld.exe', 'cshell-script-worker.exe', 'README-first-run.txt', 'build-info.json', 'Licenses/LICENSE-MIT', 'Licenses/LICENSE-APACHE', 'Licenses/NotoSansSC-OFL.txt')) {
             if (-not (Test-Path -LiteralPath (Join-Path $destination $file) -PathType Leaf)) {
               throw "Missing file in extracted trial archive: $file"
             }
           }
+          python -B .github/scripts/trial_metadata.py verify --platform windows-x64 --binary-directory $destination --metadata (Join-Path $destination 'build-info.json') --require-clean
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted Windows package metadata verification failed.' }
           $env:CSHELL_DATA_DIR = Join-Path $env:RUNNER_TEMP 'cshell-trial-smoke-data'
           $env:CSHELL_PROFILE_DB = Join-Path $env:CSHELL_DATA_DIR 'profiles.sqlite'
           $env:CSHELL_RUNTIME_DIR = Join-Path $env:RUNNER_TEMP 'cshell-trial-smoke-runtime'
@@ -287,6 +307,7 @@ jobs:
           test -s "$app/Contents/Resources/README-first-run.txt"
           plutil -lint "$app/Contents/Info.plist"
           codesign --verify --deep --strict --verbose=2 "$app"
+          python3 -B .github/scripts/trial_metadata.py verify --platform macos-${{ matrix.architecture }} --binary-directory "$app/Contents/MacOS" --metadata "$destination/build-info.json" --require-clean
           export CSHELL_DATA_DIR="$RUNNER_TEMP/cshell-trial-smoke-data"
           export CSHELL_PROFILE_DB="$CSHELL_DATA_DIR/profiles.sqlite"
           export CSHELL_RUNTIME_DIR="$RUNNER_TEMP/cshell-trial-smoke-runtime"

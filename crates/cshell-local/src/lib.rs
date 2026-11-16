@@ -16,6 +16,8 @@ mod unix_guardian;
 #[cfg(unix)]
 mod unix_process_tree;
 #[cfg(windows)]
+mod windows_control;
+#[cfg(windows)]
 mod windows_process_tree;
 
 #[cfg(unix)]
@@ -193,6 +195,8 @@ impl PtySession {
         let program = resolve_program(profile, &cwd)?;
         #[cfg(windows)]
         let program = windows_command_path(program);
+        #[cfg(windows)]
+        windows_control::restore_interrupt_inheritance()?;
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: size.rows,

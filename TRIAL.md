@@ -1,6 +1,6 @@
 # Windows 与 macOS 早期试用
 
-当前系列为 1.0，软件版本为 `1.0.0`。发布分支为 `release/1.0`，标签为 `v1.0.0`；GitHub Release 由维护者按 [发布操作文档](RELEASE.md)手动发布。此前 `307ec1d` 等提交生成的包内置版本为 `0.1.0`，不能通过改文件名变成 `1.0.0`，请改用版本标签对应源码的新构建。
+当前开发版为 `1.1.0-dev.1`，构建编号 `11001`，分支 `develop/1.1`。新增能力、限制和交付步骤见 [1.1 开发版说明](docs/releases/v1.1.0-dev.1.md)。1.0 历史维护分支 `release/1.0` 和标签 `v1.0.0` 保持不变；不把开发版标为正式版，也不混用旧提交的程序。
 
 目标为 Windows x64、macOS Apple Silicon（arm64）和 macOS Intel（x64）。每个平台单独分发 ZIP，不依赖用户安装 Rust。macOS 运行器采用 macOS 15；更早系统尚需实机验收，不能仅按 CPU 架构推断兼容性。
 
@@ -16,9 +16,9 @@
 | Mac Apple Silicon | `cshell-trial-macos-arm64` | `CShell-trial-macos-arm64.zip` |
 | Mac Intel | `cshell-trial-macos-x64` | `CShell-trial-macos-x64.zip` |
 
-每包附 SHA-256；保留包内源码版本用于反馈关联。本地未提交修改的包会标记 `modified workspace`，不能仅凭 HEAD 哈希视为可复现版本。工作流只上传 CI artifact，不创建公开 Release，也不自动发布给用户。
+每包附 SHA-256，ZIP 根目录含 `build-info.json`，记录完整软件版本、构建编号、源码提交、工作区状态、源码指纹和三个组件的大小及 SHA-256。本地未提交修改的包会标记 `modified workspace`；CI 打包要求干净工作区，并从解压后的三个组件再次验证版本和哈希。工作流只上传 CI artifact，不创建公开 Release，也不自动发布给用户。
 
-另有 `macOS personal trial` 工作流，向 `codex/macos-trial` 分支推送后构建两个 Mac 架构，执行 SSH、凭据库、存储、本地 PTY、脚本运行时单元与集成测试、原生钥匙串检查、完整桌面交互单元测试，并验证解压 app 的窗口运行。该分支只运行这套专用 Mac 流程，避免普通 CI 的其他平台任务重复占用 Mac 运行器；其他分支及 PR 继续运行完整 `ci`。它用于用户本人早期试用，不代表完整公开发布门禁已经通过。向公开仓库推送源码快照前应确认快照内容可以公开。
+另有 `macOS personal trial` 工作流，可在 Actions 手动选择分支运行，或向 `codex/macos-trial` 分支推送触发。它构建两个 Mac 架构，执行版本元数据、隔离上传重试、SSH、凭据库、存储、本地 PTY、脚本运行时、原生钥匙串及桌面交互检查，并验证解压 app 的窗口运行。`codex/macos-trial` 分支仅运行这套专用流程，其他分支及 PR 继续运行完整 `ci`。专用流程适用于个人早期试用，通过仍不替代完整 CI；向公开仓库推送前应确认源码内容可以公开。
 
 托管 Mac CI 将明确识别的 Apple Paravirtual 虚拟 GPU 与物理 GPU 分开验收：仅在 `CSHELL_ALLOW_VIRTUAL_GPU=1` 时执行功能与资源门禁并报告全部回显延迟，不据此认证物理 Mac 性能。真实 Mac 仍须运行 `cargo xtask echo-latency-bench` 按原 P95/P99 阈值另行验收；物理 GPU 与 CPU 回退阈值均保持不变。
 

@@ -244,7 +244,8 @@ impl TerminalSelection {
 }
 
 /// Shared by native preferences and callers that use the default word rules.
-pub const DEFAULT_WORD_DELIMITERS: &str = "\"'`[]{}()<>|;,:=：，；（）【】「」『』“”‘’";
+pub const DEFAULT_WORD_DELIMITERS: &str = "/\\\"'`[]{}()<>|;,:=：，；（）【】「」『』“”‘’";
+pub const STRICT_WORD_DELIMITERS: &str = "/\\.-\"'`[]{}()<>|;,:=：，；（）【】「」『』“”‘’";
 
 fn word_edge(
     snapshot: &FrameSnapshot,
@@ -257,6 +258,10 @@ fn word_edge(
             0
         } else if delimiters.contains(c) {
             2
+        } else if is_han(c) {
+            3
+        } else if !c.is_alphanumeric() && !"_.-".contains(c) {
+            4
         } else {
             1
         }
@@ -331,6 +336,134 @@ fn word_edge(
         current = next;
     }
     current
+}
+
+fn is_han(c: char) -> bool {
+    matches!(c as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x323af)
+}
+
+impl TerminalSelection {
+    /// Deterministic technical words, dictionary Chinese, and complete Unicode graphemes.
+    #[must_use]
+    pub fn expanded_with_word_rules(
+        self,
+        snapshot: &FrameSnapshot,
+        delimiters: &str,
+        chinese_words: bool,
+    ) -> Self {
+        if self.mode != TerminalSelectionMode::Word {
+            return self;
+        }
+        let at = |point| {
+            word_at(
+                snapshot,
+                snap_wide_point(snapshot, point),
+                delimiters,
+                chinese_words,
+            )
+        };
+        let first = at(self.anchor);
+        let last = at(self.focus);
+        Self {
+            anchor: first.anchor.min(last.anchor),
+            focus: first.focus.max(last.focus),
+            mode: TerminalSelectionMode::Character,
+        }
+    }
+}
+
+fn word_at(
+    snapshot: &FrameSnapshot,
+    point: TerminalCellPoint,
+    delimiters: &str,
+    chinese_words: bool,
+) -> TerminalSelection {
+    let ordinary = TerminalSelection {
+        anchor: point,
+        focus: point,
+        mode: TerminalSelectionMode::Word,
+    }
+    .expanded_with_delimiters(snapshot, delimiters);
+    let Some(cell) = snapshot
+        .row(point.row)
+        .and_then(|r| r.get(usize::from(point.column)))
+    else {
+        return ordinary;
+    };
+    let han = is_han(cell.character);
+    let keycap = cell.zerowidth().contains(&'\u{20e3}');
+    if cell.character.is_ascii() && !keycap {
+        return ordinary;
+    }
+    let bounds = TerminalSelection {
+        anchor: point,
+        focus: point,
+        mode: TerminalSelectionMode::Line,
+    }
+    .expanded_lines(snapshot);
+    let mut text = String::new();
+    let mut positions = Vec::new();
+    for row in bounds.anchor.row..=bounds.focus.row {
+        for (col, cell) in snapshot.row(row).unwrap_or_default().iter().enumerate() {
+            if is_spacer(cell) {
+                continue;
+            }
+            let begin = text.len();
+            text.extend(cell.characters());
+            positions.push((
+                TerminalCellPoint {
+                    row,
+                    column: col as u16,
+                },
+                begin,
+                text.len(),
+            ));
+            // Selection-time work stays bounded even for pathological wrapped lines.
+            if text.len() > 64 * 1024 {
+                return ordinary;
+            }
+        }
+    }
+    let Some((_, offset, _)) = positions.iter().find(|(p, _, _)| *p == point) else {
+        return ordinary;
+    };
+    let range = if han && chinese_words {
+        let segmenter = icu_segmenter::WordSegmenter::new_dictionary(Default::default());
+        let mut start = 0;
+        let mut selected = None;
+        for end in segmenter.segment_str(&text) {
+            if start <= *offset && *offset < end {
+                selected = Some(start..end);
+                break;
+            }
+            start = end;
+        }
+        selected
+    } else {
+        use unicode_segmentation::UnicodeSegmentation;
+        text.grapheme_indices(true)
+            .find(|(i, g)| *i <= *offset && *offset < *i + g.len())
+            .map(|(i, g)| i..i + g.len())
+    };
+    let Some(range) = range else {
+        return ordinary;
+    };
+    // Non-Han alphabetic words keep the configured technical-word boundaries.
+    if !han && !keycap && cell.character.is_alphanumeric() {
+        return ordinary;
+    }
+    let mut covered = positions
+        .iter()
+        .filter(|(_, start, end)| *start < range.end && range.start < *end);
+    let Some((anchor, _, _)) = covered.next() else {
+        return ordinary;
+    };
+    let focus = covered.next_back().map_or(*anchor, |(p, _, _)| *p);
+    TerminalSelection {
+        anchor: *anchor,
+        focus,
+        mode: TerminalSelectionMode::Character,
+    }
 }
 
 impl TerminalSearchMatch {
@@ -613,6 +746,120 @@ mod tests {
             .chain(std::iter::repeat_with(Cell::default))
             .take(cols)
             .collect()
+    }
+
+    #[test]
+    fn technical_words_separate_paths_and_json_without_splitting_filenames() {
+        let text = r#"/var/log/nginx/access.log C:\temp\app-log.txt "uid": 123456"#;
+        let frame = snapshot(&[cells(text, text.len())]);
+        for (needle, expected) in [
+            ("nginx", "nginx"),
+            ("access", "access.log"),
+            ("app-log", "app-log.txt"),
+            ("123", "123456"),
+            (":", ":"),
+            ("/", "/"),
+        ] {
+            let point = TerminalCellPoint {
+                row: 0,
+                column: text
+                    .find(needle)
+                    .unwrap_or_else(|| panic!("missing fixture")) as u16,
+            };
+            let word = TerminalSelection {
+                anchor: point,
+                focus: point,
+                mode: TerminalSelectionMode::Word,
+            };
+            assert_eq!(
+                word.expanded_with_word_rules(&frame, super::DEFAULT_WORD_DELIMITERS, true)
+                    .text(&frame)
+                    .unwrap_or_default(),
+                expected
+            );
+        }
+        let point = TerminalCellPoint {
+            row: 0,
+            column: text.find("app-log").unwrap_or_default() as u16,
+        };
+        assert_eq!(
+            TerminalSelection {
+                anchor: point,
+                focus: point,
+                mode: TerminalSelectionMode::Word
+            }
+            .expanded_with_word_rules(&frame, super::STRICT_WORD_DELIMITERS, true)
+            .text(&frame)
+            .unwrap_or_default(),
+            "app"
+        );
+    }
+
+    #[test]
+    fn chinese_dictionary_and_graphemes_are_local_and_keep_complete_characters() {
+        let frame = snapshot(&[cells("你好世界", 4)]);
+        let point = TerminalCellPoint { row: 0, column: 0 };
+        let word = TerminalSelection {
+            anchor: point,
+            focus: point,
+            mode: TerminalSelectionMode::Word,
+        };
+        assert_eq!(
+            word.expanded_with_word_rules(&frame, super::DEFAULT_WORD_DELIMITERS, true)
+                .text(&frame)
+                .unwrap_or_default(),
+            "你好"
+        );
+        assert_eq!(
+            word.expanded_with_word_rules(&frame, super::DEFAULT_WORD_DELIMITERS, false)
+                .text(&frame)
+                .unwrap_or_default(),
+            "你"
+        );
+        for (base, rest, expected) in [
+            ('1', vec!['\u{fe0f}', '\u{20e3}'], "1️⃣"),
+            ('e', vec!['\u{301}'], "é"),
+        ] {
+            let frame = snapshot(&[vec![
+                Cell::with_zerowidth(base, rest, CellWidth::Single, Default::default()),
+                Cell::default(),
+            ]]);
+            assert_eq!(
+                word.expanded_with_word_rules(&frame, super::DEFAULT_WORD_DELIMITERS, true)
+                    .text(&frame)
+                    .unwrap_or_default(),
+                expected
+            );
+        }
+        let frame = snapshot(&[vec![
+            Cell::with_zerowidth('👩', ['\u{200d}'], CellWidth::Wide, Default::default()),
+            Cell::new(' ', CellWidth::WideSpacer, Default::default()),
+            Cell::new('💻', CellWidth::Wide, Default::default()),
+            Cell::new(' ', CellWidth::WideSpacer, Default::default()),
+        ]]);
+        assert_eq!(
+            word.expanded_with_word_rules(&frame, super::DEFAULT_WORD_DELIMITERS, true)
+                .text(&frame)
+                .unwrap_or_default(),
+            "👩‍💻"
+        );
+    }
+
+    #[test]
+    fn triple_click_selects_only_one_complete_soft_wrapped_logical_line() {
+        let mut first = cells("abc ", 4);
+        first[3] = first[3].clone().with_soft_wrap(true);
+        let frame = snapshot(&[first, cells("def ", 4), cells("next", 4)]);
+        let point = TerminalCellPoint { row: 1, column: 1 };
+        let selection = TerminalSelection {
+            anchor: point,
+            focus: point,
+            mode: TerminalSelectionMode::Line,
+        }
+        .expanded_lines(&frame);
+        assert_eq!(selection.text(&frame).unwrap_or_default(), "abc def");
+        assert_eq!(selection.anchor.row, 0);
+        assert_eq!(selection.focus.row, 1);
     }
 
     #[test]

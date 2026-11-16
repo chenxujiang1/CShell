@@ -86,6 +86,7 @@ async fn create(
     let response = exchange(
         service,
         envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            jump_override: None,
             connection_diagnostics: false,
             source_ssh_session_id: None,
             local_launch: None,
@@ -454,6 +455,7 @@ async fn local_configuration_and_discovery_require_capability() -> Result<(), Bo
             request_id: 3,
             payload: Some(envelope::Payload::SessionCreateRequest(
                 SessionCreateRequest {
+                    jump_override: None,
                     connection_diagnostics: false,
                     source_ssh_session_id: None,
                     local_launch: None,
@@ -657,6 +659,7 @@ async fn local_launch_isolation_probe() -> Result<(), Box<dyn Error>> {
         matches!(response.payload, Some(envelope::Payload::ProfileResponse(response)) if response.status == ProfileStatus::Unsupported as i32)
     );
     let request = SessionCreateRequest {
+        jump_override: None,
         connection_diagnostics: false,
         source_ssh_session_id: None,
         rows: 24,
@@ -713,6 +716,7 @@ async fn local_launch_isolation_probe() -> Result<(), Box<dyn Error>> {
         let response = exchange(
             &service,
             envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                jump_override: None,
                 source_ssh_session_id: None,
                 local_launch: Some(bad),
                 ..request.clone()

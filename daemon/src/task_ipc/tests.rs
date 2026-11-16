@@ -38,8 +38,12 @@ struct Peer {
 }
 impl russh::server::Handler for Peer {
     type Error = russh::Error;
-    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
-        Ok(if user == "operator" && *key == self.key {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: russh::server::VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
+        Ok(if user == "operator" && *key.public_key == self.key {
             Auth::Accept
         } else {
             Auth::reject()

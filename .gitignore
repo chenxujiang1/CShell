@@ -43,6 +43,10 @@ id_dsa
 *.p12
 *.pfx
 
+# Python validation cache
+__pycache__/
+*.py[cod]
+
 # Local agent state
 /.codex/
 /.agents/
@@ -56,7 +60,11 @@ id_dsa
 !/docs/examples/
 /docs/examples/*
 !/docs/examples/terminal-theme-paper.json
-
+!/docs/releases/
+/docs/releases/*
+!/docs/releases/v1.0.0.md
+!/docs/releases/v1.1.0-dev.1.md
+RELEASE.md
 # Editors, operating systems and temporary files
 /.idea/
 /.vscode/

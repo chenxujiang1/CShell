@@ -1,6 +1,76 @@
 // Test fixtures deliberately panic on failed setup and mutate defaults for individual cases.
 use super::*;
 
+#[test]
+fn shortcuts_and_about_are_sibling_help_menu_pages() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut model = WorkbenchViewModel::default();
+    let (_, tree) = compact_frame(&ctx, &mut model, vec![]);
+    let bounds = tree
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some("帮助"))
+        .unwrap()
+        .1
+        .bounds()
+        .unwrap();
+    let pos = egui::pos2(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    for pressed in [true, false] {
+        compact_frame(
+            &ctx,
+            &mut model,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    let (_, tree) = compact_frame(&ctx, &mut model, vec![]);
+    for label in ["快捷键说明", "关于 CShell"] {
+        assert!(
+            tree.nodes.iter().any(|(_, n)| n.label() == Some(label)),
+            "both help entries must be directly visible: {label}"
+        );
+    }
+    let bounds = tree
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some("快捷键说明"))
+        .unwrap()
+        .1
+        .bounds()
+        .unwrap();
+    let pos = egui::pos2(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    for pressed in [true, false] {
+        compact_frame(
+            &ctx,
+            &mut model,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert!(model.shortcut_help_open && !model.about_open && model.help_open());
+}
+
 fn compact_frame(
     ctx: &egui::Context,
     model: &mut WorkbenchViewModel,

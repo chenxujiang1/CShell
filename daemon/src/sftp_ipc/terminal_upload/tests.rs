@@ -77,3 +77,82 @@ async fn disconnected_source_or_unknown_upload_never_creates_a_job() {
         .await;
     assert_eq!(response.status, SftpStatus::Unavailable as i32);
 }
+
+#[test]
+fn retry_excludes_completed_batches_and_refuses_uncertain_publication() {
+    use cshell_domain::SftpQueueItemId;
+    let mut context = RetryContext::new(
+        Plan {
+            files: (0..5)
+                .map(|i| (format!("C:/local/{i}"), format!("{i}"), 10))
+                .collect(),
+            directories: vec![],
+            bytes: 50,
+            has_directories: false,
+        },
+        "/original".into(),
+        Default::default(),
+    );
+    context.next = 3;
+    context.base_bytes = 30;
+    assert!(
+        !context.safe(),
+        "an unsettled journal cannot authorize a retry"
+    );
+    let item = |i, state| SftpQueueItem {
+        id: SftpQueueItemId::new(),
+        draft: SftpQueueDraft {
+            local_path: format!("C:/local/{i}"),
+            remote_path: format!("/original/{i}"),
+            verified: true,
+            verification: Some(Default::default()),
+            ..Default::default()
+        },
+        state,
+        verified: Some(Default::default()),
+        transfer_id: None,
+        receipt: None,
+    };
+    let mut queue = SftpQueueSnapshot::initial(SessionId::new());
+    queue.items = vec![
+        item(3, SftpQueueState::Succeeded),
+        item(4, SftpQueueState::Unknown),
+    ];
+    context.queue = Some(queue.clone());
+    assert_eq!(context.counts(), (4, 1));
+    assert!(context.safe());
+    assert!(failed_queue_item(&queue).is_some());
+    queue.retry_items.insert(queue.items[1].id);
+    assert!(
+        failed_queue_item(&queue).is_none(),
+        "a confirmed retry awaits dispatch, not the previous failure receipt"
+    );
+    assert!(retry::validate_chunk(&queue, &context.plan.files[3..], "/original").is_ok());
+    assert!(retry::validate_chunk(&queue, &context.plan.files[3..], "/changed").is_err());
+    let verification = queue.items[1].verified.as_mut().unwrap();
+    verification.intent = SftpVerifiedIntent::Publish;
+    context.queue = Some(queue.clone());
+    assert!(
+        !context.safe(),
+        "an unacknowledged publish must never be blindly replayed"
+    );
+    assert!(
+        failed_queue_item(&queue).is_some(),
+        "a retry marker must not hide an uncertain publication"
+    );
+    for state in [
+        SftpQueueState::Running,
+        SftpQueueState::CleanupRequired,
+        SftpQueueState::Cancelled,
+    ] {
+        queue.items[1].state = state;
+        context.queue = Some(queue.clone());
+        assert!(!context.safe());
+    }
+    context.clear_completed = true;
+    assert_eq!(
+        context.counts(),
+        (3, 2),
+        "do not count a cleared prior batch twice"
+    );
+}

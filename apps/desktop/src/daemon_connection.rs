@@ -99,6 +99,7 @@ pub struct DesktopDaemonConnection {
 #[derive(Clone, PartialEq)]
 pub(crate) enum DesktopSessionAction {
     OpenProfile(ProfileId),
+    OpenProfileOptions(ProfileId),
     DuplicateSshChannel(SessionId, Option<ProfileId>),
     OpenLocal(ProfileId, Arc<cshell_ipc::LocalLaunchOptions>),
     OpenContext(ProfileId, Arc<cshell_application::TerminalResolutionReport>),
@@ -112,6 +113,7 @@ impl std::fmt::Debug for DesktopSessionAction {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::OpenProfile(_) => "OpenProfile",
+            Self::OpenProfileOptions(_) => "OpenProfileOptions",
             Self::DuplicateSshChannel(..) => "DuplicateSshChannel",
             Self::OpenLocal(..) => "OpenLocal([REDACTED])",
             Self::OpenContext(..) => "OpenContext([REDACTED])",
@@ -168,6 +170,8 @@ struct DesktopRequestReceivers<'a> {
 
 #[derive(Debug, Error)]
 pub enum DesktopConnectionError {
+    #[error("请选择要复用的跳板连接")]
+    JumpSelectionRequired,
     #[error("{0} is required when CSHELL_IPC_ENDPOINT is configured")]
     MissingEnvironment(&'static str),
     #[error("{name} must contain exactly {expected} hexadecimal bytes")]
@@ -292,6 +296,18 @@ impl DesktopConnectionConfig {
                     daemon_instance_id: record.daemon_instance_id,
                 })
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_test_config(
+        endpoint: ResolvedDesktopEndpoint,
+        session: SessionId,
+    ) -> Self {
+        Self {
+            source: DesktopEndpointSource::Explicit(endpoint),
+            session_id: Some(session),
+            request_log_pages: true,
         }
     }
 
@@ -483,6 +499,9 @@ impl DesktopDaemonConnection {
 
     pub fn open_profile(&self, id: ProfileId) -> bool {
         self.open_profile_action(id, DesktopSessionAction::OpenProfile(id))
+    }
+    pub(crate) fn open_profile_options(&self, id: ProfileId) -> bool {
+        self.open_profile_action(id, DesktopSessionAction::OpenProfileOptions(id))
     }
 
     pub(crate) fn open_terminal_context(
@@ -1236,6 +1255,7 @@ async fn connect_once(
         .session_id;
     let launch = match requested_action.as_ref() {
         Some(DesktopSessionAction::OpenProfile(id)) => Some((*id, None, None)),
+        Some(DesktopSessionAction::OpenProfileOptions(id)) => Some((*id, None, None)),
         Some(DesktopSessionAction::OpenLocal(id, options)) => {
             Some((*id, Some(options.as_ref().clone()), None))
         }
@@ -1269,15 +1289,49 @@ async fn connect_once(
                 )
                 .await
             } else {
-                create_saved_profile_session(
+                let force = matches!(
+                    requested_action.as_ref(),
+                    Some(DesktopSessionAction::OpenProfileOptions(_))
+                );
+                if force && negotiated.protocol_minor < cshell_ipc::JUMP_REUSE_EXECUTION_MINOR {
+                    return Err(DesktopConnectionError::ProfileLaunch(
+                        "请先成套更新 GUI 和后台以选择跳板连接".into(),
+                    ));
+                }
+                let choice = if force {
+                    crate::jump_reuse_panel::choose(config, profile_id, true)
+                        .await
+                        .map_err(jump_choice_failure)?
+                } else {
+                    None
+                };
+                let result = create_saved_profile_session_override(
                     &mut stream,
                     &mut request_id,
                     profile_id,
                     size.map_or(24, |value| u32::from(value.rows)),
                     size.map_or(80, |value| u32::from(value.cols)),
                     options,
+                    choice.as_ref(),
                 )
-                .await
+                .await;
+                if matches!(result, Err(DesktopConnectionError::JumpSelectionRequired)) {
+                    let choice = crate::jump_reuse_panel::choose(config, profile_id, true)
+                        .await
+                        .map_err(jump_choice_failure)?;
+                    create_saved_profile_session_override(
+                        &mut stream,
+                        &mut request_id,
+                        profile_id,
+                        size.map_or(24, |value| u32::from(value.rows)),
+                        size.map_or(80, |value| u32::from(value.cols)),
+                        None,
+                        choice.as_ref(),
+                    )
+                    .await
+                } else {
+                    result
+                }
             }
         };
         let capture = shared.clone();
@@ -1361,6 +1415,7 @@ async fn connect_once(
                 request_id,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        jump_override: None,
                         connection_diagnostics: false,
                         source_ssh_session_id: None,
                         rows: 24,
@@ -1424,6 +1479,7 @@ async fn connect_once(
     }
     if let Some(
         DesktopSessionAction::OpenProfile(id)
+        | DesktopSessionAction::OpenProfileOptions(id)
         | DesktopSessionAction::OpenLocal(id, _)
         | DesktopSessionAction::OpenContext(id, _),
     ) = requested_action.as_ref()
@@ -1667,6 +1723,7 @@ where
                 request_id: id,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        jump_override: None,
                         connection_diagnostics: crate::connection_diagnostics::requested(),
                         rows: u32::from(size.rows),
                         cols: u32::from(size.cols),
@@ -1718,6 +1775,7 @@ where
     })
 }
 
+#[cfg(test)]
 async fn create_saved_profile_session<S>(
     stream: &mut S,
     request_id: &mut u64,
@@ -1725,6 +1783,29 @@ async fn create_saved_profile_session<S>(
     rows: u32,
     cols: u32,
     local_launch: Option<cshell_ipc::LocalLaunchOptions>,
+) -> Result<(SessionId, String), DesktopConnectionError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    create_saved_profile_session_override(
+        stream,
+        request_id,
+        profile_id,
+        rows,
+        cols,
+        local_launch,
+        None,
+    )
+    .await
+}
+async fn create_saved_profile_session_override<S>(
+    stream: &mut S,
+    request_id: &mut u64,
+    profile_id: ProfileId,
+    rows: u32,
+    cols: u32,
+    local_launch: Option<cshell_ipc::LocalLaunchOptions>,
+    jump_override: Option<&cshell_domain::JumpConnectionOverride>,
 ) -> Result<(SessionId, String), DesktopConnectionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1737,6 +1818,7 @@ where
             deadline_unix_ms: 0,
             payload: Some(envelope::Payload::SessionCreateRequest(
                 cshell_ipc::SessionCreateRequest {
+                    jump_override: jump_override.map(Into::into),
                     connection_diagnostics: crate::connection_diagnostics::requested(),
                     source_ssh_session_id: None,
                     local_launch,
@@ -1770,6 +1852,9 @@ where
 fn profile_creation_failure(code: i32, detail: String) -> DesktopConnectionError {
     let code = SessionFailureCode::try_from(code).unwrap_or(SessionFailureCode::ProtocolRejected);
     // Exact compatibility with pre-66 daemons; never infer cancellation from arbitrary peer text.
+    if code == SessionFailureCode::JumpSelectionRequired {
+        return DesktopConnectionError::JumpSelectionRequired;
+    }
     if code == SessionFailureCode::AuthenticationCancelled
         || code == SessionFailureCode::AuthenticationRejected
             && detail == "SSH 验证已取消，连接未建立。"
@@ -1781,6 +1866,13 @@ fn profile_creation_failure(code: i32, detail: String) -> DesktopConnectionError
         } else {
             format!("{code:?}: {detail}")
         })
+    }
+}
+fn jump_choice_failure(detail: String) -> DesktopConnectionError {
+    if detail == "跳板连接选择已取消或超时" {
+        DesktopConnectionError::LaunchCancelled
+    } else {
+        DesktopConnectionError::ProfileLaunch(detail)
     }
 }
 async fn discover_or_create_session<S>(
@@ -1848,6 +1940,7 @@ where
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateRequest(
                         cshell_ipc::SessionCreateRequest {
+                            jump_override: None,
                             connection_diagnostics: false,
                             source_ssh_session_id: None,
                             local_launch: None,
@@ -3660,6 +3753,13 @@ mod tests {
             let text = snapshot.row(row).map_or_else(String::new, |cells| {
                 cells
                     .iter()
+                    .filter(|cell| {
+                        !matches!(
+                            cell.width,
+                            cshell_terminal::CellWidth::WideSpacer
+                                | cshell_terminal::CellWidth::LeadingWideSpacer
+                        )
+                    })
                     .flat_map(cshell_terminal::Cell::characters)
                     .collect()
             });
@@ -3856,6 +3956,170 @@ mod tests {
                 view.detail
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        #[cfg(windows)]
+        {
+            // Confirmed IME text travels through the real desktop queue, IPC,
+            // ConPTY and parser; preedit never enters the shell.
+            assert!(connection.send_input(InputAction::Text("chcp 65001\r".into())));
+            assert!(connection.send_input(InputAction::Text("echo CSHELL_IME_".into())));
+            let mut ime = crate::terminal_ime::State::default();
+            let target = crate::terminal_ime::Target::Terminal {
+                tab: None,
+                session: session_id,
+                epoch: connection.view().input_epoch,
+            };
+            assert!(
+                ime.event(target, &winit::event::Ime::Preedit("zhongwen".into(), None))
+                    .1
+                    .is_none()
+            );
+            let action = ime
+                .event(target, &winit::event::Ime::Commit("中文".into()))
+                .1
+                .unwrap();
+            assert!(connection.send_input(action));
+            assert!(connection.send_input(InputAction::Text("\r".into())));
+            tokio::time::timeout(PTY_E2E_TIMEOUT, async {
+                while !connection
+                    .view()
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| snapshot_has_executed_line(snapshot, "CSHELL_IME_中文"))
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("confirmed Chinese must survive the desktop IPC and real Windows PTY");
+            // A real long-running command must stop through the desktop input
+            // queue and IPC, not by killing the fixture or closing its PTY.
+            assert!(connection.send_input(InputAction::Paste {
+                text: "ping -t 127.0.0.1\r".into(),
+                bracketed: true,
+            }));
+            tokio::time::timeout(PTY_E2E_TIMEOUT, async {
+                while !connection
+                    .view()
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| {
+                        snapshot
+                            .cells
+                            .iter()
+                            .flat_map(cshell_terminal::Cell::characters)
+                            .collect::<String>()
+                            .contains("TTL=")
+                    })
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("loopback ping must produce a reply");
+            let key = winit::keyboard::Key::Character("c".into());
+            assert!(crate::terminal_key_bypasses_egui(
+                &key,
+                winit::keyboard::ModifiersState::CONTROL,
+                true,
+                false
+            ));
+            let interrupt = crate::desktop_key_action(
+                crate::DesktopKeyInput {
+                    key: &key,
+                    text: None,
+                    pressed: true,
+                    repeated: false,
+                },
+                winit::keyboard::ModifiersState::CONTROL,
+                cshell_terminal::TerminalModes::default(),
+                false,
+            )
+            .unwrap();
+            assert!(connection.send_input(interrupt));
+            assert!(connection.send_input(InputAction::Paste {
+                text: "echo CSHELL_CTRL_C_RETURNED\r".into(),
+                bracketed: true,
+            }));
+            tokio::time::timeout(PTY_E2E_TIMEOUT, async {
+                while !connection
+                    .view()
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| {
+                        snapshot_has_executed_line(snapshot, "CSHELL_CTRL_C_RETURNED")
+                    })
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("Ctrl+C must stop ping and return to the same shell");
+        }
+        #[cfg(windows)]
+        if let Some(fixture_path) = std::env::var_os("CSHELL_DOCKER_INTERRUPT_FIXTURE") {
+            let fixture: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(fixture_path).unwrap()).unwrap();
+            let container = fixture["container_id"].as_str().unwrap();
+            assert!(container.len() == 64 && container.bytes().all(|b| b.is_ascii_hexdigit()));
+            let baseline = connection.view().snapshot.as_ref().unwrap().generation;
+            assert!(connection.send_input(InputAction::Paste {
+                text: format!("docker logs --tail=10 -f {container}\r"),
+                bracketed: true
+            }));
+            tokio::time::timeout(PTY_E2E_TIMEOUT, async {
+                while !connection.view().snapshot.as_deref().is_some_and(|s| {
+                    s.generation > baseline
+                        && snapshot_has_executed_line(s, "CSHELL_INTERRUPT_LOG_")
+                }) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("real Docker CLI must stream the owned container's logs");
+            let key = winit::keyboard::Key::Character("c".into());
+            let interrupt = crate::desktop_key_action(
+                crate::DesktopKeyInput {
+                    key: &key,
+                    text: None,
+                    pressed: true,
+                    repeated: false,
+                },
+                winit::keyboard::ModifiersState::CONTROL,
+                Default::default(),
+                false,
+            )
+            .unwrap();
+            assert!(connection.send_input(interrupt));
+            assert!(connection.send_input(InputAction::Paste {
+                text: "echo CSHELL_DOCKER_FOLLOW_STOPPED\r".into(),
+                bracketed: true
+            }));
+            tokio::time::timeout(PTY_E2E_TIMEOUT, async {
+                while !connection
+                    .view()
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|s| snapshot_has_executed_line(s, "CSHELL_DOCKER_FOLLOW_STOPPED"))
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("Ctrl+C must end docker logs and preserve the parent shell");
+            let inspected = std::process::Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Running}}", container])
+                .output()
+                .unwrap();
+            assert!(inspected.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&inspected.stdout).trim(),
+                "true",
+                "ending log follow must not stop the container"
+            );
+            println!(
+                "owned Docker logs --tail=10 -f: Ctrl+C returned to shell; container still running"
+            );
         }
         let second_attachment = registry
             .spawn_local(&interactive_profile(), TerminalSize::cells(18, 60))

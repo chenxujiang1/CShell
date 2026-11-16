@@ -67,3 +67,27 @@ impl std::fmt::Debug for TerminalUploadSnapshot {
             .finish_non_exhaustive()
     }
 }
+
+/// A read-only retry review, bound to one attempt of the original upload.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalUploadRetryPlan {
+    pub id: SessionId,
+    pub source: SessionId,
+    pub revision: u64,
+    pub host: String,
+    pub directory: String,
+    pub completed_files: u32,
+    pub retry_files: u32,
+    pub can_retry: bool,
+    pub detail: String,
+}
+
+impl std::fmt::Debug for TerminalUploadRetryPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalUploadRetryPlan")
+            .field("id", &self.id)
+            .field("can_retry", &self.can_retry)
+            .finish_non_exhaustive()
+    }
+}

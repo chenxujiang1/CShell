@@ -1,6 +1,39 @@
 use super::*;
 
 impl DesktopApp {
+    pub(super) fn finish_async_history_scroll(&mut self, tab: Option<cshell_domain::TabId>) {
+        if tab == self.current_workspace_tab {
+            if self.terminal_scrollback
+                && self.terminal_surface.latest_snapshot().is_some()
+                && !self.terminal_selecting
+                && self.terminal_decorations.selection.is_none()
+                && self.terminal_clipboard.snapshot.is_none()
+                && self.terminal_clipboard.all.is_none()
+                && self.terminal_clipboard.history_frame.is_none()
+                && self.log_decorations.selection_ranges.is_empty()
+            {
+                self.return_to_live_terminal();
+            }
+        } else if let Some(tab) = tab
+            && let Some(cached) = self.cached_tab_views.get_mut(&tab)
+            && cached.terminal_scrollback
+            && cached.surface.latest_snapshot().is_some()
+            && cached.decorations.selection.is_none()
+            && cached.clipboard.snapshot.is_none()
+            && cached.clipboard.all.is_none()
+            && cached.clipboard.history_frame.is_none()
+            && cached.log_decorations.selection_ranges.is_empty()
+        {
+            cached.terminal_scrollback = false;
+            cached.log_surface = None;
+            cached.log_decorations = LogDecorations::default();
+            cached.last_log_page = None;
+            if let Some(connection) = self.pane_daemons.get(&tab) {
+                connection.cancel_log_page();
+            }
+        }
+    }
+
     pub(super) fn jump_to_command(&mut self, line: u64) {
         self.scroll_terminal_history(-1);
         if let Some(surface) = &mut self.log_surface {
@@ -29,7 +62,7 @@ impl DesktopApp {
             || self.profile_panel.is_dialog_open()
             || self.zmodem.blocks_input()
             || self.keyboard_auth.blocks_input()
-            || self.view_model.about_open
+            || self.view_model.help_open()
             || self.view_model.confirm_terminate
             || self.view_model.tab_navigator.open
             || self.pending_paste.is_some()
@@ -134,6 +167,14 @@ impl DesktopApp {
         }
     }
     pub(super) fn scroll_terminal_history(&mut self, rows: i32) {
+        if self.terminal_clipboard.all.is_some() {
+            self.terminal_clipboard.snapshot = None;
+            self.terminal_clipboard.history_frame = None;
+            self.terminal_decorations.selection = None;
+            self.scroll_terminal_history_kept(rows, true);
+            self.poll_terminal_all();
+            return;
+        }
         if rows != 0 {
             self.cancel_history_search_jump();
             self.pause_terminal_reading();
@@ -338,5 +379,106 @@ mod tests {
         app.return_to_live_terminal();
         assert!(!app.terminal_scrollback && app.log_surface.is_none());
         assert!(app.log_surface.is_none());
+    }
+
+    fn pending_tail_reflow() -> (DesktopApp, TabReflowResult) {
+        let page = |revision, end| {
+            Arc::new(cshell_render::LogPage {
+                source_id: LogSourceId(0),
+                revision,
+                first_line_id: 1,
+                anchor_line_id: 100,
+                rows: (100..end)
+                    .map(|line_id| cshell_render::LogRow {
+                        line_id,
+                        text: format!("row {line_id}").into(),
+                        soft_wrap: false,
+                        style_spans: Default::default(),
+                        truncated: false,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                total_line_count: 120,
+                has_before: true,
+                has_after: end <= 120,
+            })
+        };
+        let mut surface = LogSurfaceModel::default();
+        surface.submit_page(page(1, 110)).unwrap();
+        let layout = surface.request_reflow(80).unwrap().execute().unwrap();
+        surface.submit_reflow(layout);
+        surface.anchor(104, 0);
+        surface.scroll_visual_rows(40, 5);
+        surface.submit_page(page(2, 121)).unwrap();
+        let request = surface.request_reflow(80).unwrap();
+        let mut app = DesktopApp::default();
+        app.viewport_rows = 5;
+        app.terminal_scrollback = true;
+        app.log_surface = Some(surface);
+        app.terminal_surface
+            .submit_snapshot(Arc::new(visual_corpus::snapshot()));
+        (
+            app,
+            TabReflowResult {
+                tab_id: None,
+                result: request.execute(),
+            },
+        )
+    }
+
+    #[test]
+    fn asynchronous_scroll_to_the_tail_returns_to_the_live_terminal_without_another_wheel() {
+        let (mut app, result) = pending_tail_reflow();
+        assert!(app.apply_log_reflow(result));
+        assert!(
+            !app.terminal_scrollback,
+            "async paging must finish the user's downward scroll"
+        );
+        assert!(app.log_surface.is_none());
+        assert!(app.terminal_surface.latest_snapshot().is_some());
+    }
+
+    #[test]
+    fn asynchronous_tail_does_not_discard_a_frozen_copy_selection() {
+        let (mut app, result) = pending_tail_reflow();
+        app.terminal_clipboard.snapshot = app.terminal_surface.latest_snapshot().cloned();
+        app.terminal_decorations.selection = Some(TerminalSelection {
+            anchor: TerminalCellPoint { row: 0, column: 0 },
+            focus: TerminalCellPoint { row: 0, column: 1 },
+            mode: TerminalSelectionMode::Character,
+        });
+        assert!(app.apply_log_reflow(result));
+        assert!(app.terminal_scrollback && app.log_surface.is_some());
+        assert!(app.terminal_clipboard.snapshot.is_some());
+        assert!(app.terminal_decorations.selection.is_some());
+    }
+
+    #[test]
+    fn asynchronous_tail_keeps_history_visible_if_the_live_snapshot_is_unavailable() {
+        let (mut app, result) = pending_tail_reflow();
+        app.terminal_surface = TerminalSurfaceModel::default();
+        assert!(app.apply_log_reflow(result));
+        assert!(app.terminal_scrollback && app.log_surface.is_some());
+    }
+
+    #[test]
+    fn asynchronous_tail_finishes_in_a_background_tab_without_switching_the_active_tab() {
+        let (mut app, mut result) = pending_tail_reflow();
+        let tab = cshell_domain::TabId::new();
+        app.cached_tab_views.insert(
+            tab,
+            CachedTabView {
+                surface: std::mem::take(&mut app.terminal_surface),
+                log_surface: app.log_surface.take(),
+                terminal_scrollback: true,
+                ..Default::default()
+            },
+        );
+        app.terminal_scrollback = false;
+        result.tab_id = Some(tab);
+        assert!(!app.apply_log_reflow(result));
+        let cached = app.cached_tab_views.get(&tab).unwrap();
+        assert!(!cached.terminal_scrollback && cached.log_surface.is_none());
+        assert_eq!(app.current_workspace_tab, None);
     }
 }

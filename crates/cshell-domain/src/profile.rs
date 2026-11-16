@@ -90,6 +90,11 @@ pub struct SshConnectionRecord {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SshConnectionOptions {
+    #[serde(default, skip_serializing_if = "crate::JumpReusePolicy::is_always_new")]
+    pub jump_reuse_policy: crate::JumpReusePolicy,
+    /// The final hop authenticates using its own OpenSSH configuration/keys.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authentication_on_jump: bool,
     /// None inherits the desktop's live global transfer default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sftp_verification: Option<SftpVerification>,
@@ -109,6 +114,8 @@ pub struct SshConnectionOptions {
 impl Default for SshConnectionOptions {
     fn default() -> Self {
         Self {
+            authentication_on_jump: false,
+            jump_reuse_policy: Default::default(),
             sftp_verification: None,
             authentication_order: Vec::new(),
             keyboard_interactive: false,
@@ -146,7 +153,8 @@ impl SshConnectionOptions {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.authentication_order.len() <= 5
+        (!self.authentication_on_jump || !self.auto_reconnect)
+            && self.authentication_order.len() <= 5
             && self
                 .authentication_order
                 .iter()
@@ -277,6 +285,9 @@ pub enum SshAuthStep {
 }
 impl SshConnectionRecord {
     pub fn authentication_steps(&self) -> Vec<SshAuthStep> {
+        if self.options.authentication_on_jump {
+            return Vec::new();
+        }
         if !self.options.authentication_order.is_empty() {
             return self.options.authentication_order.clone();
         }

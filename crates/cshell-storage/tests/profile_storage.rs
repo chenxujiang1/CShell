@@ -34,6 +34,83 @@ async fn raw_pool(path: &Path) -> Result<SqlitePool, sqlx::Error> {
 }
 
 #[tokio::test]
+async fn jump_reuse_policies_survive_database_reopen_without_runtime_selections()
+-> Result<(), Box<dyn Error>> {
+    let defaults: cshell_domain::SshConnectionOptions = serde_json::from_str("{}")?;
+    assert!(defaults.jump_reuse_policy.is_always_new());
+    assert!(!serde_json::to_string(&defaults)?.contains("jump_reuse_policy"));
+    assert!(serde_json::from_str::<cshell_domain::JumpReusePolicy>("\"unexpected\"").is_err());
+    assert!(
+        serde_json::from_str::<cshell_domain::JumpConnectionOverride>("{\"unexpected\":true}")
+            .is_err()
+    );
+    for policy in [
+        cshell_domain::JumpReusePolicy::AlwaysNew,
+        cshell_domain::JumpReusePolicy::PreferExisting,
+        cshell_domain::JumpReusePolicy::OnlyExisting,
+    ] {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("profiles.db");
+        let a = profile("A", None);
+        let b = profile("B", None);
+        let a_target = SshConnectionRecord {
+            profile_id: a.id,
+            host: "server-a".into(),
+            port: 22,
+            username: "operator".into(),
+            auth_method: SshAuthMethod::Password,
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
+            route: Default::default(),
+            options: Default::default(),
+        };
+        let mut b_target = a_target.clone();
+        b_target.profile_id = b.id;
+        b_target.host = "server-b".into();
+        b_target.route = cshell_domain::SshRoute::Jump { profile_id: a.id };
+        b_target.options.jump_reuse_policy = policy;
+        let service = ProfileService::new(SqliteProfileRepository::open(&path).await?);
+        service
+            .apply_batch(
+                0,
+                &[
+                    CatalogChange::UpsertProfile(a),
+                    CatalogChange::UpsertProfile(b),
+                    CatalogChange::UpsertSshConnection(a_target),
+                    CatalogChange::UpsertSshConnection(b_target.clone()),
+                ],
+            )
+            .await?;
+        service.into_repository().close().await;
+        let repository = SqliteProfileRepository::open(&path).await?;
+        let snapshot = repository.load().await?;
+        assert!(snapshot.ssh_connections.contains(&b_target));
+        let json = serde_json::to_string(&snapshot.ssh_connections)?;
+        assert!(!json.contains("jump_override") && !json.contains("candidate"));
+        let decoded: Vec<SshConnectionRecord> = serde_json::from_str(&json)?;
+        assert_eq!(decoded, snapshot.ssh_connections);
+        if !policy.is_always_new() {
+            assert_eq!(
+                cshell_application::export_openssh_config(&snapshot, &[b_target.profile_id]),
+                Err(cshell_application::OpenSshExportError::JumpReuse)
+            );
+            let mut invalid = snapshot.clone();
+            invalid
+                .ssh_connections
+                .iter_mut()
+                .find(|target| target.profile_id == b_target.profile_id)
+                .unwrap()
+                .route = cshell_domain::SshRoute::Direct;
+            assert!(ProfileCatalog::from_snapshot(invalid).is_err());
+        }
+        repository.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn v8_theme_migration_preserves_revision_and_backup_and_failure_keeps_v8()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -345,6 +422,8 @@ async fn ssh_target_round_trip_and_failed_update_are_atomic() -> Result<(), Box<
     let record = profile("server", None);
     let target = SshConnectionRecord {
         options: cshell_domain::SshConnectionOptions {
+            authentication_on_jump: false,
+            jump_reuse_policy: Default::default(),
             sftp_verification: Some(cshell_domain::SftpVerification::Full),
             authentication_order: vec![
                 cshell_domain::SshAuthStep::KeyboardInteractive,

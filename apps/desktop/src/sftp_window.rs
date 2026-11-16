@@ -198,8 +198,11 @@ impl SftpWindow {
                     ui.painter()
                         .rect_filled(ui.max_rect(), 0.0, cshell_ui::theme::BACKGROUND);
                     egui::Frame::NONE.inner_margin(10).show(ui, |ui| {
-                        command = panel.draw_contents(ui, session, view);
+                        ui.add_enabled_ui(!crate::jump_reuse_panel::active(), |ui| {
+                            command = panel.draw_contents(ui, session, view);
+                        });
                         auth.draw(ui.ctx());
+                        crate::jump_reuse_panel::draw(ui.ctx());
                     });
                 });
                 self.repaint = output
@@ -580,9 +583,11 @@ impl DesktopApp {
         if let sftp_connection::SftpClientCommand::ConnectProfile {
             profile,
             source_ssh_session,
+            jump_options,
             ..
         } = &mut command
             && source_ssh_session.is_none()
+            && !*jump_options
         {
             *source_ssh_session = self.sftp_ssh_source(*profile);
         }

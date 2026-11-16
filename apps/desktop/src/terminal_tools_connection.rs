@@ -61,6 +61,7 @@ impl Connection {
 if request.operation==Op::Save as i32{view.imported=None;}}
                             },
                             Ok(TerminalToolsReply::Shell(data))=>{view.shell=Some(data);view.shell_epoch=epoch;view.error=None;},
+                            Ok(TerminalToolsReply::Resources(_))=>{view.error=Some("资源回复应通过资源面板读取".into());},
                             Ok(TerminalToolsReply::Raw(raw))=>{view.raw=Some(Arc::new(raw));view.raw_epoch=epoch;view.error=None;},
                             Err(error)=>{view.error=Some(error);if mutation{view.writable=false;}
 if request.operation==Op::RawJournal as i32{view.raw=None;}}
@@ -187,6 +188,9 @@ pub(super) async fn query(
         if request.operation == Op::ShellHistory as i32 && negotiated.protocol_minor < 75 {
             return Err("请一起更新 GUI 与后台，以支持命令导航".into());
         }
+        if request.operation == Op::ServerResources as i32 && negotiated.protocol_minor < 78 {
+            return Err("请一起更新 GUI 与后台，以支持服务器资源面板".into());
+        }
         if negotiated.feature_bits & features::TERMINAL_TOOLS == 0 {
             return Err("daemon 不支持终端工具".into());
         }
@@ -234,6 +238,9 @@ pub(super) async fn query(
         let expectation = match Op::try_from(request.operation)
             .map_err(|_| "无效终端工具操作".to_owned())?
         {
+            Op::ServerResources => {
+                TerminalToolsExpectation::Resources(id.ok_or("缺少 SSH 会话范围")?)
+            }
             Op::ShellHistory => TerminalToolsExpectation::Shell {
                 session: id.ok_or("missing shell session")?,
                 id: request.cursor,

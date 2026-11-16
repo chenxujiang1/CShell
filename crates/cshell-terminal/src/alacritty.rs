@@ -91,20 +91,24 @@ impl XtermKeyboardModes {
     fn observe(&mut self, bytes: &[u8]) -> Vec<(usize, Vec<u8>)> {
         let mut responses = Vec::new();
         for (offset, &byte) in bytes.iter().enumerate() {
+            // ESC restarts an incomplete control sequence, just as VTE does.
+            if byte == 0x1b {
+                self.pending.clear();
+                self.pending.push(byte);
+                continue;
+            }
             if self.pending.is_empty() {
-                if byte == 0x1b {
-                    self.pending.push(byte);
-                }
                 continue;
             }
             if self.pending == [0x1b] {
-                if byte == b'[' {
+                if byte == b'c' {
+                    self.modify_other_keys = 0;
+                    self.format_other_keys = false;
+                    self.pending.clear();
+                } else if byte == b'[' {
                     self.pending.push(byte);
                 } else {
                     self.pending.clear();
-                    if byte == 0x1b {
-                        self.pending.push(byte);
-                    }
                 }
                 continue;
             }
@@ -128,6 +132,7 @@ impl XtermKeyboardModes {
             return None;
         };
         match sequence {
+            ">m" => self.modify_other_keys = 0,
             ">4m" => self.modify_other_keys = 0,
             ">4n" => self.modify_other_keys = 0,
             ">4f" => self.format_other_keys = false,
@@ -141,7 +146,13 @@ impl XtermKeyboardModes {
                 if let Some(value) = sequence
                     .strip_prefix(">4;")
                     .and_then(|value| value.strip_suffix('m'))
-                    .and_then(|value| value.parse::<u8>().ok())
+                    .and_then(|value| {
+                        if value.is_empty() {
+                            Some(0)
+                        } else {
+                            value.parse::<u8>().ok()
+                        }
+                    })
                     .filter(|value| *value <= 3)
                 {
                     self.modify_other_keys = value;
@@ -731,6 +742,41 @@ mod tests {
 
         terminal.feed(b"\x1b[<u");
         assert_eq!(terminal.modes().kitty_keyboard_flags, 0);
+    }
+
+    #[test]
+    fn xterm_keyboard_resets_restore_classic_ctrl_c() {
+        use cshell_domain::{InputAction, KeyCode, KeyEvent, Modifiers};
+        let interrupt = InputAction::Key(KeyEvent {
+            code: KeyCode::Character("c".into()),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+            pressed: true,
+            repeated: false,
+        });
+        for reset in [
+            b"\x1bc".as_slice(),
+            b"\x1b[>m",
+            b"\x1b[>4;m",
+            b"\x1b[\x1b[>4m",
+        ] {
+            let mut terminal = AlacrittyTerminalEngine::new(TerminalSize::cells(24, 80));
+            terminal.feed(b"\x1b[>4;2m");
+            assert_ne!(
+                crate::InputEncoder::encode(&interrupt, terminal.modes()).unwrap(),
+                b"\x03"
+            );
+            for byte in reset {
+                terminal.feed(&[*byte]);
+            }
+            assert_eq!(
+                crate::InputEncoder::encode(&interrupt, terminal.modes()).unwrap(),
+                b"\x03",
+                "reset: {reset:?}"
+            );
+        }
     }
 
     #[test]

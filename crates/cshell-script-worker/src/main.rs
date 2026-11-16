@@ -221,8 +221,12 @@ fn run(expected_parent: u32) -> Result<(), ScriptWorkerError> {
     write_frame(&mut bridge.output, &event)
 }
 fn main() {
-    // Never print diagnostics: stdout belongs solely to the private protocol.
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if matches!(args.as_slice(), [value] if value == "--version" || value == "-V") {
+        println!("cshell-script-worker {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    // Protocol mode stays payload-silent; version mode never enters the worker.
     let parent = match args.as_slice() {
         [protocol, option, parent]
             if protocol == WORKER_STDIO_ARGUMENT && option == "--parent-pid" =>

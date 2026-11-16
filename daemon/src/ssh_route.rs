@@ -35,6 +35,35 @@ pub(crate) struct SshConnectionPlan {
     pub jumps: Vec<SshConnectionRecord>,
 }
 impl SshConnectionPlan {
+    pub(crate) fn with_jump_override(
+        &self,
+        selection: Option<&cshell_domain::JumpConnectionOverride>,
+    ) -> Result<Self, SshLaunchFailure> {
+        let mut plan = self.clone();
+        if let Some(selection) = selection {
+            if !selection.is_valid() || plan.jumps.len() != 1 {
+                return Err(SshLaunchFailure::new(
+                    SessionFailureCode::InvalidConfiguration,
+                    "跳板临时选择无效或不适用于此连接路线",
+                ));
+            }
+            if let Some(policy) = selection.policy {
+                plan.target.options.jump_reuse_policy = policy;
+            }
+        }
+        if !plan.target.options.jump_reuse_policy.is_always_new() && plan.jumps.len() != 1 {
+            return Err(reuse_unavailable());
+        }
+        if selection.is_some_and(|choice| choice.candidate.is_some())
+            && plan.target.options.jump_reuse_policy.is_always_new()
+        {
+            return Err(SshLaunchFailure::new(
+                SessionFailureCode::InvalidConfiguration,
+                "新建连接与指定复用候选冲突",
+            ));
+        }
+        Ok(plan)
+    }
     pub(crate) fn route_identity(
         &self,
         fingerprints: &[&str],
@@ -121,7 +150,7 @@ impl SshConnectionPlan {
         }
         if let Some(jump) = jump {
             for (record, client) in resolved.jumps.iter_mut().zip(&jump.0.clients) {
-                if let Some(username) = client.authenticated_username() {
+                if let Some(username) = client.connection().authenticated_username() {
                     record.username = username.to_owned();
                 }
             }
@@ -164,19 +193,43 @@ impl SshConnectionPlan {
     }
 }
 
+fn reuse_unavailable() -> SshLaunchFailure {
+    SshLaunchFailure::new(
+        SessionFailureCode::Unsupported,
+        "跳板复用策略已保存，但此阶段尚未启用现有连接准入；请选择始终新建，或等待复用功能完成",
+    )
+}
+pub(crate) fn ensure_jump_reuse_runtime_supported(
+    plan: &SshConnectionPlan,
+) -> Result<(), SshLaunchFailure> {
+    if std::iter::once(&plan.target)
+        .chain(&plan.jumps)
+        .any(|target| !target.options.jump_reuse_policy.is_always_new())
+    {
+        return Err(reuse_unavailable());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct JumpConnection(Arc<JumpClient>);
 #[derive(Debug)]
 struct JumpClient {
     // Outer transport first; drop and disconnect close the inner hops first.
-    clients: Vec<Arc<SshConnection>>,
+    clients: Vec<crate::shared_ssh::TransportLease>,
 }
 impl JumpConnection {
+    pub(crate) fn leases(&self) -> &[crate::shared_ssh::TransportLease] {
+        &self.0.clients
+    }
+    pub(crate) fn from_leases(clients: Vec<crate::shared_ssh::TransportLease>) -> Self {
+        Self(Arc::new(JumpClient { clients }))
+    }
     pub(crate) fn fingerprints(&self) -> Vec<&str> {
         self.0
             .clients
             .iter()
-            .map(|c| c.verified_host_key_fingerprint())
+            .map(|c| c.connection().verified_host_key_fingerprint())
             .collect()
     }
     pub async fn disconnect(&self) {
@@ -185,21 +238,21 @@ impl JumpConnection {
     pub(crate) async fn disconnect_confirmed(&self) -> bool {
         let mut closed = true;
         for client in self.0.clients.iter().rev() {
-            closed &= client.disconnect_confirmed().await;
+            closed &= client.release_confirmed().await;
         }
         closed
     }
 }
-async fn close_jumps(clients: &[Arc<SshConnection>]) {
+async fn close_jumps(clients: &[crate::shared_ssh::TransportLease]) {
     for client in clients.iter().rev() {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client.disconnect()).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(25), client.release()).await;
     }
 }
-async fn close_jumps_confirmed(clients: &[Arc<SshConnection>]) -> bool {
+async fn close_jumps_confirmed(clients: &[crate::shared_ssh::TransportLease]) -> bool {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let mut closed = true;
         for client in clients.iter().rev() {
-            closed &= client.disconnect_confirmed().await;
+            closed &= client.release_confirmed().await;
         }
         closed
     })
@@ -273,6 +326,18 @@ fn preflight(
     plan: &SshConnectionPlan,
     credential_template: Option<&SshConnectionRecord>,
 ) -> Result<Box<dyn SshProvider>, SshLaunchFailure> {
+    ensure_jump_reuse_runtime_supported(plan)?;
+    if plan
+        .jumps
+        .iter()
+        .any(|jump| jump.options.authentication_on_jump)
+        || (plan.target.options.authentication_on_jump && plan.jumps.is_empty())
+    {
+        return Err(SshLaunchFailure::new(
+            SessionFailureCode::InvalidConfiguration,
+            "A 端认证模式需要普通 SSH 跳板，不能继续用受管理 B 作为下一层跳板",
+        ));
+    }
     let expected = cshell_domain::ssh_jump_chain(&plan.target, &plan.jumps).map_err(|e| {
         SshLaunchFailure::new(SessionFailureCode::InvalidConfiguration, e.to_string())
     })?;
@@ -309,16 +374,40 @@ async fn route_stream(
     path: &Path,
     vault: &Arc<crate::vault_control::VaultController>,
     pins: Option<&[String]>,
-) -> Result<(SshTransport, Option<JumpConnection>), SshLaunchFailure> {
+    borrowed: Option<crate::shared_ssh::TransportLease>,
+) -> Result<(Option<SshTransport>, Option<JumpConnection>), SshLaunchFailure> {
     if plan.jumps.is_empty() {
-        return Ok((leaf_stream(&plan.target).await?, None));
+        return Ok((Some(leaf_stream(&plan.target).await?), None));
     }
     // Own each authenticated hop immediately. Any later error/cancellation drops
     // this guard and closes already opened hops in reverse transport order.
     let mut guard = JumpClient {
         clients: Vec::new(),
     };
-    for (index, jump) in plan.jumps.iter().enumerate() {
+    if let Some(borrowed) = borrowed {
+        let hop = plan
+            .jumps
+            .first()
+            .filter(|_| plan.jumps.len() == 1)
+            .ok_or_else(reuse_unavailable)?;
+        let check = verifier(hop, path).await?;
+        if !borrowed.running()
+            || !borrowed.connection().revalidate_host_identity(&check)
+            || pins.is_some_and(|pins| {
+                pins.first().map(String::as_str)
+                    != Some(borrowed.connection().verified_host_key_fingerprint())
+            })
+        {
+            return Err(SshLaunchFailure::new(
+                SessionFailureCode::HostKeyChanged,
+                "跳板连接已失效或主机身份不再受信任，请重新选择",
+            ));
+        }
+        progress::peer(1, &hop.host, hop.port);
+        progress::stage(Stage::ReusingTransport);
+        guard.clients.push(borrowed);
+    }
+    for (index, jump) in plan.jumps.iter().enumerate().skip(guard.clients.len()) {
         progress::peer((index + 1) as u8, &jump.host, jump.port);
         progress::stage(Stage::Credentials);
         let connected = async {
@@ -339,7 +428,7 @@ async fn route_stream(
                 SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, detail)
             })?;
             let stream = if let Some(previous) = guard.clients.last() {
-                jump_stream(previous, jump).await?
+                jump_stream(previous.connection(), jump).await?
             } else {
                 leaf_stream(jump).await?
             };
@@ -386,7 +475,20 @@ async fn route_stream(
                 return Err(failure);
             }
         };
-        guard.clients.push(Arc::new(connected));
+        guard.clients.push(crate::shared_ssh::TransportLease::new(
+            RoutedSshConnection {
+                client: connected,
+                jump: None,
+            },
+        ));
+    }
+    if plan.target.options.authentication_on_jump {
+        return Ok((
+            None,
+            Some(JumpConnection::from_leases(std::mem::take(
+                &mut guard.clients,
+            ))),
+        ));
     }
     let last = guard.clients.last().ok_or_else(|| {
         SshLaunchFailure::new(
@@ -395,7 +497,7 @@ async fn route_stream(
         )
     })?;
     progress::peer(0, &plan.target.host, plan.target.port);
-    let stream = match jump_stream(last, &plan.target).await {
+    let stream = match jump_stream(last.connection(), &plan.target).await {
         Ok(stream) => stream,
         Err(mut failure) => {
             if failure.retryable_network {
@@ -404,7 +506,12 @@ async fn route_stream(
             return Err(failure);
         }
     };
-    Ok((stream, Some(JumpConnection(Arc::new(guard)))))
+    Ok((
+        Some(stream),
+        Some(JumpConnection::from_leases(std::mem::take(
+            &mut guard.clients,
+        ))),
+    ))
 }
 async fn jump_stream(
     client: &SshConnection,
@@ -426,6 +533,7 @@ async fn jump_stream(
     Ok(stream)
 }
 
+#[cfg(test)]
 pub(crate) async fn connect_profile(
     plan: &SshConnectionPlan,
     path: &Path,
@@ -442,7 +550,7 @@ pub(crate) async fn connect_frozen_target(
     path: &Path,
     vault: &Arc<crate::vault_control::VaultController>,
 ) -> Result<RoutedSshConnection, SshLaunchFailure> {
-    connect_target(plan, credential_template, path, vault, None).await
+    connect_target(plan, credential_template, path, vault, None, None).await
 }
 pub(crate) async fn connect_profile_pinned(
     plan: &SshConnectionPlan,
@@ -450,7 +558,25 @@ pub(crate) async fn connect_profile_pinned(
     vault: &Arc<crate::vault_control::VaultController>,
     peer: &cshell_domain::ClipboardTrust,
 ) -> Result<RoutedSshConnection, SshLaunchFailure> {
-    connect_target(plan, &plan.target, path, vault, Some(peer)).await
+    connect_target(plan, &plan.target, path, vault, Some(peer), None).await
+}
+pub(crate) async fn connect_prepared(
+    plan: &SshConnectionPlan,
+    path: &Path,
+    vault: &Arc<crate::vault_control::VaultController>,
+    borrowed: Option<crate::shared_ssh::TransportLease>,
+) -> Result<RoutedSshConnection, SshLaunchFailure> {
+    let mut transport_plan = plan.clone();
+    transport_plan.target.options.jump_reuse_policy = cshell_domain::JumpReusePolicy::AlwaysNew;
+    connect_target(
+        &transport_plan,
+        &transport_plan.target,
+        path,
+        vault,
+        None,
+        borrowed,
+    )
+    .await
 }
 async fn connect_target(
     plan: &SshConnectionPlan,
@@ -458,6 +584,7 @@ async fn connect_target(
     path: &Path,
     vault: &Arc<crate::vault_control::VaultController>,
     peer: Option<&cshell_domain::ClipboardTrust>,
+    borrowed: Option<crate::shared_ssh::TransportLease>,
 ) -> Result<RoutedSshConnection, SshLaunchFailure> {
     progress::peer(0, &plan.target.host, plan.target.port);
     progress::stage(Stage::Credentials);
@@ -473,6 +600,44 @@ async fn connect_target(
             })
         })
         .transpose()?;
+    if plan.target.options.authentication_on_jump {
+        if plan.jumps.is_empty()
+            || plan
+                .jumps
+                .iter()
+                .any(|hop| hop.options.authentication_on_jump)
+        {
+            return Err(SshLaunchFailure::new(
+                SessionFailureCode::InvalidConfiguration,
+                "A 端认证模式需要普通 SSH 跳板，不能作为下一层中转跳板",
+            ));
+        }
+        let (_, jump) = route_stream(
+            plan,
+            provider.as_ref(),
+            path,
+            vault,
+            pins.as_deref(),
+            borrowed,
+        )
+        .await?;
+        let gateway = jump
+            .as_ref()
+            .and_then(|jump| jump.0.clients.last())
+            .ok_or_else(|| {
+                SshLaunchFailure::new(SessionFailureCode::InvalidConfiguration, "缺少 A 服务器")
+            })?;
+        progress::peer(0, &plan.target.host, plan.target.port);
+        progress::stage(Stage::Authentication);
+        let client = SshConnection::connect_from_jump(
+            gateway.connection(),
+            &plan.target,
+            peer.map(|peer| peer.host_key_sha256.as_str()),
+        )
+        .await
+        .map_err(ssh_failure)?;
+        return Ok(RoutedSshConnection { client, jump });
+    }
     let mut verifier = verifier(&plan.target, path).await?;
     if let Some(peer) = peer {
         verifier = verifier.with_fingerprint(peer.host_key_sha256.clone());
@@ -482,12 +647,24 @@ async fn connect_target(
         .map_err(|detail| {
             SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, detail)
         })?;
-    let (stream, jump) =
-        route_stream(plan, provider.as_ref(), path, vault, pins.as_deref()).await?;
+    let (stream, jump) = route_stream(
+        plan,
+        provider.as_ref(),
+        path,
+        vault,
+        pins.as_deref(),
+        borrowed,
+    )
+    .await?;
     progress::peer(0, &plan.target.host, plan.target.port);
     let client = provider
         .connect_configured(
-            stream,
+            stream.ok_or_else(|| {
+                SshLaunchFailure::new(
+                    SessionFailureCode::InvalidConfiguration,
+                    "缺少目标 SSH 网络通道",
+                )
+            })?,
             plan.target.username.clone(),
             auth,
             verifier,
@@ -519,6 +696,9 @@ pub(crate) async fn scan_profile(
     path: &Path,
     vault: &Arc<crate::vault_control::VaultController>,
 ) -> Result<ScannedHostKey, String> {
+    if plan.target.options.authentication_on_jump {
+        return Err("本模式由 A 上的 OpenSSH 校验 B 指纹。请在 A 核实并信任 B 后连接，不会自动修改 A 的 known_hosts。".into());
+    }
     let mut cancellation = vault.cancellation();
     vault
         .ensure_owned()
@@ -526,10 +706,12 @@ pub(crate) async fn scan_profile(
     let scan = async {
         let provider = preflight(plan, None).map_err(|e| e.detail)?;
         let _trust = crate::host_ca_store::coordination().read_owned().await;
-        let (stream, jump) = route_stream(plan, provider.as_ref(), path, vault, None)
+        let (stream, jump) = route_stream(plan, provider.as_ref(), path, vault, None, None)
             .await
             .map_err(|error| error.detail)?;
-        let result = provider.scan(stream).await;
+        let result = provider
+            .scan(stream.ok_or("missing native SSH stream")?)
+            .await;
         if let Some(jump) = jump {
             jump.disconnect().await;
         }

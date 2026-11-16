@@ -619,6 +619,20 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
             return Err(CatalogError::InvalidSshProfile(connection.profile_id));
         }
         if !connection.options.is_valid()
+            || (!connection.options.jump_reuse_policy.is_always_new()
+                && (!matches!(connection.route, cshell_domain::SshRoute::Jump { .. })
+                    || !cshell_domain::ssh_jump_chain(connection, &snapshot.ssh_connections)
+                        .is_ok_and(|chain| chain.len() == 1)))
+            || (connection.options.authentication_on_jump
+                && (!matches!(connection.route, cshell_domain::SshRoute::Jump { .. })
+                    || connection.auth_method != SshAuthMethod::Password
+                    || connection.username.is_empty()
+                    || connection.certificate_path.is_some()
+                    || connection.agent_identity.is_some()
+                    || connection
+                        .private_key_path
+                        .as_ref()
+                        .is_some_and(|path| !path.starts_with('/') || path.starts_with("vault:"))))
             || connection.port == 0
             || !valid_target_field(&connection.host, MAX_SSH_HOST_BYTES)
             || (!connection.username.is_empty()
@@ -639,14 +653,16 @@ fn validate(snapshot: &CatalogSnapshot) -> Result<(), CatalogError> {
                 .authentication_steps()
                 .contains(&cshell_domain::SshAuthStep::Certificate)
                 && connection.certificate_path.is_none())
-            || (connection.options.authentication_order.is_empty()
+            || (!connection.options.authentication_on_jump
+                && connection.options.authentication_order.is_empty()
                 && match connection.auth_method {
                     SshAuthMethod::Password | SshAuthMethod::Agent => false,
                     SshAuthMethod::PrivateKey | SshAuthMethod::Certificate => {
                         connection.private_key_path.is_none()
                     }
                 })
-            || (connection.options.authentication_order.is_empty()
+            || (!connection.options.authentication_on_jump
+                && connection.options.authentication_order.is_empty()
                 && connection.auth_method == SshAuthMethod::Certificate
                 && connection.certificate_path.is_none())
         {
@@ -854,6 +870,70 @@ mod tests {
             }),
             Err(CatalogError::DuplicateName)
         ));
+    }
+    #[test]
+    fn managed_b_requires_jump_and_does_not_require_local_b_credentials() {
+        let a = profile("A", None);
+        let b = profile("B", None);
+        let target = SshConnectionRecord {
+            profile_id: b.id,
+            host: "server-b".into(),
+            port: 22,
+            username: "operator".into(),
+            auth_method: SshAuthMethod::Password,
+            private_key_path: Some("/home/a/.ssh/b_key".into()),
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
+            route: cshell_domain::SshRoute::Jump { profile_id: a.id },
+            options: cshell_domain::SshConnectionOptions {
+                authentication_on_jump: true,
+                ..Default::default()
+            },
+        };
+        let mut a_target = target.clone();
+        a_target.profile_id = a.id;
+        a_target.host = "server-a".into();
+        a_target.route = Default::default();
+        a_target.private_key_path = None;
+        a_target.options = Default::default();
+        let valid = CatalogSnapshot {
+            profiles: vec![a, b],
+            ssh_connections: vec![a_target.clone(), target.clone()],
+            ..Default::default()
+        };
+        assert!(ProfileCatalog::from_snapshot(valid.clone()).is_ok());
+        assert!(!target.uses_password() && !target.uses_private_key());
+        assert_eq!(
+            crate::export_openssh_config(&valid, &[target.profile_id]),
+            Err(crate::OpenSshExportError::ManagedAuthentication)
+        );
+        assert!(
+            serde_json::to_string(&a_target)
+                .is_ok_and(|json| !json.contains("authentication_on_jump"))
+        );
+        for broken in [
+            SshConnectionRecord {
+                route: Default::default(),
+                ..target.clone()
+            },
+            SshConnectionRecord {
+                username: String::new(),
+                ..target.clone()
+            },
+            SshConnectionRecord {
+                private_key_path: Some("C:/local/key".into()),
+                ..target.clone()
+            },
+            SshConnectionRecord {
+                certificate_path: Some("local-cert".into()),
+                ..target.clone()
+            },
+        ] {
+            let mut snapshot = valid.clone();
+            snapshot.ssh_connections = vec![a_target.clone(), broken];
+            assert!(ProfileCatalog::from_snapshot(snapshot).is_err());
+        }
     }
     #[test]
     fn ssh_target_validates_profile_kind_and_follows_profile_deletion() -> Result<(), CatalogError>

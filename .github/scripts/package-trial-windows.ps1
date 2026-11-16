@@ -1,6 +1,7 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [string]$BinaryDirectory
+    [string]$BinaryDirectory,
+    [string]$PythonExecutable = 'python'
 )
 
 Set-StrictMode -Version Latest
@@ -22,25 +23,32 @@ foreach ($binary in @($gui, $daemon, $worker)) {
     }
 }
 
-$commit = (& git -C $repository rev-parse --short=12 HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{12}$') {
+$commit = (& git -C $repository rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') {
     throw 'Unable to identify the source commit for the trial archive.'
 }
 $sourceStatus = @(& git -C $repository status --porcelain --untracked-files=normal)
 if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the trial source state.' }
 if ($sourceStatus.Count -gt 0) { $commit += ' (modified workspace)' }
 
-$manifest = Get-Content -LiteralPath (Join-Path $repository 'Cargo.toml') -Raw -Encoding UTF8
-$packageSection = [regex]::Match($manifest, '(?ms)^\[workspace\.package\]\s*(?<body>.*?)(?=^\[|\z)').Groups['body'].Value
-$versionMatch = [regex]::Match($packageSection, '(?m)^version\s*=\s*"(?<version>[0-9]+\.[0-9]+\.[0-9]+)"')
-if (-not $versionMatch.Success) { throw 'Unable to identify the workspace release version.' }
-$version = $versionMatch.Groups['version'].Value
-if ((Get-Item -LiteralPath $gui).VersionInfo.ProductVersion -ne $version) {
+$metadataTool = Join-Path $repository '.github\scripts\trial_metadata.py'
+$versionJson = & $PythonExecutable -B $metadataTool version --repository $repository
+if ($LASTEXITCODE -ne 0) { throw 'Unable to identify workspace version metadata.' }
+$versionInfo = $versionJson | ConvertFrom-Json
+$version = $versionInfo.software_version
+$guiVersion = (Get-Item -LiteralPath $gui).VersionInfo
+$fixedVersion = "$($guiVersion.ProductMajorPart).$($guiVersion.ProductMinorPart).$($guiVersion.ProductBuildPart).$($guiVersion.ProductPrivatePart)"
+if ($guiVersion.ProductVersion -ne $version -or $fixedVersion -ne ($versionInfo.windows_version -join '.') -or $guiVersion.IsPreRelease -ne $versionInfo.windows_prerelease) {
     throw 'The desktop binary version does not match Cargo.toml; rebuild before packaging.'
 }
 
 $outputDirectory = Join-Path $repository 'artifacts\ui-refresh-20261015\bin'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+$metadataPath = Join-Path $outputDirectory 'build-info-windows-x64.json'
+$metadataArguments = @('-B', $metadataTool, 'create', '--repository', $repository, '--platform', 'windows-x64', '--binary-directory', $binaryPath, '--metadata', $metadataPath, '--source-names')
+if ($env:GITHUB_ACTIONS -eq 'true') { $metadataArguments += '--require-clean' }
+& $PythonExecutable @metadataArguments
+if ($LASTEXITCODE -ne 0) { throw 'Trial component version/source verification failed.' }
 $archiveName = 'CShell-trial-windows-x64.zip'
 $archivePath = Join-Path $outputDirectory $archiveName
 
@@ -64,10 +72,23 @@ try {
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
             $archive, $worker, 'cshell-script-worker.exe', [System.IO.Compression.CompressionLevel]::Optimal
         ) | Out-Null
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $archive, $metadataPath, 'build-info.json', [System.IO.Compression.CompressionLevel]::Optimal
+        ) | Out-Null
+        foreach ($license in @(
+            @('LICENSE-MIT', 'Licenses/LICENSE-MIT'),
+            @('LICENSE-APACHE', 'Licenses/LICENSE-APACHE'),
+            @('apps/desktop/assets/fonts/OFL.txt', 'Licenses/NotoSansSC-OFL.txt')
+        )) {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $archive, (Join-Path $repository $license[0]), $license[1], [System.IO.Compression.CompressionLevel]::Optimal
+            ) | Out-Null
+        }
 
         $instructions = @(
             'CShell 早期测试版 — Windows x64'
             "软件版本：$version"
+            "构建编号：$($versionInfo.build_number)"
             "源码版本：$commit"
             ''
             '1. 解压整个 ZIP，保持 CShell.exe、cshelld.exe 和 cshell-script-worker.exe 在同一目录。'
@@ -96,7 +117,7 @@ try {
 $check = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
 try {
     $names = @($check.Entries | ForEach-Object FullName | Sort-Object)
-    $expected = @('CShell.exe', 'README-first-run.txt', 'cshelld.exe', 'cshell-script-worker.exe') | Sort-Object
+    $expected = @('CShell.exe', 'README-first-run.txt', 'cshelld.exe', 'cshell-script-worker.exe', 'build-info.json', 'Licenses/LICENSE-MIT', 'Licenses/LICENSE-APACHE', 'Licenses/NotoSansSC-OFL.txt') | Sort-Object
     if (($names -join '|') -ne ($expected -join '|')) {
         throw "Unexpected trial archive contents: $($names -join ', ')"
     }

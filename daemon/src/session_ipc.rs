@@ -3,6 +3,8 @@ use crate::{
     SessionRegistryError, SshSession, SshSessionError, SshSessionRegistry, SubscriptionFrame,
     TerminalFrameSubscription,
 };
+#[cfg(test)]
+mod jump_reuse_tests;
 use cshell_domain::{ProfileId, SessionId, TerminalSize};
 use cshell_ipc::{
     Envelope, HistorySearchCodecError, HistorySearchMatch, HistorySearchResult, IpcError, LogPage,
@@ -287,6 +289,55 @@ impl SessionIpcService {
         mut request: Envelope,
         negotiated_features: u64,
     ) -> Result<DispatchResult, SessionIpcError> {
+        if let Some(envelope::Payload::JumpCandidatesRequest(query)) = request.payload.as_ref() {
+            self.ssh_sessions.refresh_jump_sources();
+            let result = async {
+                if negotiated_features & cshell_ipc::features::SSH_PROFILE_SESSION == 0 {
+                    return Err(SshLaunchFailure::from("未协商 SSH 配置支持"));
+                }
+                let id = ProfileId::from_bytes(
+                    cshell_ipc::decode_id(&query.target_profile_id)
+                        .map_err(|_| SshLaunchFailure::from("目标配置 ID 无效"))?,
+                );
+                if id.as_uuid().is_nil() {
+                    return Err(SshLaunchFailure::from("目标配置 ID 无效"));
+                }
+                let profiles = self
+                    .profiles
+                    .as_ref()
+                    .ok_or_else(|| SshLaunchFailure::from("配置服务不可用"))?;
+                match profiles.session_plan(id).await? {
+                    crate::profile_ipc::SavedSessionPlan::Local(..) => {
+                        Ok(cshell_ipc::JumpCandidatesResponse {
+                            execution_supported: true,
+                            ..Default::default()
+                        })
+                    }
+                    crate::profile_ipc::SavedSessionPlan::Ssh(plan) => {
+                        let path = self
+                            .known_hosts_path
+                            .clone()
+                            .map_or_else(default_known_hosts_path, Ok)?;
+                        self.ssh_sessions.jump_reuse.query(&plan, &path).await
+                    }
+                }
+            }
+            .await;
+            let reply = result.unwrap_or_else(|failure| cshell_ipc::JumpCandidatesResponse {
+                execution_supported: true,
+                status: cshell_ipc::JumpCandidatesStatus::InvalidRequest as i32,
+                detail: failure.detail,
+                ..Default::default()
+            });
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::JumpCandidatesResponse(reply)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
         if let Some(envelope::Payload::TerminalInputRequest(input)) = request.payload.as_ref()
             && input.compose.is_some()
             && negotiated_features & cshell_ipc::features::COMPOSE_INPUT == 0
@@ -1085,14 +1136,15 @@ impl SessionIpcService {
                 let report =
                     cshell_application::decode_terminal_resolution_report(&create.report_json)
                         .map_err(SshLaunchFailure::from)?;
-                self.spawn_profile(
+                Box::pin(self.spawn_profile(
                     report.context.profile_id.as_uuid().as_bytes(),
                     create.rows,
                     create.cols,
                     None,
                     negotiated_features,
                     Some(&report),
-                )
+                    None,
+                ))
                 .await
             }
             .await;
@@ -1127,6 +1179,27 @@ impl SessionIpcService {
                 response: Envelope {
                     request_id: request.request_id,
                     payload: Some(envelope::Payload::TerminalContextLaunchResponse(response)),
+                    ..Default::default()
+                },
+                subscription: None,
+            });
+        }
+        if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
+            && create.jump_override.is_some()
+            && (create.profile_id.is_none()
+                || create.local_launch.is_some()
+                || create.source_ssh_session_id.is_some())
+        {
+            return Ok(DispatchResult {
+                response: Envelope {
+                    request_id: request.request_id,
+                    payload: Some(envelope::Payload::SessionCreateResponse(
+                        SessionCreateResponse {
+                            session: None,
+                            detail: "跳板临时选择只能用于保存的 SSH 配置".into(),
+                            failure_code: SessionFailureCode::InvalidConfiguration as i32,
+                        },
+                    )),
                     ..Default::default()
                 },
                 subscription: None,
@@ -1177,16 +1250,16 @@ impl SessionIpcService {
         if let Some(envelope::Payload::SessionCreateRequest(create)) = &request.payload
             && let Some(profile_id) = &create.profile_id
         {
-            let result = self
-                .spawn_profile(
-                    profile_id,
-                    create.rows,
-                    create.cols,
-                    create.local_launch.as_ref(),
-                    negotiated_features,
-                    None,
-                )
-                .await;
+            let result = Box::pin(self.spawn_profile(
+                profile_id,
+                create.rows,
+                create.cols,
+                create.local_launch.as_ref(),
+                negotiated_features,
+                None,
+                create.jump_override.as_ref(),
+            ))
+            .await;
             let (session, detail, failure_code) = match result {
                 Ok((session, _)) => (Some(session), String::new(), SessionFailureCode::None),
                 Err(error) => (None, error.detail, error.code),
@@ -1350,6 +1423,10 @@ impl SessionIpcService {
         Ok(self.ssh_sessions.insert(session).summary())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Saved profile, context review and ephemeral overrides have separate validation boundaries"
+    )]
     async fn spawn_profile(
         &self,
         bytes: &[u8],
@@ -1358,6 +1435,7 @@ impl SessionIpcService {
         local_launch: Option<&cshell_ipc::LocalLaunchOptions>,
         negotiated_features: u64,
         review: Option<&cshell_application::TerminalResolutionReport>,
+        jump_override: Option<&cshell_ipc::JumpConnectionOverrideData>,
     ) -> Result<
         (
             SessionSummary,
@@ -1365,6 +1443,16 @@ impl SessionIpcService {
         ),
         SshLaunchFailure,
     > {
+        let jump_override = jump_override
+            .cloned()
+            .map(cshell_domain::JumpConnectionOverride::try_from)
+            .transpose()
+            .map_err(|_| {
+                SshLaunchFailure::new(
+                    SessionFailureCode::InvalidConfiguration,
+                    "跳板临时选择格式无效",
+                )
+            })?;
         let profile_id = ProfileId::from_bytes(bytes.try_into().map_err(|_| "invalid Profile ID")?);
         let profiles = self.profiles.as_ref().ok_or_else(|| {
             SshLaunchFailure::new(
@@ -1402,6 +1490,12 @@ impl SessionIpcService {
         }
         let plan = match plan {
             crate::profile_ipc::SavedSessionPlan::Local(mut profile, close_policy) => {
+                if jump_override.is_some() {
+                    return Err(SshLaunchFailure::new(
+                        SessionFailureCode::InvalidConfiguration,
+                        "本地终端不能选择跳板连接",
+                    ));
+                }
                 if negotiated_features & cshell_ipc::features::LOCAL_PROFILE == 0 {
                     return Err(SshLaunchFailure::new(
                         SessionFailureCode::Unsupported,
@@ -1509,6 +1603,7 @@ impl SessionIpcService {
                 plan
             }
         };
+        let plan = Arc::new(plan.with_jump_override(jump_override.as_ref())?);
         let known_hosts_path = self
             .known_hosts_path
             .clone()
@@ -1526,17 +1621,41 @@ impl SessionIpcService {
         }
         cshell_ssh::connection_progress::peer(0, &plan.target.host, plan.target.port);
         cshell_ssh::connection_progress::stage(cshell_domain::ConnectionStage::Credentials);
+        let mut waiting_cancel = vault.cancellation();
+        let lock_request = vault.lock_requests();
+        self.ssh_sessions.refresh_jump_sources();
+        let mut admission = tokio::select! {
+            biased;
+            _ = async { loop { if waiting_cancel.changed().await.is_err() || vault.lock_requests() != lock_request { break; } } } => return Err(SshLaunchFailure::from("跳板选择期间连接已取消")),
+            result = self.ssh_sessions.jump_reuse.prepare(&plan, jump_override.as_ref(), &known_hosts_path) => result?,
+        };
+        if vault.lock_requests() != lock_request {
+            return Err(SshLaunchFailure::from("跳板选择期间凭据库已锁定"));
+        }
         vault
-            .prepare_plan(&plan)
+            .prepare_plan(&admission.credentials())
             .await
             .map_err(|error| ssh_launch_failure(SshSessionError::Ssh(error)))?;
         let mut cancellation = vault.cancellation();
         let epoch = *cancellation.borrow();
+        let reusing = admission.borrowed.is_some();
         let launch = async {
-            let connection =
-                crate::ssh_route::connect_profile(&plan, &known_hosts_path, vault).await?;
+            if reusing {
+                crate::jump_reuse::Registry::validate_binding(&plan, profiles).await?;
+            }
+            let connection = crate::ssh_route::connect_prepared(
+                &admission.plan,
+                &known_hosts_path,
+                vault,
+                admission.borrowed.take(),
+            )
+            .await?;
             let id = SessionId::new();
             let size = TerminalSize::cells(rows, cols);
+            let mut recovery_plan = (*plan).clone();
+            if !plan.target.options.jump_reuse_policy.is_always_new() {
+                recovery_plan.target.options.auto_reconnect = false;
+            }
             SshSession::from_connection_configured(
                 id,
                 plan.title.clone(),
@@ -1546,7 +1665,7 @@ impl SessionIpcService {
                 256,
                 &terminal_type,
                 logging,
-                Some(((*plan).clone(), known_hosts_path.clone(), Arc::clone(vault))),
+                Some((recovery_plan, known_hosts_path.clone(), Arc::clone(vault))),
             )
             .await
             .map_err(ssh_launch_failure)
@@ -1556,6 +1675,10 @@ impl SessionIpcService {
             _ = cancellation.changed() => return Err(SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, "Vault was locked during SSH creation")),
             result = launch => result?,
         };
+        if reusing {
+            crate::jump_reuse::Registry::validate_binding(&plan, profiles).await?;
+            session.note_reused_jump();
+        }
         let host = cshell_domain::ClipboardHost::new(&plan.target.host, plan.target.port)
             .ok_or("invalid clipboard host identity")?;
         let _guard = self.clipboard_policy_gate.lock().await;
@@ -1583,12 +1706,38 @@ impl SessionIpcService {
                     "Vault was locked during SSH creation",
                 )
             })?;
+        self.ssh_sessions
+            .jump_reuse
+            .register_route(&plan, &session.shared_lease());
         Ok((session.summary(), resolution))
     }
 
     fn dispatch(&self, request: Envelope) -> Result<DispatchResult, SessionIpcError> {
         let request_id = request.request_id;
         let (payload, subscription) = match request.payload {
+            Some(envelope::Payload::JumpCandidatesRequest(query)) => {
+                let valid =
+                    cshell_ipc::decode_id(&query.target_profile_id).is_ok_and(|id| id != [0; 16]);
+                (
+                    envelope::Payload::JumpCandidatesResponse(cshell_ipc::JumpCandidatesResponse {
+                        execution_supported: false,
+                        status: if valid {
+                            cshell_ipc::JumpCandidatesStatus::Unsupported
+                        } else {
+                            cshell_ipc::JumpCandidatesStatus::InvalidRequest
+                        } as i32,
+                        candidates: Vec::new(),
+                        detail: if valid {
+                            "跳板候选查询需要异步控制入口"
+                        } else {
+                            "目标配置 ID 无效"
+                        }
+                        .into(),
+                        ..Default::default()
+                    }),
+                    None,
+                )
+            }
             Some(envelope::Payload::SnapshotRequest(snapshot_request)) => {
                 let mut subscription = self.registry.subscribe_request(&snapshot_request)?;
                 let Some(SubscriptionFrame::Full(full_frame)) = subscription.poll() else {
@@ -1856,6 +2005,9 @@ pub(crate) fn ssh_launch_failure(error: SshSessionError) -> SshLaunchFailure {
         );
     }
     let (code, detail) = match error {
+        SshSessionError::Ssh(SshError::ManagedPeer(detail)) => {
+            return SshLaunchFailure::new(SessionFailureCode::ProtocolRejected, detail);
+        }
         SshSessionError::Ssh(SshError::CredentialUnavailable(detail)) => {
             return SshLaunchFailure::new(SessionFailureCode::CredentialUnavailable, detail);
         }
@@ -2888,6 +3040,7 @@ mod tests {
                 deadline_unix_ms: 0,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     cshell_ipc::SessionCreateRequest {
+                        jump_override: None,
                         connection_diagnostics: false,
                         source_ssh_session_id: None,
                         local_launch: None,

@@ -16,8 +16,45 @@ pub(super) fn draw(
 ) -> Option<ProfileClientCommand> {
     let mut command = None;
     ui.heading("账号与认证");
-    cshell_ui::form::text(ui, "用户名（可留空）", &mut draft.ssh_username);
-    ui.weak("账号和密码都可留空保存；连接时再填写，并可选择保存。");
+    cshell_ui::form::text(
+        ui,
+        if draft.ssh_options.authentication_on_jump {
+            "目标服务器用户名（必填）"
+        } else {
+            "用户名（可留空）"
+        },
+        &mut draft.ssh_username,
+    );
+    if !draft.ssh_options.authentication_on_jump {
+        ui.weak("账号和密码都可留空保存；连接时再填写，并可选择保存。");
+    }
+    if ui
+        .checkbox(
+            &mut draft.ssh_options.authentication_on_jump,
+            "由跳板服务器的 OpenSSH 认证目标服务器",
+        )
+        .changed()
+    {
+        draft.password.zeroize();
+        draft.key_passphrase.zeroize();
+        draft.private_key_path.clear();
+        draft.ssh_options.authentication_order.clear();
+        draft.auth_method = SshAuthMethod::Password;
+        draft.ssh_options.keyboard_interactive = false;
+        draft.ssh_options.auto_reconnect = false;
+        draft.certificate_path.clear();
+        draft.agent_identity.clear();
+    }
+    if draft.ssh_options.authentication_on_jump {
+        ui.label("目标服务器的用户名必须填写。在“代理 / 跳板”选择 A（Linux + OpenSSH）；登录 B 使用 A 上的密钥或 Agent，不读取本机的 B 凭据。");
+        cshell_ui::form::text(
+            ui,
+            "A 上的私钥绝对路径（可选）",
+            &mut draft.private_key_path,
+        );
+        ui.weak("留空沿用 A 的 OpenSSH 配置。A 必须已核对并信任 B 的主机指纹，且可非交互免密登录。首次版本不支持继续从 B 建立下一跳或转发隧道。");
+        return None;
+    }
     if draft.ssh_options.authentication_order.is_empty() {
         draft.ssh_options.authentication_order = match draft.auth_method {
             SshAuthMethod::Password if draft.ssh_options.keyboard_interactive => {

@@ -47,7 +47,11 @@ pub(crate) fn page(slice: HistorySlice, request: &LogPageRequest) -> LogPage {
             }
             styles.push((start, text.len(), cell.style));
         }
-        let text = text.trim_end_matches(' ').to_owned();
+        let text = if soft_wrap {
+            text
+        } else {
+            text.trim_end_matches(' ').to_owned()
+        };
         let mut style_spans: Vec<LogStyleSpan> = Vec::new();
         let mut style_index = 0;
         for (start, grapheme) in text.grapheme_indices(true) {
@@ -171,6 +175,28 @@ mod tests {
 mod dense_page_tests {
     use super::*;
     use cshell_terminal::{AlacrittyTerminalEngine, TerminalEngine};
+    #[test]
+    fn soft_wrap_keeps_spaces_inside_the_logical_line() {
+        let mut terminal = AlacrittyTerminalEngine::new(cshell_domain::TerminalSize::cells(3, 4));
+        terminal.feed(b"abc def\r\nnext");
+        let request = LogPageRequest {
+            terminal_history: true,
+            session_id: cshell_domain::SessionId::new()
+                .as_uuid()
+                .as_bytes()
+                .to_vec(),
+            anchor_line_id: Some(1),
+            rows_before: 0,
+            rows_after: 10,
+            cell_offset: 0,
+        };
+        let result = page(terminal.history_slice(Some(1), 0, 10), &request);
+        result.validate().unwrap();
+        assert_eq!(result.rows[0].text, "abc ");
+        assert!(result.rows[0].soft_wrap);
+        assert_eq!(result.rows[1].text, "def");
+        assert!(!result.rows[1].soft_wrap);
+    }
     #[test]
     fn dense_styles_and_combining_marks_keep_requested_anchor_and_text() {
         let mut terminal =

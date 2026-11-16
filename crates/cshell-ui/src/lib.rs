@@ -3,6 +3,8 @@
 pub mod environment;
 pub mod feedback;
 pub mod form;
+mod help_page;
+mod shortcut_help;
 pub mod theme;
 pub mod workbench_layout;
 
@@ -132,11 +134,19 @@ pub struct WorkbenchViewModel {
     pub input_warning: Option<String>,
     pub terminal_generation: Option<u64>,
     pub about_open: bool,
+    pub shortcut_help_open: bool,
     pub menu_command: Option<WorkbenchMenuCommand>,
     pub confirm_terminate: bool,
     pub terminate_target: Option<SessionId>,
     pub terminate_pending: bool,
     pub terminate_error: Option<String>,
+}
+
+impl WorkbenchViewModel {
+    #[must_use]
+    pub fn help_open(&self) -> bool {
+        self.about_open || self.shortcut_help_open
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +167,7 @@ pub enum WorkbenchMenuCommand {
     HostCa,
     SshProviders,
     TerminalTools,
+    ServerResources,
     ProfileBatch,
     TerminalPolicies,
     WorkspaceRecovery,

@@ -410,6 +410,10 @@ pub struct SshConnectionData {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SshConnectionOptionsData {
+    #[prost(uint32, tag = "12")]
+    pub jump_reuse_policy: u32,
+    #[prost(bool, tag = "11")]
+    pub authentication_on_jump: bool,
     #[prost(uint32, optional, tag = "10")]
     pub sftp_verification: Option<u32>,
     #[prost(uint32, repeated, tag = "9")]
@@ -435,6 +439,8 @@ pub struct SshConnectionOptionsData {
 impl From<&cshell_domain::SshConnectionOptions> for SshConnectionOptionsData {
     fn from(value: &cshell_domain::SshConnectionOptions) -> Self {
         Self {
+            authentication_on_jump: value.authentication_on_jump,
+            jump_reuse_policy: crate::encode_jump_reuse_policy(value.jump_reuse_policy),
             sftp_verification: value.sftp_verification.map(|mode| match mode {
                 cshell_domain::SftpVerification::Standard => 0,
                 cshell_domain::SftpVerification::Full => 1,
@@ -456,9 +462,13 @@ impl From<&cshell_domain::SshConnectionOptions> for SshConnectionOptionsData {
     }
 }
 
-impl From<SshConnectionOptionsData> for cshell_domain::SshConnectionOptions {
-    fn from(value: SshConnectionOptionsData) -> Self {
-        Self {
+impl TryFrom<SshConnectionOptionsData> for cshell_domain::SshConnectionOptions {
+    type Error = ProfileCodecError;
+    fn try_from(value: SshConnectionOptionsData) -> Result<Self, Self::Error> {
+        Ok(Self {
+            authentication_on_jump: value.authentication_on_jump,
+            jump_reuse_policy: crate::decode_jump_reuse_policy(value.jump_reuse_policy)
+                .map_err(|_| ProfileCodecError::InvalidRoute)?,
             sftp_verification: value.sftp_verification.and_then(|mode| match mode {
                 0 => Some(cshell_domain::SftpVerification::Standard),
                 1 => Some(cshell_domain::SftpVerification::Full),
@@ -484,7 +494,7 @@ impl From<SshConnectionOptionsData> for cshell_domain::SshConnectionOptions {
             auto_reconnect: value.auto_reconnect,
             reconnect_delay_secs: value.reconnect_delay_secs,
             reconnect_attempts: value.reconnect_attempts,
-        }
+        })
     }
 }
 
@@ -549,7 +559,7 @@ impl TryFrom<SshRouteData> for cshell_domain::SshRoute {
                     }
                 })
             }
-            3 if value.host.is_empty() && value.port == 0 => Ok(Self::Jump {
+            3 | 4 if value.host.is_empty() && value.port == 0 => Ok(Self::Jump {
                 profile_id: ProfileId::from_bytes(decode_id(&value.jump_profile_id)?),
             }),
             _ => Err(ProfileCodecError::InvalidRoute),
@@ -564,6 +574,7 @@ pub enum SshAuthMethodData {
     PrivateKey = 1,
     Certificate = 2,
     Agent = 3,
+    ManagedByJump = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -794,16 +805,25 @@ impl TryFrom<ProfileRecordData> for ProfileRecord {
 
 impl From<&SshConnectionRecord> for SshConnectionData {
     fn from(value: &SshConnectionRecord) -> Self {
+        let mut route = SshRouteData::from(&value.route);
+        // Old peers reject kind 4 instead of silently dropping a saved reuse constraint.
+        if !value.options.jump_reuse_policy.is_always_new() && route.kind == 3 {
+            route.kind = 4;
+        }
         Self {
             profile_id: value.profile_id.as_uuid().as_bytes().to_vec(),
             host: value.host.clone(),
             port: u32::from(value.port),
             username: value.username.clone(),
-            auth_method: match value.auth_method {
-                SshAuthMethod::Password => SshAuthMethodData::Password,
-                SshAuthMethod::PrivateKey => SshAuthMethodData::PrivateKey,
-                SshAuthMethod::Certificate => SshAuthMethodData::Certificate,
-                SshAuthMethod::Agent => SshAuthMethodData::Agent,
+            auth_method: if value.options.authentication_on_jump {
+                SshAuthMethodData::ManagedByJump
+            } else {
+                match value.auth_method {
+                    SshAuthMethod::Password => SshAuthMethodData::Password,
+                    SshAuthMethod::PrivateKey => SshAuthMethodData::PrivateKey,
+                    SshAuthMethod::Certificate => SshAuthMethodData::Certificate,
+                    SshAuthMethod::Agent => SshAuthMethodData::Agent,
+                }
             } as i32,
             private_key_path: value.private_key_path.clone(),
             certificate_path: value.certificate_path.clone(),
@@ -813,7 +833,7 @@ impl From<&SshConnectionRecord> for SshConnectionData {
                 SshAgentBackend::Pageant => SshAgentBackendData::Pageant,
             } as i32,
             agent_identity: value.agent_identity.clone(),
-            route: Some(SshRouteData::from(&value.route)),
+            route: Some(route),
             options: Some(SshConnectionOptionsData::from(&value.options)),
         }
     }
@@ -822,6 +842,20 @@ impl From<&SshConnectionRecord> for SshConnectionData {
 impl TryFrom<SshConnectionData> for SshConnectionRecord {
     type Error = ProfileCodecError;
     fn try_from(value: SshConnectionData) -> Result<Self, Self::Error> {
+        let reuse = value
+            .options
+            .as_ref()
+            .is_some_and(|o| o.jump_reuse_policy != 0);
+        if reuse != value.route.as_ref().is_some_and(|route| route.kind == 4) {
+            return Err(ProfileCodecError::InvalidRoute);
+        }
+        let managed = value
+            .options
+            .as_ref()
+            .is_some_and(|options| options.authentication_on_jump);
+        if managed != (value.auth_method == SshAuthMethodData::ManagedByJump as i32) {
+            return Err(ProfileCodecError::InvalidAuthMethod);
+        }
         if value.options.as_ref().is_some_and(|o| {
             o.authentication_order.len() > 5
                 || o.authentication_order.iter().any(|m| *m > 4)
@@ -832,7 +866,11 @@ impl TryFrom<SshConnectionData> for SshConnectionRecord {
 
         Ok(Self {
             profile_id: ProfileId::from_bytes(decode_id(&value.profile_id)?),
-            options: value.options.map(Into::into).unwrap_or_default(),
+            options: value
+                .options
+                .map(cshell_domain::SshConnectionOptions::try_from)
+                .transpose()?
+                .unwrap_or_default(),
             host: value.host,
             port: u16::try_from(value.port)
                 .ok()
@@ -846,6 +884,7 @@ impl TryFrom<SshConnectionData> for SshConnectionRecord {
                 SshAuthMethodData::PrivateKey => SshAuthMethod::PrivateKey,
                 SshAuthMethodData::Certificate => SshAuthMethod::Certificate,
                 SshAuthMethodData::Agent => SshAuthMethod::Agent,
+                SshAuthMethodData::ManagedByJump => SshAuthMethod::Password,
             },
             private_key_path: value.private_key_path,
             certificate_path: value.certificate_path,
@@ -878,6 +917,47 @@ pub fn decode_id(bytes: &[u8]) -> Result<[u8; 16], ProfileCodecError> {
 )]
 mod theme_tests {
     use super::*;
+    #[test]
+    fn jump_reuse_wire_constraint_cannot_be_silently_removed() {
+        let target = SshConnectionRecord {
+            profile_id: ProfileId::new(),
+            host: "B".into(),
+            port: 22,
+            username: "operator".into(),
+            auth_method: SshAuthMethod::Password,
+            private_key_path: None,
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
+            route: cshell_domain::SshRoute::Jump {
+                profile_id: ProfileId::new(),
+            },
+            options: Default::default(),
+        };
+        for policy in [
+            cshell_domain::JumpReusePolicy::PreferExisting,
+            cshell_domain::JumpReusePolicy::OnlyExisting,
+        ] {
+            let mut desired = target.clone();
+            desired.options.jump_reuse_policy = policy;
+            let wire = SshConnectionData::from(&desired);
+            assert_eq!(wire.route.as_ref().unwrap().kind, 4); // Unknown to pre-80 route decoders.
+            assert_eq!(
+                SshConnectionRecord::try_from(wire.clone()).unwrap(),
+                desired
+            );
+            let mut stripped = wire.clone();
+            stripped.options.as_mut().unwrap().jump_reuse_policy = 0;
+            assert!(SshConnectionRecord::try_from(stripped).is_err());
+            let mut stripped = wire;
+            stripped.route.as_mut().unwrap().kind = 3;
+            assert!(SshConnectionRecord::try_from(stripped).is_err());
+        }
+        let mut unknown = SshConnectionOptionsData::from(&target.options);
+        unknown.jump_reuse_policy = 99;
+        assert!(cshell_domain::SshConnectionOptions::try_from(unknown).is_err());
+        assert_eq!(SshConnectionData::from(&target).route.unwrap().kind, 3);
+    }
     #[test]
     fn ssh_connection_options_wire_round_trip_and_legacy_defaults() {
         let legacy = SshConnectionData {
@@ -912,6 +992,49 @@ mod theme_tests {
         let mut invalid = SshConnectionData::from(&old);
         invalid.options.as_mut().unwrap().sftp_verification = Some(2);
         assert!(SshConnectionRecord::try_from(invalid).is_err());
+    }
+    #[test]
+    fn managed_authentication_option_roundtrips_and_legacy_defaults_off() {
+        let legacy: cshell_domain::SshConnectionOptions =
+            SshConnectionOptionsData::default().try_into().unwrap();
+        assert!(!legacy.authentication_on_jump);
+        let desired = cshell_domain::SshConnectionOptions {
+            authentication_on_jump: true,
+            ..Default::default()
+        };
+        let wire = SshConnectionOptionsData::from(&desired).encode_to_vec();
+        let decoded: cshell_domain::SshConnectionOptions =
+            SshConnectionOptionsData::decode(wire.as_slice())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        assert_eq!(decoded, desired);
+        let target = SshConnectionRecord {
+            profile_id: ProfileId::new(),
+            host: "B".into(),
+            port: 22,
+            username: "operator".into(),
+            auth_method: SshAuthMethod::Password,
+            private_key_path: Some("/home/a/b-key".into()),
+            certificate_path: None,
+            agent_backend: Default::default(),
+            agent_identity: None,
+            route: cshell_domain::SshRoute::Jump {
+                profile_id: ProfileId::new(),
+            },
+            options: desired,
+        };
+        let mut wire = SshConnectionData::from(&target);
+        assert_eq!(
+            wire.auth_method, 4,
+            "old clients must reject this enum rather than dropping the mode flag"
+        );
+        assert_eq!(SshConnectionRecord::try_from(wire.clone()).unwrap(), target);
+        wire.options.as_mut().unwrap().authentication_on_jump = false;
+        assert!(SshConnectionRecord::try_from(wire.clone()).is_err());
+        wire.options.as_mut().unwrap().authentication_on_jump = true;
+        wire.auth_method = SshAuthMethodData::Password as i32;
+        assert!(SshConnectionRecord::try_from(wire).is_err());
     }
     #[test]
     fn palette_ipc_roundtrip_rejects_invalid_channels_and_ansi_length()

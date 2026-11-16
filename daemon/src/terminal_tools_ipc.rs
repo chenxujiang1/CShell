@@ -31,6 +31,7 @@ struct Events {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalToolsService {
+    resources: crate::server_resources::Service,
     mutation: Arc<tokio::sync::Mutex<()>>,
     armed: Arc<Mutex<BTreeMap<SessionId, Armed>>>,
     events: Arc<Mutex<Events>>,
@@ -47,6 +48,7 @@ pub(crate) struct ScriptTriggerSignal {
 impl Default for TerminalToolsService {
     fn default() -> Self {
         Self {
+            resources: crate::server_resources::Service::default(),
             mutation: Arc::new(tokio::sync::Mutex::new(())),
             armed: Arc::new(Mutex::new(BTreeMap::new())),
             events: Arc::new(Mutex::new(Events::default())),
@@ -147,7 +149,10 @@ impl TerminalToolsService {
             } else {
                 Vec::new()
             },
-            session_id: if matches!(op, Op::Arm | Op::Disarm | Op::RawJournal | Op::ShellHistory) {
+            session_id: if matches!(
+                op,
+                Op::Arm | Op::Disarm | Op::RawJournal | Op::ShellHistory | Op::ServerResources
+            ) {
                 request.session_id.clone()
             } else {
                 Vec::new()
@@ -205,6 +210,13 @@ impl TerminalToolsService {
         ssh: &Arc<SshSessionRegistry>,
         profiles: Option<&Arc<ProfileIpcService>>,
     ) -> Result<TerminalToolsReply, &'static str> {
+        if op == Op::ServerResources {
+            return self
+                .resources
+                .sample(ssh, session.ok_or("missing session scope")?)
+                .await
+                .map(TerminalToolsReply::Resources);
+        }
         if op == Op::ShellHistory {
             let id = session.ok_or("missing session scope")?;
             let snapshots = if let Ok(s) = ssh.get(id) {
@@ -497,7 +509,7 @@ impl TerminalToolsService {
             }
             Op::Disarm => self.stop(session.ok_or("missing session scope")?).await,
             Op::Get | Op::Poll => {}
-            Op::RawJournal | Op::ShellHistory => {}
+            Op::RawJournal | Op::ShellHistory | Op::ServerResources => {}
         }
         let armed = {
             let mut active = self

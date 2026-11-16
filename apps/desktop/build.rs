@@ -2,6 +2,7 @@ use std::{env, fs, path::PathBuf, process::Command};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=assets/icons/cshell.ico");
     println!("cargo:rerun-if-changed=assets/icons/cshell.rc");
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return Ok(());
     }
@@ -12,13 +13,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let major: u16 = env::var("CARGO_PKG_VERSION_MAJOR")?.parse()?;
     let minor: u16 = env::var("CARGO_PKG_VERSION_MINOR")?.parse()?;
     let patch: u16 = env::var("CARGO_PKG_VERSION_PATCH")?.parse()?;
+    let manifest: toml_edit::DocumentMut =
+        fs::read_to_string(root.join("../../Cargo.toml"))?.parse()?;
+    let build = manifest["workspace"]["metadata"]["cshell"]["build-number"]
+        .as_integer()
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or("workspace.metadata.cshell.build-number must be in 1..=65535")?;
     let resource = out.join("cshell-version.rc");
     let source = fs::read_to_string(root.join("assets/icons/cshell.rc"))?
         .replace(
             "@CSHELL_VERSION_TUPLE@",
-            &format!("{major},{minor},{patch},0"),
+            &format!("{major},{minor},{patch},{build}"),
         )
-        .replace("@CSHELL_VERSION_STRING@", &version);
+        .replace("@CSHELL_VERSION_STRING@", &version)
+        .replace(
+            "@CSHELL_VERSION_FLAGS@",
+            if env::var("CARGO_PKG_VERSION_PRE")?.is_empty() {
+                "0x0L"
+            } else {
+                "0x2L"
+            },
+        );
     fs::write(&resource, source)?;
     if env::var("TARGET").unwrap_or_default().ends_with("-gnu") {
         let file = out.join("cshell-icons.o");

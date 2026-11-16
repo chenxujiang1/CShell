@@ -9,6 +9,10 @@ use thiserror::Error;
 pub const MAX_OPENSSH_EXPORT_HOSTS: usize = 512;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum OpenSshExportError {
+    #[error("跳板复用策略不能表示为普通 OpenSSH 配置；请使用 CShell 配置导出")]
+    JumpReuse,
+    #[error("由 A 认证的 B 连接不能导出为本机 ProxyJump；请使用 CShell 配置导出")]
+    ManagedAuthentication,
     #[error("OpenSSH export requires a valid saved catalog")]
     Catalog,
     #[error("select saved SSH targets before exporting")]
@@ -64,6 +68,12 @@ pub fn export_openssh_config(
             .iter()
             .find(|target| target.profile_id == id)
             .ok_or(OpenSshExportError::Selection)?;
+        if target.options.authentication_on_jump {
+            return Err(OpenSshExportError::ManagedAuthentication);
+        }
+        if !target.options.jump_reuse_policy.is_always_new() {
+            return Err(OpenSshExportError::JumpReuse);
+        }
         match target.route {
             SshRoute::Jump { profile_id } => {
                 if ids.insert(profile_id) {

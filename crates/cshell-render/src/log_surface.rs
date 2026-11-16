@@ -6,6 +6,11 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(test)]
+#[path = "log_surface/scroll_gap_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scroll_gap_tests;
+
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
 pub const MAX_LOG_PAGE_TEXT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_LOG_PAGE_STYLE_SPANS: usize = 16 * 1024;
@@ -265,6 +270,9 @@ impl LogSurfaceModel {
         if layout.visual_rows.is_empty() {
             return false;
         }
+        // The anchor stays on loaded content while paging. Preserve every
+        // wheel event relative to the intended destination, including reversals.
+        let delta = std::mem::take(&mut self.pending_scroll_rows).saturating_add(delta);
         let visual_row_count = layout.visual_rows.len();
         let has_before = layout.page.has_before;
         let has_after = layout.page.has_after;
@@ -290,18 +298,17 @@ impl LogSurfaceModel {
             return true;
         }
         let target = target as usize;
-        if target >= visual_row_count {
-            if has_after {
-                self.set_anchor_from_visual(visual_row_count - 1);
-                self.pending_scroll_rows = target
-                    .saturating_sub(visual_row_count - 1)
-                    .min(i32::MAX as usize) as i32;
-            } else {
-                self.follow_tail();
-            }
+        let last_full_viewport = visual_row_count.saturating_sub(usize::from(viewport_rows.max(1)));
+        if has_after && target > last_full_viewport {
+            // Do not scroll the top to the page's final row: that would leave
+            // the remainder of the screen blank until the next page reflows.
+            self.set_anchor_from_visual(last_full_viewport);
+            self.pending_scroll_rows = target
+                .saturating_sub(last_full_viewport)
+                .min(i32::MAX as usize) as i32;
             return true;
         }
-        if !has_after && target.saturating_add(usize::from(viewport_rows)) >= visual_row_count {
+        if !has_after && target >= last_full_viewport {
             self.follow_tail();
         } else {
             self.set_anchor_from_visual(target);
@@ -482,7 +489,20 @@ impl LogSurfaceModel {
         let tail_rows = viewport_rows
             .saturating_add(self.overscan_rows)
             .min((MAX_LOG_PAGE_ROWS - 1) as u16);
-        let anchored_rows = tail_rows.min(((MAX_LOG_PAGE_ROWS - 1) / 2) as u16);
+        let anchored_limit = ((MAX_LOG_PAGE_ROWS - 1) / 2) as u16;
+        let anchored_rows = tail_rows.min(anchored_limit);
+        let pending_before = if self.pending_scroll_rows < 0 {
+            self.pending_scroll_rows.unsigned_abs()
+        } else {
+            0
+        };
+        let pending_after = self.pending_scroll_rows.max(0) as u32;
+        let rows_before = anchored_rows
+            .saturating_add(u16::try_from(pending_before).unwrap_or(u16::MAX))
+            .min(anchored_limit);
+        let rows_after = anchored_rows
+            .saturating_add(u16::try_from(pending_after).unwrap_or(u16::MAX))
+            .min(anchored_limit);
         let request_mode = self
             .pending_page_anchor
             .map(|(line_id, cell_offset)| ScrollMode::Anchored {
@@ -495,7 +515,7 @@ impl LogSurfaceModel {
             ScrollMode::Anchored {
                 line_id,
                 cell_offset,
-            } => (line_id, cell_offset, anchored_rows, anchored_rows),
+            } => (line_id, cell_offset, rows_before, rows_after),
         };
         Some(LogPageRequest {
             source_id: page.source_id,
@@ -513,6 +533,7 @@ impl LogSurfaceModel {
         let request = self.page_request(viewport_rows)?;
         let pending = self.pending_page_anchor.is_some() || self.pending_scroll_rows != 0;
         let margin = usize::from((viewport_rows / 2).saturating_add(self.overscan_rows));
+        let bottom_margin = usize::from(viewport_rows.saturating_add(self.overscan_rows));
         let near_boundary = if request.follow_tail {
             false
         } else {
@@ -525,7 +546,7 @@ impl LogSurfaceModel {
                         .map(|index| {
                             (page.has_before && index <= margin)
                                 || (page.has_after
-                                    && page.rows.len().saturating_sub(index + 1) <= margin)
+                                    && page.rows.len().saturating_sub(index + 1) <= bottom_margin)
                         })
                 })
                 .unwrap_or(true)
@@ -570,7 +591,7 @@ impl LogSurfaceModel {
     pub fn prepare_frame(&self, viewport_rows: u16) -> Option<LogSurfaceFrame> {
         let layout = self.layout.as_ref()?;
         let page = Arc::clone(&layout.page);
-        let (first_viewport, cell_offset) = match self.mode {
+        let (mut first_viewport, mut cell_offset) = match self.mode {
             ScrollMode::FollowTail => (
                 layout
                     .visual_rows
@@ -586,6 +607,22 @@ impl LogSurfaceModel {
                 cell_offset,
             ),
         };
+        // A larger viewport or a new wrap width can expose the loaded page's
+        // edge even without another wheel event. Keep a complete frame while
+        // paging catches up, preserving the logical anchor for the new page.
+        if page.has_after {
+            let last_full = layout
+                .visual_rows
+                .len()
+                .saturating_sub(usize::from(viewport_rows.max(1)));
+            if first_viewport > last_full {
+                first_viewport = last_full;
+                cell_offset = layout
+                    .visual_rows
+                    .get(first_viewport)
+                    .map_or(0, |row| row.start_cell);
+            }
+        }
         let start = first_viewport.saturating_sub(usize::from(self.overscan_rows));
         let end = first_viewport
             .saturating_add(usize::from(viewport_rows))

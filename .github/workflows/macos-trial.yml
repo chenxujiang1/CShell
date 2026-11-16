@@ -1,6 +1,7 @@
 name: macOS personal trial
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - codex/macos-trial
@@ -41,6 +42,15 @@ jobs:
           shared-key: macos-trial-${{ matrix.target }}
           cache-on-failure: 'true'
           cache-workspace-crates: 'true'
+      - name: Validate version and package contracts
+        run: |
+          python3 -B .github/scripts/test_trial_metadata.py
+          python3 -B .github/scripts/trial_metadata.py version
+      - name: Verify isolated terminal upload and retry
+        env:
+          CSHELL_RUNTIME_DIR: ${{ github.workspace }}/target/ssh-audit-fixtures/terminal-drop-runtime
+          CSHELL_DATA_DIR: ${{ github.workspace }}/target/ssh-audit-fixtures/terminal-drop-data
+        run: cargo test --locked -p cshelld --lib --all-features terminal_drop -- --ignored --test-threads=1
       - name: Run SSH, vault, storage, PTY, renderer and script runtime regression tests
         run: cargo test --locked -p cshell-ssh -p cshell-vault -p cshell-storage -p cshell-local -p cshell-render -p cshell-script-runtime --lib --tests
       - name: Check native macOS keychain
@@ -75,6 +85,7 @@ jobs:
           done
           test -s "$destination/README-first-run.txt"
           codesign --verify --deep --strict --verbose=2 "$app"
+          python3 -B .github/scripts/trial_metadata.py verify --platform macos-${{ matrix.architecture }} --binary-directory "$app/Contents/MacOS" --metadata "$destination/build-info.json" --require-clean
           export CSHELL_DATA_DIR="$RUNNER_TEMP/cshell-macos-trial-data"
           export CSHELL_PROFILE_DB="$CSHELL_DATA_DIR/profiles.sqlite"
           export CSHELL_RUNTIME_DIR="$RUNNER_TEMP/cshell-macos-trial-runtime"

@@ -31,17 +31,18 @@ if pgrep -x CShell >/dev/null || pgrep -x cshelld >/dev/null || pgrep -x cshell-
     echo 'Exit CShell and its companion normally before updating the trial app.' >&2
     exit 1
 fi
-commit=$(git -C "$repository" rev-parse --short=12 HEAD)
-[[ $commit =~ ^[0-9a-f]{12}$ ]]
+commit=$(git -C "$repository" rev-parse HEAD)
+[[ $commit =~ ^[0-9a-f]{40}$ ]]
+source_dirty=false
 source_status=$(git -C "$repository" status --porcelain --untracked-files=normal)
-if [[ -n $source_status ]]; then commit="$commit (modified workspace)"; fi
-version=$(python3 - "$repository/Cargo.toml" <<'PY'
-import pathlib, re, sys
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-section = text.split("[workspace.package]", 1)[1].split("\n[", 1)[0]
-print(re.search(r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', section, re.M)[1])
-PY
-)
+if [[ -n $source_status ]]; then source_dirty=true; fi
+source_label="$commit"
+if [[ $source_dirty == true ]]; then source_label="$commit (modified workspace)"; fi
+metadata_tool="$repository/.github/scripts/trial_metadata.py"
+version_info=$(python3 -B "$metadata_tool" version --repository "$repository")
+version=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["software_version"])' "$version_info")
+build_number=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["build_number"])' "$version_info")
+python3 -B "$metadata_tool" check-binaries --repository "$repository" --platform "macos-$2" --binary-directory "$binary_directory" --source-names
 output_directory="$repository/artifacts/ui-refresh-20261015/bin"
 app="$output_directory/macos-$2/CShell.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Licenses"
@@ -52,8 +53,9 @@ install -m 644 "$repository/LICENSE-APACHE" "$app/Contents/Resources/Licenses/LI
 install -m 755 "$binary_directory/cshell-gui" "$app/Contents/MacOS/CShell"
 install -m 755 "$binary_directory/cshelld" "$app/Contents/MacOS/cshelld"
 install -m 755 "$binary_directory/cshell-script-worker" "$app/Contents/MacOS/cshell-script-worker"
-python3 - "$app/Contents/Info.plist" "$version" "$commit" <<'PY'
-import plistlib, sys
+python3 - "$app/Contents/Info.plist" "$version_info" "$commit" "$source_dirty" <<'PY'
+import json, plistlib, sys
+version = json.loads(sys.argv[2])
 with open(sys.argv[1], "wb") as output:
     plistlib.dump({
         "CFBundleDevelopmentRegion": "en",
@@ -63,8 +65,10 @@ with open(sys.argv[1], "wb") as output:
         "CFBundleIconFile": "cshell.icns",
         "CFBundleName": "CShell",
         "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": sys.argv[2],
-        "CFBundleVersion": sys.argv[2],
+        "CFBundleShortVersionString": version["mac_short_version"],
+        "CFBundleVersion": version["mac_bundle_version"],
+        "CShellVersion": version["software_version"],
+        "CShellSourceDirty": sys.argv[4] == "true",
         "CShellSourceCommit": sys.argv[3],
         "NSHighResolutionCapable": True,
     }, output)
@@ -73,7 +77,8 @@ plutil -lint "$app/Contents/Info.plist"
 cat > "$app/Contents/Resources/README-first-run.txt" <<EOF
 CShell 早期测试版 — macOS $2
 软件版本：$version
-源码版本：$commit
+构建编号：$build_number
+源码版本：$source_label
 
 1. 解压后将 CShell.app 拖入“应用程序”，再双击打开。后台程序已包含在 app 内。
 2. 本包只有本地 ad-hoc 签名，没有 Developer ID 签名或 Apple 公证。
@@ -87,6 +92,10 @@ CShell 早期测试版 — macOS $2
 请在 Apple Silicon 上选择 arm64 包，在 Intel 上选择 x64 包。
 
 本次更新：
+- 工具栏资源入口提供 Linux 基础指标；默认只采集一次、间隔 0 不自动刷新。
+- 支持受管理的 A → B 会话及可选跳板复用，终端、上传和资源采集绑定实际会话。
+- SFTP 拖放失败任务可检查并确认重试；保留成功项、原清单和原目录，同名文件不覆盖。
+- 原连接失效、清单过期或发布结果不确定时，先核对远端后重新选择上传；ZMODEM 不提供直接重试。
 - 服务器重装或主机密钥变化时，展示旧、新指纹；核实后可“确认更新并连接”。取消保留原信任记录。
 - 修复粘贴命令时反色高亮文字不可见或只显示一部分的问题。
 - 更新程序前正常退出旧版，保留原有用户数据；替换 app 不需要重新创建连接配置。
@@ -104,11 +113,16 @@ codesign --force --sign - "$app/Contents/MacOS/cshelld"
 codesign --force --sign - "$app/Contents/MacOS/cshell-script-worker"
 codesign --force --sign - --identifier io.github.chenxujiang1.cshell "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
+metadata_path="$output_directory/macos-$2/build-info.json"
+clean_arguments=()
+if [[ ${GITHUB_ACTIONS:-} == true ]]; then clean_arguments+=(--require-clean); fi
+python3 -B "$metadata_tool" create --repository "$repository" --platform "macos-$2" --binary-directory "$app/Contents/MacOS" --metadata "$metadata_path" "${clean_arguments[@]}"
+python3 -B "$metadata_tool" verify --repository "$repository" --platform "macos-$2" --binary-directory "$app/Contents/MacOS" --metadata "$metadata_path" "${clean_arguments[@]}"
 archive_name="CShell-trial-macos-$2.zip"
 archive="$output_directory/$archive_name"
 ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
 # Keep the opening instructions readable before Gatekeeper permits app launch.
-zip -j "$archive" "$app/Contents/Resources/README-first-run.txt"
+zip -j "$archive" "$app/Contents/Resources/README-first-run.txt" "$metadata_path"
 (
     cd -- "$output_directory"
     shasum -a 256 "$archive_name" > "$archive_name.sha256"

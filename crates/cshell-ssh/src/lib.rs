@@ -9,9 +9,11 @@ pub mod connection_progress;
 
 mod file_checksum;
 mod managed_keys;
+mod managed_peer;
 mod ordered_auth;
 mod working_directory;
 pub use ordered_auth::{LoginResponder, OrderedAuthStep, OrderedAuthentication, PasswordResponder};
+pub use working_directory::RemoteDirectory;
 
 mod forwarding;
 mod legacy_pem;
@@ -370,9 +372,99 @@ impl From<KnownHostsVerifier> for HostKeyPolicy {
 }
 
 #[derive(Debug)]
+struct VerifiedIdentity {
+    fingerprint: String,
+    key: russh::keys::PublicKeyOrCertificate,
+}
+#[derive(Debug)]
+struct VerifiedReceipt {
+    fingerprint: String,
+    current: Arc<std::sync::Mutex<Option<VerifiedIdentity>>>,
+}
+impl VerifiedReceipt {
+    fn revalidate(&self, verifier: &KnownHostsVerifier) -> bool {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|identity| {
+                identity.fingerprint == self.fingerprint
+                    && verifier.check(&identity.key) == HostKeyCheck::Trusted
+            })
+    }
+}
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod reuse_identity_tests {
+    use super::*;
+    #[test]
+    fn revalidation_checks_current_host_certificate_expiry_revocation_and_identity() {
+        use russh::keys::{
+            PublicKeyOrCertificate,
+            ssh_key::{
+                Algorithm, PrivateKey,
+                certificate::{Builder, CertType},
+            },
+        };
+        let ca = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let host = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let entries = format!(
+            "@cert-authority *.example.test {}\n",
+            ca.public_key().to_openssh().unwrap()
+        );
+        let verifier = KnownHostsVerifier::parse(&entries, "host.example.test", 22).unwrap();
+        for valid in [true, false] {
+            let mut builder = Builder::new_with_random_nonce(
+                &mut rand::rng(),
+                host.public_key(),
+                now - 100,
+                if valid { now + 300 } else { now - 10 },
+            )
+            .unwrap();
+            builder.cert_type(CertType::Host).unwrap();
+            builder.valid_principal("host.example.test").unwrap();
+            let key = PublicKeyOrCertificate::Certificate(builder.sign(&ca).unwrap());
+            let fingerprint = key
+                .public_key()
+                .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                .to_string();
+            let receipt = VerifiedReceipt {
+                fingerprint: fingerprint.clone(),
+                current: Arc::new(std::sync::Mutex::new(Some(VerifiedIdentity {
+                    fingerprint,
+                    key,
+                }))),
+            };
+            assert_eq!(receipt.revalidate(&verifier), valid);
+            let revoked = KnownHostsVerifier::parse(
+                &format!(
+                    "{entries}@revoked *.example.test {}\n",
+                    ca.public_key().to_openssh().unwrap()
+                ),
+                "host.example.test",
+                22,
+            )
+            .unwrap();
+            assert!(!receipt.revalidate(&revoked));
+            receipt
+                .current
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .fingerprint = "changed-in-rekey".into();
+            assert!(!receipt.revalidate(&verifier));
+        }
+    }
+}
+#[derive(Debug)]
 struct VerifiedClient {
     progress: Option<connection_progress::Observer>,
-    verified_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
+    verified_fingerprint: Arc<std::sync::Mutex<Option<VerifiedIdentity>>>,
     host_key: HostKeyPolicy,
     forward_routes: ForwardRoutes,
 }
@@ -480,12 +572,23 @@ impl russh::client::Handler for VerifiedClient {
             *self
                 .verified_fingerprint
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
-                server_public_key
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(VerifiedIdentity {
+                fingerprint: server_public_key
                     .public_key()
                     .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
                     .to_string(),
-            );
+                key: match server_public_key {
+                    russh::keys::PublicKeyOrCertificate::PublicKey { key, hash_alg } => {
+                        russh::keys::PublicKeyOrCertificate::PublicKey {
+                            key: key.clone(),
+                            hash_alg: *hash_alg,
+                        }
+                    }
+                    russh::keys::PublicKeyOrCertificate::Certificate(certificate) => {
+                        russh::keys::PublicKeyOrCertificate::Certificate(certificate.clone())
+                    }
+                },
+            });
             Ok(true)
         } else {
             Err(SshError::HostKeyRejected(check))
@@ -520,6 +623,8 @@ impl russh::client::Handler for VerifiedClient {
 
 #[derive(Error)]
 pub enum SshError {
+    #[error("{0}")]
+    ManagedPeer(&'static str),
     #[error("{0}")]
     CredentialUnavailable(String),
     #[error("private key decoder worker unavailable")]
@@ -715,6 +820,7 @@ impl std::fmt::Debug for TerminalEvent {
 
 pub struct SshTerminalReader {
     channel: russh::ChannelReadHalf,
+    pending: std::collections::VecDeque<TerminalEvent>,
 }
 
 impl std::fmt::Debug for SshTerminalReader {
@@ -726,7 +832,16 @@ impl std::fmt::Debug for SshTerminalReader {
 }
 
 impl SshTerminalReader {
+    fn new(channel: russh::ChannelReadHalf) -> Self {
+        Self {
+            channel,
+            pending: Default::default(),
+        }
+    }
     pub async fn next_event(&mut self) -> Option<TerminalEvent> {
+        if let Some(event) = self.pending.pop_front() {
+            return Some(event);
+        }
         loop {
             let message = self.channel.wait().await?;
             let event = match message {
@@ -905,7 +1020,7 @@ impl std::fmt::Debug for SshAuthentication {
 }
 
 pub struct RusshClient {
-    verified_fingerprint: String,
+    verified_fingerprint: VerifiedReceipt,
     pub(crate) session: russh::client::Handle<VerifiedClient>,
     pub(crate) forward_routes: ForwardRoutes,
 }
@@ -916,18 +1031,34 @@ pub struct RusshClient {
 pub struct SshExecChannel {
     reader: SshTerminalReader,
     writer: SshTerminalWriter,
+    managed: Option<Arc<managed_peer::ManagedPeer>>,
 }
 impl SshExecChannel {
     /// A dedicated bidirectional exec channel, separate from terminal input.
     pub async fn request_bidirectional(&self, command: &[u8]) -> Result<(), SshError> {
+        let translated;
+        let command = if let Some(peer) = &self.managed {
+            translated = peer.command(
+                std::str::from_utf8(command)
+                    .map_err(|_| SshError::ManagedPeer("B 命令必须为 UTF-8"))?,
+                false,
+                false,
+            )?;
+            translated.as_bytes()
+        } else {
+            command
+        };
         self.writer.channel.exec(true, command).await?;
         Ok(())
     }
     pub async fn send_input(&self, data: Vec<u8>) -> Result<(), SshError> {
         self.writer.send_input(data).await
     }
+    pub async fn eof(&self) -> Result<(), SshError> {
+        self.writer.channel.eof().await.map_err(Into::into)
+    }
     pub async fn request(&self, command: &[u8]) -> Result<(), SshError> {
-        self.writer.channel.exec(true, command).await?;
+        self.request_bidirectional(command).await?;
         self.writer.channel.eof().await?;
         Ok(())
     }
@@ -957,13 +1088,107 @@ impl RusshClient {
         let channel = self.session.channel_open_session().await?;
         let (reader, writer) = channel.split();
         Ok(SshExecChannel {
-            reader: SshTerminalReader { channel: reader },
+            reader: SshTerminalReader::new(reader),
             writer: SshTerminalWriter { channel: writer },
+            managed: None,
         })
     }
 
+    async fn open_terminal_command(
+        &self,
+        rows: u32,
+        cols: u32,
+        terminal_type: &str,
+        command: &str,
+        ready: Option<&[u8]>,
+    ) -> Result<SshTerminal, SshError> {
+        if terminal_type.is_empty()
+            || terminal_type.len() > 128
+            || terminal_type.chars().any(char::is_control)
+        {
+            return Err(SshError::InvalidTerminalType);
+        }
+        let mut owned = OpeningTerminalChannel(Some(self.session.channel_open_session().await?));
+        let channel = owned.0.as_mut().ok_or(russh::Error::Disconnect)?;
+        channel
+            .request_pty(true, terminal_type, cols, rows, 0, 0, &[])
+            .await?;
+        await_channel_request(channel, "PTY").await?;
+        channel.exec(true, command.as_bytes()).await?;
+        await_channel_request(channel, "managed B terminal").await?;
+        let (reader, writer) = owned.0.take().ok_or(russh::Error::Disconnect)?.split();
+        let mut owned = managed_peer::Closing(Some(SshExecChannel {
+            reader: SshTerminalReader::new(reader),
+            writer: SshTerminalWriter { channel: writer },
+            managed: None,
+        }));
+        if let Some(ready) = ready {
+            let channel = owned.0.as_mut().ok_or(russh::Error::Disconnect)?;
+            let mut bytes = Vec::new();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while let Some(event) = channel.next_event().await {
+                    match event {
+                        TerminalEvent::Data {
+                            stream: TerminalDataStream::Stdout,
+                            data,
+                        } => {
+                            if bytes.len().saturating_add(data.len()) > 65536 {
+                                return Err(SshError::ManagedPeer("B 终端启动输出超限"));
+                            }
+                            bytes.extend_from_slice(&data);
+                            if let Some((before, after)) = managed_peer::split_ready(&bytes, ready)
+                            {
+                                for data in [before, after] {
+                                    if !data.is_empty() {
+                                        channel.reader.pending.push_back(TerminalEvent::Data {
+                                            stream: TerminalDataStream::Stdout,
+                                            data: data.to_vec(),
+                                        });
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        }
+                        TerminalEvent::Closed
+                        | TerminalEvent::ExitStatus(_)
+                        | TerminalEvent::ExitSignal { .. }
+                        | TerminalEvent::RequestFailed => break,
+                        _ => {}
+                    }
+                }
+                Err(SshError::ManagedPeer(
+                    "B 终端未确认就绪，未开放输入，请重新连接",
+                ))
+            })
+            .await
+            .map_err(|_| SshError::ManagedPeer("等待 B 终端就绪超时"))??;
+        }
+        let channel = owned.0.take().ok_or(russh::Error::Disconnect)?;
+        Ok(SshTerminal {
+            reader: channel.reader,
+            writer: channel.writer,
+        })
+    }
+    async fn open_command_stream(
+        &self,
+        command: &str,
+    ) -> Result<russh::ChannelStream<russh::client::Msg>, SshError> {
+        let mut owned = OpeningTerminalChannel(Some(self.session.channel_open_session().await?));
+        let channel = owned.0.as_mut().ok_or(russh::Error::Disconnect)?;
+        channel.exec(true, command.as_bytes()).await?;
+        await_channel_request(channel, "managed B subsystem").await?;
+        Ok(owned
+            .0
+            .take()
+            .ok_or(russh::Error::Disconnect)?
+            .into_stream())
+    }
+
     pub fn verified_host_key_fingerprint(&self) -> &str {
-        &self.verified_fingerprint
+        &self.verified_fingerprint.fingerprint
+    }
+    pub fn revalidate_host_identity(&self, verifier: &KnownHostsVerifier) -> bool {
+        self.verified_fingerprint.revalidate(verifier)
     }
     pub async fn connect_known_hosts_stream<S>(
         stream: S,
@@ -1098,7 +1323,7 @@ impl RusshClient {
         let channel = opening.0.take().ok_or(russh::Error::Disconnect)?;
         let (reader, writer) = channel.split();
         Ok(SshTerminal {
-            reader: SshTerminalReader { channel: reader },
+            reader: SshTerminalReader::new(reader),
             writer: SshTerminalWriter { channel: writer },
         })
     }
@@ -1546,7 +1771,14 @@ async fn await_channel_request(
 async fn connect_verified<A>(
     address: A,
     host_key: impl Into<HostKeyPolicy>,
-) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes, String), SshError>
+) -> Result<
+    (
+        russh::client::Handle<VerifiedClient>,
+        ForwardRoutes,
+        VerifiedReceipt,
+    ),
+    SshError,
+>
 where
     A: tokio::net::ToSocketAddrs,
 {
@@ -1572,9 +1804,17 @@ where
     let fingerprint = verified_fingerprint
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
+        .as_ref()
+        .map(|identity| identity.fingerprint.clone())
         .ok_or(SshError::AuthenticationRejected)?;
-    Ok((session, forward_routes, fingerprint))
+    Ok((
+        session,
+        forward_routes,
+        VerifiedReceipt {
+            fingerprint,
+            current: verified_fingerprint,
+        },
+    ))
 }
 
 async fn authenticate_keyboard_interactive<R, F>(
@@ -1703,7 +1943,14 @@ where
 async fn connect_verified_stream<R>(
     stream: R,
     host_key: impl Into<HostKeyPolicy>,
-) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes, String), SshError>
+) -> Result<
+    (
+        russh::client::Handle<VerifiedClient>,
+        ForwardRoutes,
+        VerifiedReceipt,
+    ),
+    SshError,
+>
 where
     R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -1714,7 +1961,14 @@ async fn connect_verified_stream_configured<R>(
     stream: R,
     host_key: impl Into<HostKeyPolicy>,
     options: &cshell_domain::SshConnectionOptions,
-) -> Result<(russh::client::Handle<VerifiedClient>, ForwardRoutes, String), SshError>
+) -> Result<
+    (
+        russh::client::Handle<VerifiedClient>,
+        ForwardRoutes,
+        VerifiedReceipt,
+    ),
+    SshError,
+>
 where
     R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -1740,9 +1994,17 @@ where
     let fingerprint = verified_fingerprint
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
+        .as_ref()
+        .map(|identity| identity.fingerprint.clone())
         .ok_or(SshError::AuthenticationRejected)?;
-    Ok((session, forward_routes, fingerprint))
+    Ok((
+        session,
+        forward_routes,
+        VerifiedReceipt {
+            fingerprint,
+            current: verified_fingerprint,
+        },
+    ))
 }
 
 fn verified_config() -> russh::client::Config {
@@ -2090,10 +2352,12 @@ mod tests {
         async fn auth_publickey(
             &mut self,
             user: &str,
-            public_key: &PublicKey,
+            public_key: russh::server::VerifiedPublicKey<'_>,
         ) -> Result<Auth, Self::Error> {
             Ok(
-                if user == "cshell" && self.accepted_public_key.as_ref() == Some(public_key) {
+                if user == "cshell"
+                    && self.accepted_public_key.as_ref() == Some(public_key.public_key)
+                {
                     Auth::Accept
                 } else {
                     Auth::reject()

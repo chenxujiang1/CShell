@@ -120,6 +120,7 @@ async fn command(f: &Fixture, op: SftpOperation, id: SessionId) -> SftpResponse 
                 session_id: id.as_uuid().as_bytes().to_vec(),
                 document_json: if op == SftpOperation::ConnectProfile {
                     serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                        jump_override: None,
                         profile: f.profile,
                         source_ssh_session: None,
                         discover_directory: true,

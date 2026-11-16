@@ -23,6 +23,36 @@ pub(super) fn return_button_rect(pane: egui::Rect) -> egui::Rect {
 }
 
 impl DesktopApp {
+    pub(super) fn focus_terminal_at(&mut self, point: egui::Pos2) -> bool {
+        if !self
+            .view_model
+            .pane_views
+            .iter()
+            .any(|pane| pane.rect.contains(point))
+            || self
+                .terminal_ui_regions
+                .iter()
+                .any(|rect| rect.contains(point))
+        {
+            return false;
+        }
+        if let Some(sync) = &self.sync_input
+            && !sync
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .focus_terminal()
+        {
+            return false;
+        }
+        // Terminal focus does not require a synchronized-input controller.
+        self.egui_context.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        true
+    }
+
     pub(super) fn handle_clipboard_lifecycle(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::MouseInput {
@@ -35,7 +65,15 @@ impl DesktopApp {
             WindowEvent::Focused(false) => {
                 self.cancel_clipboard_gesture();
                 self.modifiers = ModifiersState::default();
+                self.select_all_key = None;
                 self.terminal_click = TerminalClickState::default();
+            }
+            WindowEvent::MouseWheel { .. } => self.terminal_click = TerminalClickState::default(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } if !self.clipboard_pointer_available(self.egui_context.pixels_per_point()) => {
+                self.terminal_click = TerminalClickState::default()
             }
             _ => {}
         }
@@ -101,6 +139,34 @@ impl DesktopApp {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_press_releases_editor_focus_but_overlay_and_command_bar_do_not() {
+        let mut app = DesktopApp::default();
+        let editor = egui::Id::new("command-editor");
+        app.view_model
+            .pane_views
+            .push(cshell_ui::WorkspacePaneView {
+                group_id: cshell_domain::TabGroupId::new(),
+                tab_id: None,
+                rect: egui::Rect::from_min_max(egui::pos2(0.0, 100.0), egui::pos2(800.0, 500.0)),
+            });
+        app.terminal_ui_regions.push(egui::Rect::from_min_max(
+            egui::pos2(500.0, 450.0),
+            egui::pos2(780.0, 490.0),
+        ));
+        for point in [egui::pos2(100.0, 550.0), egui::pos2(600.0, 470.0)] {
+            app.egui_context
+                .memory_mut(|memory| memory.request_focus(editor));
+            assert!(!app.focus_terminal_at(point));
+            assert_eq!(
+                app.egui_context.memory(|memory| memory.focused()),
+                Some(editor)
+            );
+        }
+        assert!(app.focus_terminal_at(egui::pos2(200.0, 200.0)));
+        assert_eq!(app.egui_context.memory(|memory| memory.focused()), None);
+    }
 
     #[test]
     fn application_switch_restores_terminal_search_or_editor_focus() {

@@ -50,6 +50,11 @@ mod chinese_tests;
 )]
 mod paste_tests;
 
+#[cfg(test)]
+#[path = "window/display_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod display_tests;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
@@ -298,14 +303,6 @@ impl GlyphAtlas {
         ) {
             return Vec::new();
         }
-        if cell.zerowidth().is_empty()
-            && cell.character.is_ascii()
-            && !cell.style.bold
-            && !cell.style.italic
-        {
-            return vec![self.glyph(cell.character)];
-        }
-
         let columns = if cell.width == CellWidth::Wide { 2 } else { 1 };
         self.shape_text(&cell.characters().collect::<String>(), columns, cell.style)
     }
@@ -316,6 +313,12 @@ impl GlyphAtlas {
         columns: u16,
         style: cshell_terminal::Style,
     ) -> Vec<GlyphInfo> {
+        // Live cells and paged history must use identical coverage, bearings,
+        // and baselines. Switching to scrollback during selection used to send
+        // ordinary ASCII through Swash instead of this pre-rasterized atlas.
+        if columns == 1 && text.len() == 1 && text.is_ascii() && !style.bold && !style.italic {
+            return vec![self.glyph(char::from(text.as_bytes()[0]))];
+        }
         let key = ShapeKey {
             text: text.to_owned(),
             bold: style.bold,
@@ -992,6 +995,22 @@ enum GeometryFrame<'a> {
     },
 }
 
+#[derive(Debug)]
+enum GeometrySource {
+    Terminal(Arc<FrameSnapshot>),
+    Log(Arc<crate::LogPage>),
+}
+
+impl GeometrySource {
+    fn matches_terminal(&self, frame: &TerminalSurfaceFrame) -> bool {
+        matches!(self, Self::Terminal(cached) if Arc::ptr_eq(cached, &frame.snapshot))
+    }
+
+    fn matches_log(&self, frame: &LogSurfaceFrame) -> bool {
+        matches!(self, Self::Log(cached) if Arc::ptr_eq(cached, &frame.page))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum WindowRendererError {
     #[error("cannot create wgpu window surface: {0}")]
@@ -1404,7 +1423,7 @@ pub struct WindowRenderer {
     vertex_capacity: usize,
     vertex_count: u32,
     geometry_key: Option<GeometryKey>,
-    geometry_snapshot: Option<Arc<FrameSnapshot>>,
+    geometry_source: Option<GeometrySource>,
     draw_batches: Vec<(TerminalViewport, std::ops::Range<u32>)>,
     device_lost: Arc<AtomicBool>,
     cpu_adapter: bool,
@@ -1452,7 +1471,7 @@ impl WindowRenderer {
         self.atlas = atlas;
         self.uploaded_atlas_revision = 0;
         self.geometry_key = None;
-        self.geometry_snapshot = None;
+        self.geometry_source = None;
         self.draw_batches.clear();
         self.vertex_count = 0;
         Ok(true)
@@ -1675,7 +1694,7 @@ impl WindowRenderer {
             vertex_capacity,
             vertex_count: 0,
             geometry_key: None,
-            geometry_snapshot: None,
+            geometry_source: None,
             draw_batches: Vec::new(),
             device_lost,
             cpu_adapter,
@@ -1822,7 +1841,7 @@ impl WindowRenderer {
                     self.config.height,
                 );
                 self.upload_geometry(vertices, GeometryKey::Panes);
-                self.geometry_snapshot = None;
+                self.geometry_source = None;
                 self.draw_batches = batches;
             }
             GeometryFrame::Terminal {
@@ -1838,7 +1857,7 @@ impl WindowRenderer {
             | GeometryFrame::Log { frame: None, .. } => {
                 self.vertex_count = 0;
                 self.geometry_key = None;
-                self.geometry_snapshot = None;
+                self.geometry_source = None;
             }
         }
         if !multiple {
@@ -1976,9 +1995,9 @@ impl WindowRenderer {
         // cannot be recycled while its geometry is cached.
         if self.geometry_key == Some(key)
             && self
-                .geometry_snapshot
+                .geometry_source
                 .as_ref()
-                .is_some_and(|cached| Arc::ptr_eq(cached, &frame.snapshot))
+                .is_some_and(|cached| cached.matches_terminal(frame))
         {
             return;
         }
@@ -1994,7 +2013,7 @@ impl WindowRenderer {
             self.theme,
         );
         self.upload_geometry(vertices, key);
-        self.geometry_snapshot = Some(Arc::clone(&frame.snapshot));
+        self.geometry_source = Some(GeometrySource::Terminal(Arc::clone(&frame.snapshot)));
     }
 
     fn update_log_geometry(
@@ -2017,7 +2036,14 @@ impl WindowRenderer {
             cell_offset: frame.cell_offset,
             layout_columns: frame.layout_columns,
         };
-        if self.geometry_key == Some(key) {
+        // Page revisions and source IDs are local to their owning session.
+        // Keep the actual page alive to fence equal IDs and allocator reuse.
+        if self.geometry_key == Some(key)
+            && self
+                .geometry_source
+                .as_ref()
+                .is_some_and(|cached| cached.matches_log(frame))
+        {
             return;
         }
         let vertices = build_log_vertices_themed(
@@ -2030,7 +2056,7 @@ impl WindowRenderer {
             self.theme,
         );
         self.upload_geometry(vertices, key);
-        self.geometry_snapshot = None;
+        self.geometry_source = Some(GeometrySource::Log(Arc::clone(&frame.page)));
     }
 
     fn upload_geometry(&mut self, vertices: Vec<Vertex>, key: GeometryKey) {
@@ -2230,6 +2256,24 @@ fn build_vertices_themed(
             .saturating_mul(usize::from(snapshot.cols))
             .saturating_mul(12),
     );
+    // A wide glyph (or italic bearing) can cross into the following cell.
+    // All backgrounds must precede all ink, including the spacer's background.
+    let mut ink_vertices = Vec::new();
+    let mut cursor_background_vertices = Vec::new();
+    let mut cursor_outline_vertices = Vec::new();
+    let cursor_column = snapshot.row(snapshot.cursor_row).map(|cells| {
+        let column = usize::from(snapshot.cursor_col);
+        if cells
+            .get(column)
+            .is_some_and(|cell| cell.width == CellWidth::WideSpacer)
+            && column > 0
+            && cells[column - 1].width == CellWidth::Wide
+        {
+            column - 1
+        } else {
+            column
+        }
+    });
     for row in rows {
         let Some(cells) = snapshot.row(row) else {
             continue;
@@ -2243,10 +2287,14 @@ fn build_vertices_themed(
             if x >= viewport.x.saturating_add(viewport.width) as f32 {
                 break;
             }
-            let is_cursor_cell =
-                row == snapshot.cursor_row && column == usize::from(snapshot.cursor_col);
+            let is_cursor_cell = row == snapshot.cursor_row && Some(column) == cursor_column;
             let cursor_shape =
                 (cursor_visible && is_cursor_cell).then_some(snapshot.cursor_appearance.shape);
+            let cursor_width = if cell.width == CellWidth::Wide {
+                atlas.cell_width * 2.0
+            } else {
+                atlas.cell_width
+            };
             let (mut foreground, mut background) = (
                 resolve_color_themed(cell.style.foreground, true, theme),
                 resolve_color_themed(cell.style.background, false, theme),
@@ -2279,10 +2327,7 @@ fn build_vertices_themed(
                 foreground = if background[3] > 0.0 {
                     background
                 } else {
-                    match theme {
-                        TerminalTheme::Custom(_) => theme.background(),
-                        _ => [0.0, 0.0, 0.0, 1.0],
-                    }
+                    theme.background()
                 };
                 cursor_color
             });
@@ -2326,9 +2371,9 @@ fn build_vertices_themed(
             }
             if let Some(color) = cursor_background {
                 push_cell_overlay(
-                    &mut vertices,
+                    &mut cursor_background_vertices,
                     [x, y],
-                    [atlas.cell_width, atlas.cell_height],
+                    [cursor_width, atlas.cell_height],
                     color,
                     [width, height],
                 );
@@ -2351,7 +2396,7 @@ fn build_vertices_themed(
                         (glyph.atlas_y + glyph.height) as f32 / ATLAS_HEIGHT as f32,
                     ];
                     push_quad(
-                        &mut vertices,
+                        &mut ink_vertices,
                         [x + CELL_PADDING_X + glyph.offset_x, y + glyph.offset_y],
                         [glyph.width as f32, glyph.height as f32],
                         uv,
@@ -2363,7 +2408,7 @@ fn build_vertices_themed(
             }
             if cell.style.underline || highlight_underline {
                 push_quad(
-                    &mut vertices,
+                    &mut ink_vertices,
                     [x, y + atlas.cell_height - 2.0],
                     [atlas.cell_width, 1.0],
                     white_uv(),
@@ -2383,16 +2428,19 @@ fn build_vertices_themed(
                         resolve_color_themed(color, true, theme)
                     });
                 push_cursor_decoration(
-                    &mut vertices,
+                    &mut cursor_outline_vertices,
                     shape,
                     [x, y],
-                    [atlas.cell_width, atlas.cell_height],
+                    [cursor_width, atlas.cell_height],
                     color,
                     [width, height],
                 );
             }
         }
     }
+    vertices.extend(cursor_background_vertices);
+    vertices.extend(ink_vertices);
+    vertices.extend(cursor_outline_vertices);
     vertices
 }
 
@@ -2523,6 +2571,7 @@ fn build_log_vertices_themed(
             .sum::<usize>()
             .saturating_mul(6),
     );
+    let mut ink_vertices = Vec::new();
     for (relative_row, visual_index) in rows.enumerate() {
         let Some(visual_row) = frame.visual_rows.get(visual_index) else {
             continue;
@@ -2627,21 +2676,17 @@ fn build_log_vertices_themed(
                 background = [1.0, 0.72, 0.12, 0.92];
             }
             let span_width = atlas.cell_width * columns as f32;
-            if active_selection.is_some_and(|selected| {
+            let mut selected = active_selection.is_some_and(|selected| {
                 (selected.byte_range.start as usize) < grapheme_end
                     && byte_index < selected.byte_range.end as usize
-            }) {
-                foreground = [0.95, 0.97, 1.0, 1.0];
-                background = [0.18, 0.36, 0.58, 1.0];
-            }
+            });
             if let Some((snapshot, selection)) = &decorations.selection {
                 let screen_row = relative_row as i32 - frame.first_viewport_row as i32;
                 let screen_col = cell_column
                     .saturating_sub(first_cell)
                     .min(u32::from(u16::MAX)) as u16;
                 if screen_row >= 0 && selection.contains(snapshot, screen_row as u16, screen_col) {
-                    foreground = [0.95, 0.97, 1.0, 1.0];
-                    background = [0.18, 0.36, 0.58, 1.0];
+                    selected = true;
                 }
             }
             if background[3] > 0.0 {
@@ -2652,6 +2697,17 @@ fn build_log_vertices_themed(
                     white_uv(),
                     background,
                     false,
+                    [width, height],
+                );
+            }
+            if selected {
+                // Match live selection: tint the background without changing
+                // the ANSI foreground, font weight, or glyph coverage.
+                push_cell_overlay(
+                    &mut vertices,
+                    [x, y],
+                    [span_width, atlas.cell_height],
+                    theme.selection_color(),
                     [width, height],
                 );
             }
@@ -2667,7 +2723,7 @@ fn build_log_vertices_themed(
                         (glyph.atlas_y + glyph.height) as f32 / ATLAS_HEIGHT as f32,
                     ];
                     push_quad(
-                        &mut vertices,
+                        &mut ink_vertices,
                         [x + CELL_PADDING_X + glyph.offset_x, y + glyph.offset_y],
                         [glyph.width as f32, glyph.height as f32],
                         uv,
@@ -2679,7 +2735,7 @@ fn build_log_vertices_themed(
             }
             if style.underline || highlight_underline {
                 push_quad(
-                    &mut vertices,
+                    &mut ink_vertices,
                     [x, y + atlas.cell_height - 2.0],
                     [span_width, 1.0],
                     white_uv(),
@@ -2691,6 +2747,7 @@ fn build_log_vertices_themed(
             cell_column = next_column;
         }
     }
+    vertices.extend(ink_vertices);
     vertices
 }
 

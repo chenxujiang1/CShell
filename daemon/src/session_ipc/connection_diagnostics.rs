@@ -152,7 +152,9 @@ impl SessionIpcService {
             _ => false,
         };
         if !enabled {
-            return self.dispatch_with_features(request, features).await;
+            // Connection admission and SSH negotiation have large state machines.
+            // Keep them off the default Windows worker stack, even without tracing.
+            return Box::pin(self.dispatch_with_features(request, features)).await;
         }
         let id = request.request_id;
         let mut recorder = Recorder::new();
@@ -182,8 +184,10 @@ impl SessionIpcService {
                 .clone()
         };
         update(writer, id, &initial).await?;
-        let work =
-            connection_progress::scope(observer, self.dispatch_with_features(request, features));
+        let work = Box::pin(connection_progress::scope(
+            observer,
+            self.dispatch_with_features(request, features),
+        ));
         tokio::pin!(work);
         let mut heartbeat = tokio::time::interval_at(
             tokio::time::Instant::now() + std::time::Duration::from_secs(2),

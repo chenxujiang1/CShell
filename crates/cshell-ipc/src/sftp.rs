@@ -73,6 +73,8 @@ pub enum SftpOperation {
     SyncApply = 62,
     EditReview = 63,
     EditRebase = 64,
+    TerminalUploadRetryInspect = 65,
+    TerminalUploadRetry = 66,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]
@@ -87,6 +89,7 @@ pub enum SftpStatus {
     Conflict = 6,
     StaleRevision = 7,
     Cancelled = 8,
+    JumpSelectionRequired = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Enumeration)]

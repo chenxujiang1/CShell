@@ -27,6 +27,7 @@ pub fn connect(
     previous: Option<SessionId>,
 ) -> SftpClientCommand {
     SftpClientCommand::ConnectProfile {
+        jump_options: false,
         session: SessionId::new(),
         profile,
         previous,
@@ -39,10 +40,35 @@ pub fn connect_shared(
     source_ssh_session: Option<SessionId>,
 ) -> SftpClientCommand {
     SftpClientCommand::ConnectProfile {
+        jump_options: false,
         session: SessionId::new(),
         profile,
         previous,
         source_ssh_session,
+    }
+}
+pub(crate) fn connect_options(
+    profile: cshell_domain::ProfileId,
+    previous: Option<SessionId>,
+) -> SftpClientCommand {
+    let mut command = connect(profile, previous);
+    if let SftpClientCommand::ConnectProfile { jump_options, .. } = &mut command {
+        *jump_options = true;
+    }
+    command
+}
+async fn choose_jump(
+    config: &DesktopConnectionConfig,
+    shared: &Arc<Mutex<SftpView>>,
+    session: SessionId,
+    profile: cshell_domain::ProfileId,
+) -> Result<Option<cshell_domain::JumpConnectionOverride>, String> {
+    tokio::select! {
+        result=crate::jump_reuse_panel::choose(config, profile, true) => result,
+        _=async { loop { tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let view=shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if view.close_requested || view.session_id != Some(session) { break; }
+        }} => Err("跳板连接选择已取消或超时".into()),
     }
 }
 async fn disconnect(config: &DesktopConnectionConfig, session: SessionId) -> Result<(), String> {
@@ -100,7 +126,7 @@ pub(super) async fn run(
     shared: &Arc<Mutex<SftpView>>,
     command: SftpClientCommand,
 ) {
-    let (session, profile, previous, source_ssh_session) = match command {
+    let (session, profile, previous, source_ssh_session, jump_options) = match command {
         SftpClientCommand::Disconnect(session) => {
             let previous = shared
                 .lock()
@@ -125,7 +151,8 @@ pub(super) async fn run(
             profile,
             previous,
             source_ssh_session,
-        } => (session, profile, previous, source_ssh_session),
+            jump_options,
+        } => (session, profile, previous, source_ssh_session, jump_options),
         _ => return,
     };
     if let Some(previous) = previous {
@@ -149,7 +176,19 @@ pub(super) async fn run(
         String::new(),
         Vec::new(),
     );
+    let jump_override = if jump_options && source_ssh_session.is_none() {
+        match choose_jump(config, shared, session, profile).await {
+            Ok(choice) => choice,
+            Err(error) => {
+                closed(shared, session, Some(error));
+                return;
+            }
+        }
+    } else {
+        None
+    };
     query.document_json = serde_json::to_vec(&cshell_application::SftpConnectRequest {
+        jump_override,
         profile,
         source_ssh_session,
         discover_directory: true,
@@ -168,9 +207,29 @@ pub(super) async fn run(
                 view.generation = view.generation.wrapping_add(1);
             }
         },
-        send(config, query),
+        send(config, query.clone()),
     )
     .await;
+    let result = if result
+        .as_ref()
+        .is_ok_and(|reply| reply.status == SftpStatus::JumpSelectionRequired as i32)
+    {
+        match choose_jump(config, shared, session, profile).await {
+            Ok(choice) => {
+                query.document_json = serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    profile,
+                    source_ssh_session: None,
+                    discover_directory: true,
+                    jump_override: choice,
+                })
+                .unwrap_or_default();
+                send(config, query).await
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        result
+    };
     if result.is_err() {
         let mut view = shared
             .lock()

@@ -100,6 +100,7 @@ pub struct SshConnection {
 #[derive(Clone)]
 enum ConnectionBackend {
     Russh(Arc<RusshClient>),
+    Managed(Arc<managed_peer::ManagedPeer>),
 }
 impl std::fmt::Debug for SshConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,7 +145,34 @@ impl SshConnection {
     fn russh(&self) -> &Arc<RusshClient> {
         match &self.backend {
             ConnectionBackend::Russh(client) => client,
+            ConnectionBackend::Managed(peer) => peer.gateway(),
         }
+    }
+    pub async fn connect_from_jump(
+        gateway: &SshConnection,
+        target: &cshell_domain::SshConnectionRecord,
+        expected_fingerprint: Option<&str>,
+    ) -> Result<Self, SshError> {
+        if !matches!(gateway.backend, ConnectionBackend::Russh(_)) {
+            return Err(SshError::ManagedPeer(
+                "A 端认证模式暂不支持继续作为下一层跳板",
+            ));
+        }
+        let peer = managed_peer::ManagedPeer::connect(
+            gateway.russh().clone(),
+            target,
+            expected_fingerprint,
+        )
+        .await?;
+        let mut descriptor = russh_descriptor();
+        descriptor.id = SshProviderId::SystemOpenSsh;
+        descriptor.capabilities = BTreeSet::from([C::Pty, C::Exec, C::Sftp]);
+        descriptor.max_jump_hops = 0;
+        Ok(Self {
+            backend: ConnectionBackend::Managed(Arc::new(peer)),
+            descriptor,
+            authenticated_username: Some(target.username.clone()),
+        })
     }
     fn require(&self, capability: C) -> Result<(), SshError> {
         if self.descriptor.capabilities.contains(&capability) {
@@ -159,19 +187,44 @@ impl SshConnection {
         }
     }
     pub fn verified_host_key_fingerprint(&self) -> &str {
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return peer.fingerprint();
+        }
         self.russh().verified_host_key_fingerprint()
     }
     pub fn transport_closed(&self) -> bool {
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return peer.closed();
+        }
         self.russh().transport_closed()
     }
+    pub fn revalidate_host_identity(&self, verifier: &KnownHostsVerifier) -> bool {
+        matches!(self.backend, ConnectionBackend::Russh(_))
+            && self.russh().revalidate_host_identity(verifier)
+    }
     pub async fn disconnect(&self) -> Result<(), SshError> {
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return if peer.disconnect().await {
+                Ok(())
+            } else {
+                Err(SshError::ManagedPeer("B 的中转清理尚未确认"))
+            };
+        }
         self.russh().disconnect().await
     }
     pub async fn disconnect_confirmed(&self) -> bool {
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return peer.disconnect().await;
+        }
         self.russh().disconnect_confirmed().await
     }
     pub async fn open_terminal(&self, rows: u32, cols: u32) -> Result<SshTerminal, SshError> {
         self.require(C::Pty)?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return peer
+                .terminal(rows, cols, "xterm-256color", None, None)
+                .await;
+        }
         self.russh().open_terminal(rows, cols).await
     }
     pub async fn open_terminal_with_type(
@@ -181,6 +234,9 @@ impl SshConnection {
         terminal_type: &str,
     ) -> Result<SshTerminal, SshError> {
         self.require(C::Pty)?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return peer.terminal(rows, cols, terminal_type, None, None).await;
+        }
         self.russh()
             .open_terminal_with_type(rows, cols, terminal_type)
             .await
@@ -193,26 +249,66 @@ impl SshConnection {
         marker: Option<&str>,
     ) -> Result<SshTerminal, SshError> {
         self.require(C::Pty)?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return peer.terminal(rows, cols, terminal_type, marker, None).await;
+        }
         self.russh()
             .open_terminal_tracked(rows, cols, terminal_type, marker)
             .await
     }
-    pub async fn remote_working_directory(&self, marker: &str) -> Option<String> {
+    pub async fn remote_working_directory(&self, marker: &str) -> Option<RemoteDirectory> {
         self.require(C::Exec).ok()?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            let command = working_directory::directory_command(marker)?;
+            return working_directory::decode_result(
+                &peer.read(&command, Duration::from_secs(4), 8192).await?,
+            );
+        }
         self.russh().remote_working_directory(marker).await
     }
     pub async fn open_exec(&self) -> Result<SshExecChannel, SshError> {
         self.require(C::Exec)?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            let mut channel = peer.gateway().open_exec().await?;
+            channel.managed = Some(peer.clone());
+            return Ok(channel);
+        }
         self.russh().open_exec().await
     }
     pub async fn file_checksum_probe(&self, path: &str, nonce: &[u8]) -> bool {
         if self.require(C::Exec).is_err() {
             return false;
         }
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            let Some(path) = file_checksum::quote_path(path) else {
+                return false;
+            };
+            return peer
+                .read(
+                    &format!("LC_ALL=C cat -- {path}"),
+                    Duration::from_secs(3),
+                    1024,
+                )
+                .await
+                .as_deref()
+                == Some(nonce);
+        }
         self.russh().file_checksum_probe(path, nonce).await
     }
     pub async fn file_sha256(&self, path: &str) -> Option<[u8; 32]> {
         self.require(C::Exec).ok()?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            let path = file_checksum::quote_path(path)?;
+            return file_checksum::parse_sha256(
+                &peer
+                    .read(
+                        &format!("LC_ALL=C sha256sum < {path}"),
+                        Duration::from_secs(1800),
+                        1024,
+                    )
+                    .await?,
+            );
+        }
         self.russh().file_sha256(path).await
     }
     pub async fn exec_with_pty(
@@ -223,10 +319,19 @@ impl SshConnection {
     ) -> Result<ExecResult, SshError> {
         self.require(C::Exec)?;
         self.require(C::Pty)?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            let bytes = command.into();
+            let command = std::str::from_utf8(&bytes)
+                .map_err(|_| SshError::ManagedPeer("B 命令必须为 UTF-8"))?;
+            return peer.exec(command, rows, cols).await;
+        }
         self.russh().exec_with_pty(command, rows, cols).await
     }
     pub async fn open_sftp(&self) -> Result<cshell_sftp::SftpClient, SshError> {
         self.require(C::Sftp)?;
+        if let ConnectionBackend::Managed(peer) = &self.backend {
+            return peer.sftp().await;
+        }
         self.russh().open_sftp().await
     }
     pub async fn open_direct_stream(

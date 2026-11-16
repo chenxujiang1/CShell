@@ -16,6 +16,11 @@ use std::sync::Arc;
 use tracing::info;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if matches!(arguments.as_slice(), [value] if value == "--version" || value == "-V") {
+        println!("cshelld {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     #[cfg(unix)]
     if let Some(code) = cshell_local::run_pty_guardian_from_args()? {
         std::process::exit(code);

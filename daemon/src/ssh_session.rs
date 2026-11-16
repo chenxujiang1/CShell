@@ -63,6 +63,19 @@ enum Command {
     Resize(TerminalSize),
 }
 
+async fn next_writer_command(
+    receiver: &mut tokio::sync::mpsc::Receiver<Command>,
+    tick: &mut tokio::time::Interval,
+) -> Option<Option<Command>> {
+    tokio::select! {
+        biased;
+        // A slow maintenance pass can leave the timer permanently ready. An
+        // already queued keystroke must still get its turn before another pass.
+        command = receiver.recv() => command.map(Some),
+        _ = tick.tick() => Some(None),
+    }
+}
+
 #[derive(Debug)]
 pub struct SshSession {
     directory: Arc<Mutex<directory::DirectoryTracker>>,
@@ -85,6 +98,7 @@ pub struct SshSession {
     clipboard: crate::clipboard::ClipboardInbox,
     clipboard_host: Option<cshell_domain::ClipboardHost>,
     clipboard_trust: Option<cshell_domain::ClipboardTrust>,
+    reuse_plan: Option<crate::ssh_route::SshConnectionPlan>,
     line_index: JournalLineIndex,
     commands: tokio::sync::mpsc::Sender<Command>,
     closed: Arc<AtomicBool>,
@@ -446,20 +460,13 @@ impl SshSession {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut clipboard_cleanup = std::time::Instant::now();
             loop {
-                let command = tokio::select! {
-                    biased;
-                    _ = tick.tick() => {
-                        if clipboard_cleanup.elapsed() >= std::time::Duration::from_secs(1) {
-                            command_clipboard.expire_pending();
-                            clipboard_cleanup = std::time::Instant::now();
-                        }
-                        None
-                    }
-                    command = receiver.recv() => {
-                        let Some(command) = command else { break; };
-                        Some(command)
-                    }
+                let Some(command) = next_writer_command(&mut receiver, &mut tick).await else {
+                    break;
                 };
+                if clipboard_cleanup.elapsed() >= std::time::Duration::from_secs(1) {
+                    command_clipboard.expire_pending();
+                    clipboard_cleanup = std::time::Instant::now();
+                }
                 if command_closed.load(Ordering::Acquire) {
                     if io_finished.load(Ordering::Acquire) {
                         return;
@@ -583,6 +590,7 @@ impl SshSession {
             clipboard,
             clipboard_host: None,
             clipboard_trust: None,
+            reuse_plan: None,
             line_index,
             commands,
             closed,
@@ -596,6 +604,15 @@ impl SshSession {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+    pub(crate) fn shared_lease(&self) -> crate::shared_ssh::TransportLease {
+        self.active_transport().lease
+    }
+    pub(crate) fn note_reused_jump(&self) {
+        replace_terminal_detail(
+            &self.terminal_detail,
+            "已复用跳板认证；终端、文件与监控绑定当前目标。共享连接断开后请手动重连。".into(),
+        );
     }
     pub fn id(&self) -> SessionId {
         self.id
@@ -627,6 +644,8 @@ impl SshSession {
         mut self,
         plan: &crate::ssh_route::SshConnectionPlan,
     ) -> Result<Self, serde_json::Error> {
+        let active = self.active_transport();
+        self.reuse_plan = Some(plan.authenticated_plan(&active.client, active.jump.as_ref()));
         self.clipboard_trust = Some(plan.verified_peer(
             &self.active_transport().client,
             self.active_transport().jump.as_ref(),
@@ -718,6 +737,7 @@ impl SshSession {
         session.profile_id = self.profile_id;
         session.clipboard_host = self.clipboard_host.clone();
         session.clipboard_trust = self.clipboard_trust.clone();
+        session.reuse_plan = self.reuse_plan.clone();
         Ok(session)
     }
     pub async fn open_sftp(&self) -> Result<cshell_sftp::SftpClient, SshSessionError> {
@@ -906,11 +926,22 @@ impl Drop for SshSession {
 
 #[derive(Debug, Default)]
 pub struct SshSessionRegistry {
+    pub(crate) jump_reuse: crate::jump_reuse::Registry,
     pub(crate) sftp_targets: RwLock<BTreeMap<SessionId, Arc<crate::sftp_lifecycle::SftpTarget>>>,
     pub(crate) sftp_lifecycle: crate::sftp_lifecycle::Lifecycle,
     sessions: RwLock<BTreeMap<SessionId, Arc<SshSession>>>,
 }
 impl SshSessionRegistry {
+    pub(crate) fn refresh_jump_sources(&self) {
+        for session in self.list() {
+            if session.running()
+                && let Some(plan) = &session.reuse_plan
+            {
+                self.jump_reuse
+                    .register_route(plan, &session.shared_lease());
+            }
+        }
+    }
     pub fn insert(&self, session: SshSession) -> Arc<SshSession> {
         let session = Arc::new(session);
         self.sftp_targets
@@ -966,6 +997,31 @@ impl SshSessionRegistry {
 pub(crate) mod tests {
     mod transfer_policy;
     use super::{SshConnect, SshSession};
+
+    #[tokio::test]
+    async fn queued_interrupt_wins_over_ready_maintenance_and_idle_tick_still_runs() {
+        use super::{Command, next_writer_command};
+        let (sent, mut received) = tokio::sync::mpsc::channel(2);
+        sent.send(Command::Input(1, 1, vec![3])).await.unwrap();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(10));
+        tick.tick().await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let wake = next_writer_command(&mut received, &mut tick).await;
+        assert!(
+            matches!(wake, Some(Some(Command::Input(1, 1, bytes))) if bytes == [3]),
+            "ready maintenance must not starve an interrupt"
+        );
+        assert!(matches!(
+            next_writer_command(&mut received, &mut tick).await,
+            Some(None)
+        ));
+        drop(sent);
+        assert!(
+            next_writer_command(&mut received, &mut tick)
+                .await
+                .is_none()
+        );
+    }
     use cshell_domain::{InputAction, ProfileId, SessionId, TerminalSize};
     use cshell_ssh::KnownHostsVerifier;
     use rand::rng;
@@ -981,6 +1037,8 @@ pub(crate) mod tests {
 
     #[derive(Default)]
     pub(crate) struct EchoServer {
+        pub(crate) jump_forward: Option<std::net::SocketAddr>,
+        pub(crate) exec_bridge: Option<Arc<cshell_ssh::SshConnection>>,
         zmodem_greeting: Option<Vec<u8>>,
         pub(super) received_input: Option<Arc<Mutex<Vec<u8>>>>,
         channels: HashMap<ChannelId, Channel<Msg>>,
@@ -1061,10 +1119,12 @@ pub(crate) mod tests {
         async fn auth_publickey(
             &mut self,
             user: &str,
-            public_key: &PublicKey,
+            public_key: russh::server::VerifiedPublicKey<'_>,
         ) -> Result<Auth, Self::Error> {
             Ok(
-                if user == "cshell" && self.accepted_public_key.as_ref() == Some(public_key) {
+                if user == "cshell"
+                    && self.accepted_public_key.as_ref() == Some(public_key.public_key)
+                {
                     Auth::Accept
                 } else {
                     Auth::reject()
@@ -1093,12 +1153,79 @@ pub(crate) mod tests {
             }
             Ok(())
         }
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: Channel<Msg>,
+            host: &str,
+            port: u32,
+            _origin: &str,
+            _origin_port: u32,
+            reply: russh::server::ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            let Some(target) = self.jump_forward.filter(|address| {
+                host == address.ip().to_string() && port == u32::from(address.port())
+            }) else {
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+                return Ok(());
+            };
+            let mut socket = tokio::net::TcpStream::connect(target).await?;
+            reply.accept().await;
+            tokio::spawn(async move {
+                let mut stream = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut stream, &mut socket).await;
+            });
+            Ok(())
+        }
         async fn exec_request(
             &mut self,
             channel: ChannelId,
             data: &[u8],
             session: &mut Session,
         ) -> Result<(), Self::Error> {
+            if let Some(bridge) = &self.exec_bridge {
+                let Some(incoming) = self.channels.remove(&channel) else {
+                    return Ok(());
+                };
+                let mut remote = bridge
+                    .open_exec()
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                remote
+                    .request_bidirectional(data)
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                session.channel_success(channel)?;
+                let handle = session.handle();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut incoming = incoming.into_stream();
+                    let mut input = true;
+                    let mut bytes = vec![0; 32768];
+                    loop {
+                        tokio::select! {
+                            result=incoming.read(&mut bytes), if input => match result {
+                                Ok(0) => { input=false; let _=remote.eof().await; }
+                                Ok(n) => { if remote.send_input(bytes[..n].to_vec()).await.is_err() { break; } }
+                                Err(_) => break,
+                            },
+                            event=remote.next_event() => match event {
+                                Some(cshell_ssh::TerminalEvent::Data { stream: cshell_ssh::TerminalDataStream::Stdout, data }) => { if handle.data(channel, data.to_vec()).await.is_err() { break; } }
+                                Some(cshell_ssh::TerminalEvent::Data { stream: cshell_ssh::TerminalDataStream::Extended(code), data }) => { if handle.extended_data(channel, code, data.to_vec()).await.is_err() { break; } }
+                                Some(cshell_ssh::TerminalEvent::ExitStatus(code)) => { let _=handle.exit_status_request(channel, code).await; }
+                                None | Some(cshell_ssh::TerminalEvent::Closed) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    let _ = remote.close().await;
+                    let _ = handle.eof(channel).await;
+                    let _ = handle.close(channel).await;
+                });
+                return Ok(());
+            }
             let command = String::from_utf8_lossy(data);
             if let Some(directory) = command
                 .strip_prefix("cd -- '")
@@ -1233,7 +1360,10 @@ pub(crate) mod tests {
                 .map(|(_, cwd)| cwd.lock().unwrap().clone());
             if let Some(path) = path {
                 session.channel_success(channel)?;
-                session.data(channel, format!("\0CSHELL_CWD\0{path}\n").into_bytes())?;
+                session.data(
+                    channel,
+                    format!("\0CSHELL_CWD\0host\0{path}\n").into_bytes(),
+                )?;
                 session.exit_status_request(channel, 0)?;
                 session.close(channel)?;
             } else {
@@ -3341,6 +3471,7 @@ pub(crate) mod tests {
                     deadline_unix_ms: 0,
                     payload: Some(envelope::Payload::SessionCreateRequest(
                         SessionCreateRequest {
+                            jump_override: None,
                             connection_diagnostics: false,
                             source_ssh_session_id: None,
                             local_launch: None,
@@ -3495,6 +3626,7 @@ pub(crate) mod tests {
         let result = exchange(
             &service,
             envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+                jump_override: None,
                 connection_diagnostics: false,
                 source_ssh_session_id: None,
                 local_launch: None,

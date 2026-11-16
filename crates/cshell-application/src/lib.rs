@@ -68,7 +68,8 @@ mod terminal_upload;
 pub use sftp_tree::{SftpTreeSnapshot, SftpTreeStart};
 pub use sftp_workspace::*;
 pub use terminal_upload::{
-    TerminalUploadProtocol, TerminalUploadSnapshot, TerminalUploadStart, TerminalUploadState,
+    TerminalUploadProtocol, TerminalUploadRetryPlan, TerminalUploadSnapshot, TerminalUploadStart,
+    TerminalUploadState,
 };
 mod tasks;
 pub use sftp_queue::*;

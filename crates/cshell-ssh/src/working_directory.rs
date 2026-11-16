@@ -1,7 +1,12 @@
 //! Read-only Linux shell directory discovery on a separate non-PTY channel.
 use super::*;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteDirectory {
+    pub hostname: String,
+    pub path: String,
+}
 impl RusshClient {
-    pub async fn remote_working_directory(&self, marker: &str) -> Option<String> {
+    pub async fn remote_working_directory(&self, marker: &str) -> Option<RemoteDirectory> {
         if marker.is_empty()
             || marker.len() > 64
             || !marker
@@ -37,15 +42,7 @@ impl RusshClient {
             if !success {
                 return None;
             }
-            let prefix = b"\0CSHELL_CWD\0";
-            let start = output.windows(prefix.len()).position(|w| w == prefix)? + prefix.len();
-            let path = std::str::from_utf8(&output[start..])
-                .ok()?
-                .strip_suffix('\n')?;
-            if !path.starts_with('/') || path.len() > 4000 || path.chars().any(char::is_control) {
-                return None;
-            }
-            Some(path.to_owned())
+            decode_result(&output)
         })
         .await
         .ok()
@@ -53,7 +50,31 @@ impl RusshClient {
     }
 }
 
-fn directory_command(marker: &str) -> Option<String> {
+pub(super) fn decode_result(output: &[u8]) -> Option<RemoteDirectory> {
+    let prefix = b"\0CSHELL_CWD\0";
+    let start = output.windows(prefix.len()).position(|w| w == prefix)? + prefix.len();
+    let payload = &output[start..];
+    let separator = payload.iter().position(|b| *b == 0)?;
+    let hostname = std::str::from_utf8(&payload[..separator]).ok()?;
+    if hostname.is_empty()
+        || hostname.len() > 255
+        || !hostname
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return None;
+    }
+    let path = std::str::from_utf8(&payload[separator + 1..])
+        .ok()?
+        .strip_suffix('\n')?;
+    (path.starts_with('/') && path.len() <= 4000 && !path.chars().any(char::is_control)).then(
+        || RemoteDirectory {
+            hostname: hostname.to_owned(),
+            path: path.to_owned(),
+        },
+    )
+}
+pub(super) fn directory_command(marker: &str) -> Option<String> {
     if marker.is_empty()
         || marker.len() > 64
         || !marker
@@ -63,7 +84,7 @@ fn directory_command(marker: &str) -> Option<String> {
         return None;
     }
     let script = format!(
-        r#"files=$(grep -azlxF -- 'LC_CSHELL_SESSION={marker}' /proc/[0-9]*/environ 2>/dev/null); if [ -z "$files" ] && [ -n "$SSH_CONNECTION" ]; then candidates=$(grep -azlxF -- "SSH_CONNECTION=$SSH_CONNECTION" /proc/[0-9]*/environ 2>/dev/null); tty=; for e in $candidates; do line=$(tr '\000' '\n' < "$e" 2>/dev/null | grep '^SSH_TTY=' | head -n 1); [ -n "$line" ] || continue; if [ -n "$tty" ] && [ "$tty" != "$line" ]; then exit 1; fi; tty=$line; files="$files $e"; done; fi; first=; for e in $files; do p=${{e%/environ}}; p=${{p#/proc/}}; case "$p" in ''|*[!0-9]*) continue;; esac; if [ -z "$first" ] || [ "$p" -lt "$first" ]; then first=$p; fi; done; [ -n "$first" ] || exit 1; printf '\000CSHELL_CWD\000'; readlink -- "/proc/$first/cwd""#
+        r#"files=$(grep -azlxF -- 'LC_CSHELL_SESSION={marker}' /proc/[0-9]*/environ 2>/dev/null); if [ -z "$files" ] && [ -n "$SSH_CONNECTION" ]; then candidates=$(grep -azlxF -- "SSH_CONNECTION=$SSH_CONNECTION" /proc/[0-9]*/environ 2>/dev/null); tty=; for e in $candidates; do line=$(tr '\000' '\n' < "$e" 2>/dev/null | grep '^SSH_TTY=' | head -n 1); [ -n "$line" ] || continue; if [ -n "$tty" ] && [ "$tty" != "$line" ]; then exit 1; fi; tty=$line; files="$files $e"; done; fi; first=; for e in $files; do p=${{e%/environ}}; p=${{p#/proc/}}; case "$p" in ''|*[!0-9]*) continue;; esac; if [ -z "$first" ] || [ "$p" -lt "$first" ]; then first=$p; fi; done; [ -n "$first" ] || exit 1; IFS= read -r node < /proc/sys/kernel/hostname || exit 1; printf '\000CSHELL_CWD\000%s\000' "$node"; readlink -- "/proc/$first/cwd""#
     );
     Some(format!("sh -c '{}'", script.replace('\'', "'\\''")))
 }
@@ -75,6 +96,20 @@ fn directory_command(marker: &str) -> Option<String> {
 )]
 mod tests {
     use super::*;
+    #[test]
+    fn directory_proof_requires_hostname_and_rejects_old_path_only_payload() {
+        let proof = decode_result(b"\0CSHELL_CWD\0server-a\0/home/alice\n").unwrap();
+        assert_eq!(proof.hostname, "server-a");
+        assert_eq!(proof.path, "/home/alice");
+        for bad in [
+            b"\0CSHELL_CWD\0/home/alice\n".as_slice(),
+            b"\0CSHELL_CWD\0\0/home/alice\n",
+            b"\0CSHELL_CWD\0host;id\0/home/alice\n",
+            b"\0CSHELL_CWD\0host\0relative\n",
+        ] {
+            assert!(decode_result(bad).is_none());
+        }
+    }
     #[test]
     fn cwd_probe_accepts_only_an_opaque_channel_marker() {
         for marker in ["", "a'; id", "a$(id)", "a/b", "a\n"] {
@@ -107,6 +142,9 @@ mod tests {
         let result = result.unwrap();
         assert!(result.status.success());
         let mut expected = b"\0CSHELL_CWD\0".to_vec();
+        let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        expected.extend_from_slice(hostname.trim_end().as_bytes());
+        expected.push(0);
         expected.extend_from_slice(root.path().to_str().unwrap().as_bytes());
         expected.push(b'\n');
         assert_eq!(result.stdout, expected);

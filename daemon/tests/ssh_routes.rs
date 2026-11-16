@@ -43,8 +43,12 @@ struct RoutedServer {
 }
 impl russh::server::Handler for RoutedServer {
     type Error = russh::Error;
-    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
-        if user == "cshell" && key == &self.accepted_key {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: russh::server::VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
+        if user == "cshell" && key.public_key == &self.accepted_key {
             self.authentications.fetch_add(1, Ordering::SeqCst);
             Ok(Auth::Accept)
         } else {
@@ -257,6 +261,7 @@ async fn create(service: &SessionIpcService, id: ProfileId) -> SessionCreateResp
     let result = exchange(
         service,
         envelope::Payload::SessionCreateRequest(SessionCreateRequest {
+            jump_override: None,
             connection_diagnostics: false,
             source_ssh_session_id: None,
             local_launch: None,
@@ -283,6 +288,7 @@ async fn create_observed(
                 request_id: 7,
                 payload: Some(envelope::Payload::SessionCreateRequest(
                     SessionCreateRequest {
+                        jump_override: None,
                         connection_diagnostics: true,
                         profile_id: Some(id.as_uuid().as_bytes().to_vec()),
                         rows: 24,

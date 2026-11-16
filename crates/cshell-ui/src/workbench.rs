@@ -291,6 +291,12 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                         action(
                             ui,
                             model,
+                            "服务器资源…",
+                            WorkbenchMenuCommand::ServerResources,
+                        );
+                        action(
+                            ui,
+                            model,
                             "主题 / 高亮 / 回放…",
                             WorkbenchMenuCommand::TerminalTools,
                         );
@@ -457,8 +463,14 @@ pub fn draw_workbench_chrome(ui: &mut egui::Ui, model: &mut WorkbenchViewModel) 
                 });
                 ui.menu_button("帮助", |ui| {
                     crate::form::menu_body(ui, |ui| {
+                        if ui.button("快捷键说明").clicked() {
+                            model.shortcut_help_open = true;
+                            model.about_open = false;
+                            ui.close();
+                        }
                         if ui.button("关于 CShell").clicked() {
                             model.about_open = true;
+                            model.shortcut_help_open = false;
                             ui.close();
                         }
                     })
@@ -1763,7 +1775,7 @@ fn pane_body(
         let (heading, detail, retry) = match state {
             SshConnectionState::Disconnected => (
                 "SSH 已断开",
-                "连接已关闭，以下为终端历史记录，输入不会发送到服务器。",
+                "输入文字或按 Enter 重新连接；本次输入不会发送到新终端。",
                 true,
             ),
             SshConnectionState::Disconnecting => {
@@ -2045,20 +2057,8 @@ fn draw_dialogs(context: &egui::Context, model: &mut WorkbenchViewModel) {
             model.terminate_error = None;
         }
     }
-    if model.about_open {
-        let response = egui::Modal::new(egui::Id::new("cshell-about-dialog")).show(context, |ui| {
-            ui.heading("关于 CShell");
-            ui.label("SSH 终端与会话管理");
-            ui.label(format!("版本 {} · 开发试用版", env!("CARGO_PKG_VERSION")));
-            ui.add_space(8.0);
-            if ui.button("关闭").clicked() {
-                ui.close();
-            }
-        });
-        if response.should_close() {
-            model.about_open = false;
-        }
-    }
+    crate::help_page::about(context, &mut model.about_open);
+    crate::shortcut_help::draw(context, &mut model.shortcut_help_open);
 }
 
 #[cfg(test)]

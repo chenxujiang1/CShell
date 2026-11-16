@@ -12,7 +12,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use zeroize::Zeroize;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 77;
+pub const PROTOCOL_MINOR: u32 = 82;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -850,6 +850,8 @@ pub struct SessionSummary {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SessionCreateRequest {
+    #[prost(message, optional, tag = "7")]
+    pub jump_override: Option<crate::JumpConnectionOverrideData>,
     #[prost(bool, tag = "6")]
     pub connection_diagnostics: bool,
     #[prost(uint32, tag = "1")]
@@ -902,6 +904,7 @@ pub enum SessionFailureCode {
     Unsupported = 11,
     ProxyRejected = 12,
     AuthenticationCancelled = 13,
+    JumpSelectionRequired = 14,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1968,7 +1971,7 @@ pub struct Envelope {
     pub deadline_unix_ms: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1985,6 +1988,10 @@ pub mod envelope {
 
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Payload {
+        #[prost(message, tag = "68")]
+        JumpCandidatesRequest(crate::JumpCandidatesRequest),
+        #[prost(message, tag = "69")]
+        JumpCandidatesResponse(crate::JumpCandidatesResponse),
         #[prost(message, tag = "67")]
         ConnectionDiagnosticUpdate(crate::ConnectionDiagnosticUpdate),
         #[prost(message, tag = "65")]
