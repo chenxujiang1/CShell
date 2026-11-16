@@ -1,9 +1,11 @@
 # SQLx SQLite compatibility patch
 
-Source: the unmodified `src/` and license files from the published
-`sqlx-sqlite 0.9.0` crate (MIT OR Apache-2.0).
+Source: `src/` and license files from the published `sqlx-sqlite 0.9.0`
+crate (MIT OR Apache-2.0). Three documentation-comment lines in
+`src/connection/deserialize.rs` have trailing whitespace removed; the
+source code and license terms are otherwise unchanged.
 
-The only code-package change is the normalized Cargo manifest's
+The functional package change is the normalized Cargo manifest's
 `libsqlite3-sys` constraint: `>=0.39.0, <0.40.0` instead of
 `>=0.30.1, <0.38.0`. SQLx upstream already supports `<0.40.0`:
 https://github.com/launchbadge/sqlx/blob/main/sqlx-sqlite/Cargo.toml

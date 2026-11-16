@@ -13,9 +13,82 @@ fn directory_plan_keeps_nested_unicode_and_empty_directories_without_following_l
     assert_eq!(result.bytes, 7);
     assert_eq!(result.files.len(), 1);
     assert_eq!(result.files[0].1, "上传目录/nested/文件.txt");
+    assert_eq!(
+        Path::new(&result.files[0].0),
+        folder.join("nested/文件.txt").canonicalize().unwrap()
+    );
     assert!(result.directories.contains(&"上传目录/nested/empty".into()));
     control.cancel();
     assert!(plan(&paths, &control).is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_alias_is_frozen_once_and_later_directory_links_are_rejected() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    let other = root.path().join("other");
+    for directory in [&real, &other] {
+        std::fs::create_dir_all(directory.join("selected")).unwrap();
+    }
+    std::fs::write(real.join("selected/value"), b"original").unwrap();
+    std::fs::write(other.join("selected/value"), b"replacement").unwrap();
+    let alias = root.path().join("alias");
+    symlink(&real, &alias).unwrap();
+    let result = plan(
+        &[
+            alias.join("selected").to_str().unwrap().into(),
+            real.join("selected").to_str().unwrap().into(),
+        ],
+        &TransferControl::default(),
+    )
+    .unwrap();
+    assert_eq!(result.files.len(), 1, "aliases must not duplicate a source");
+    let frozen = Path::new(&result.files[0].0);
+    assert_eq!(frozen, real.join("selected/value").canonicalize().unwrap());
+    std::fs::remove_file(&alias).unwrap();
+    symlink(&other, &alias).unwrap();
+    let mut source = crate::sftp_ipc::verified::LocalSource::open(frozen)
+        .await
+        .unwrap();
+    assert_eq!(source.read(0, 8).await.unwrap(), b"original");
+    drop(source);
+    std::fs::rename(real.join("selected"), real.join("held")).unwrap();
+    symlink(other.join("selected"), real.join("selected")).unwrap();
+    assert!(
+        crate::sftp_ipc::verified::LocalSource::open(frozen)
+            .await
+            .is_err(),
+        "a link replacing a frozen ancestor must still be refused"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_and_nested_links_remain_rejected() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("selected");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("value"), b"content").unwrap();
+    let alias = root.path().join("selected-link");
+    symlink(&folder, &alias).unwrap();
+    assert!(
+        plan(
+            &[alias.to_str().unwrap().into()],
+            &TransferControl::default()
+        )
+        .is_err()
+    );
+    symlink(folder.join("value"), folder.join("nested-link")).unwrap();
+    assert!(
+        plan(
+            &[folder.to_str().unwrap().into()],
+            &TransferControl::default()
+        )
+        .is_err()
+    );
 }
 #[test]
 fn duplicate_target_names_and_parent_traversal_are_rejected_before_writes() {

@@ -128,10 +128,23 @@ pub(super) fn plan(paths: &[String], control: &TransferControl) -> Result<Plan, 
             .and_then(|s| s.to_str())
             .filter(|s| component(s))
             .ok_or("文件或文件夹名称不能用于远端路径")?;
-        if !seen.insert(path.clone()) {
+        // Resolve the selected parent's spelling once (e.g. macOS /var ->
+        // /private/var), then freeze that real path in the plan. Do not resolve
+        // the selected leaf: links/reparse points still fail the checks below.
+        // Transfers retain LocalSource's strict ancestor checks, so replacing a
+        // frozen directory with a link cannot redirect an upload or retry.
+        let parent = native
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .ok_or("无法定位拖入内容的实际目录")?;
+        let native = parent.join(name);
+        if native.to_str().is_none_or(|path| path.len() > 4096) {
+            return Err("实际本地路径不是有效 Unicode 或超出长度限制".into());
+        }
+        if !seen.insert(native.clone()) {
             continue;
         }
-        pending.push((native.to_path_buf(), name.to_owned(), 0usize));
+        pending.push((native, name.to_owned(), 0usize));
     }
     let mut destinations = BTreeSet::new();
     while let Some((path, relative, depth)) = pending.pop() {
