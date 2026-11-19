@@ -2,9 +2,6 @@ name: macOS personal trial
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - codex/macos-trial
 
 permissions:
   contents: read

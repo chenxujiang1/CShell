@@ -2,8 +2,6 @@ name: ci
 
 on:
   push:
-    branches-ignore:
-      - codex/macos-trial
   pull_request:
   workflow_dispatch:
 

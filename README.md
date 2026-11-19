@@ -4,7 +4,7 @@ CShell 是使用 Rust 开发的原生 SSH、SFTP 与本地终端客户端，提�
 
 **本源码版本为 `1.1.0`，构建编号 `11002`。** 公开发布状态以 GitHub Releases 为准，验证及构建状态以对应提交的 CI 为准。
 
-1.1 分支为 `develop/1.1`。详见 [1.1 发布说明](docs/releases/v1.1.0.md)和[手动发布操作](docs/releases/v1.1.0-publish.md)。1.0 维护分支为 `release/1.0`，历史标签为 `v1.0.0`。
+主分支为 `main`。发布维护分支按系列命名，如 `release/1.0`、`release/1.1`；后续沿用 `release/1.2`、`release/2.0` 等命名。版本标签使用完整版本号，如 `v1.0.0`。详见 [1.1 发布说明](docs/releases/v1.1.0.md)和[手动发布操作](docs/releases/v1.1.0-publish.md)。
 
 ## 获取程序
 
