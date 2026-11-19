@@ -12,7 +12,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use zeroize::Zeroize;
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 82;
+pub const SFTP_UPLOAD_DIRECTORY_MINOR: u32 = 83;
+pub const PROTOCOL_MINOR: u32 = SFTP_UPLOAD_DIRECTORY_MINOR;
 pub const TERMINAL_FRAME_SCHEMA_VERSION: u32 = 2;
 pub const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = MAX_HYPERLINK_URI_BYTES;
 pub const MAX_LOG_PAGE_ROWS: usize = 4096;
@@ -846,6 +847,16 @@ pub struct SessionSummary {
     pub reconnecting: bool,
     #[prost(bool, tag = "8")]
     pub can_duplicate_ssh_channel: bool,
+    #[prost(message, optional, tag = "9")]
+    pub ssh_target: Option<SessionSshTarget>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SessionSshTarget {
+    #[prost(string, repeated, tag = "1")]
+    pub route: Vec<String>,
+    #[prost(fixed64, tag = "2")]
+    pub transport_generation: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]

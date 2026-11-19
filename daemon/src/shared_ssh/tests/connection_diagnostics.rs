@@ -271,6 +271,7 @@ async fn diagnostics_stream_before_mfa_completion_and_shared_sftp_never_reauthen
                 profile: f.profile,
                 source_ssh_session: Some(original),
                 discover_directory: true,
+                upload_task: None,
             })
             .unwrap(),
             ..Default::default()
@@ -346,6 +347,7 @@ async fn diagnostics_cancel_mfa_and_host_key_failure_keep_the_actual_stage() {
                     profile: f.profile,
                     source_ssh_session: None,
                     discover_directory: true,
+                    upload_task: None,
                 })
                 .unwrap(),
                 ..Default::default()

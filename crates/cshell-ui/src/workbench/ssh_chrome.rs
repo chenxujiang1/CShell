@@ -22,11 +22,15 @@ pub(super) fn tooltip(
     started: bool,
 ) -> String {
     let mut text = title.to_owned();
-    if let Some(profile) = profile(model, tab) {
+    if let Some(route) = model.ssh_routes.get(&tab) {
+        text.push_str(&format!(
+            "\nCShell 会话：{route}\n在 Shell 内手动 ssh 不会切换 CShell 的文件与资源目标。"
+        ));
+    } else if let Some(profile) = profile(model, tab) {
         text.push_str(&format!("\n配置目标：{}", profile.target));
-        if let Some(env) = model.profile_environments.get(&profile.id) {
-            text.push_str(&format!("\n环境：{}", env.label()));
-        }
+    }
+    if let Some(env) = profile(model, tab).and_then(|p| model.profile_environments.get(&p.id)) {
+        text.push_str(&format!("\n环境：{}", env.label()));
     }
     if let Some(state) = model.ssh_tab_states.get(&tab) {
         text.push_str(&format!("\nSSH {}", state.label()));
@@ -174,8 +178,11 @@ pub(super) fn identity(
                 .map(|t| t.title.as_str())
         })
         .unwrap_or("SSH");
-    let target = profile(model, tab)
-        .map(|p| format!("配置：{}", p.target))
+    let target = model
+        .ssh_routes
+        .get(&tab)
+        .map(|route| format!("SSH：{route}"))
+        .or_else(|| profile(model, tab).map(|p| format!("配置：{}", p.target)))
         .unwrap_or_else(|| "SSH 会话".into());
     let mut row = ui.new_child(
         egui::UiBuilder::new()
@@ -238,9 +245,7 @@ pub(super) fn identity(
                 .halign(Align::Min)
                 .truncate(),
         )
-        .on_hover_text(format!(
-            "连接配置：{name}\n{target}\n此处显示保存的连接目标。"
-        ));
+        .on_hover_text(tooltip(model, tab, name, state.is_some()));
     });
     egui::Rect::from_min_max(egui::pos2(rect.min.x, bar.max.y), rect.max)
 }

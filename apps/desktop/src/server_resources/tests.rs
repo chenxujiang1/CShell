@@ -37,6 +37,68 @@ fn automatic_refresh_has_a_minimum_and_hiding_stops_it() {
 }
 
 #[test]
+fn restoring_a_hidden_panel_shows_the_first_sample_without_enabling_refresh() {
+    let ctx = crate::ui_layout_gate::context();
+    let expected = sample();
+    let session = Some(expected.session);
+    let (_, config) = fixture_panel(expected.clone());
+    let (send, result) = mpsc::sync_channel(1);
+    let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
+    let mut panel = Panel {
+        open: true,
+        visible: true,
+        session,
+        worker: Some(Worker {
+            result,
+            cancel: Some(cancel),
+        }),
+        ..Default::default()
+    };
+    let size = egui::vec2(900.0, 700.0);
+    crate::ui_layout_gate::frame(&ctx, size, |ctx| {
+        panel.draw(ctx, Some(&config), session, None, false);
+    });
+    assert!(matches!(
+        cancelled.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(!panel.due(Instant::now()));
+    send.send(Ok(expected.clone())).unwrap();
+    assert!(panel.sample.is_none());
+
+    crate::ui_layout_gate::frame(&ctx, size, |ctx| {
+        panel.draw(ctx, Some(&config), session, None, true);
+    });
+    assert_eq!(panel.sample.as_ref(), Some(&expected));
+    assert!(panel.error.is_none());
+    assert!(panel.worker.is_none());
+    assert_eq!(panel.refresh_seconds, 0);
+    assert!(panel.next_due.is_none());
+    assert!(!panel.due(Instant::now() + Duration::from_secs(60)));
+}
+
+#[test]
+fn reconnecting_the_same_session_discards_the_previous_transport_sample() {
+    let old = sample();
+    let session = Some(old.session);
+    let (mut panel, _) = fixture_panel(old.clone());
+    panel.transport_generation = Some(old.transport_generation);
+    panel.bind_transport(session, Some(old.transport_generation + 1));
+    assert!(panel.sample.is_none());
+    assert!(panel.due(Instant::now()));
+
+    let (send, result) = mpsc::sync_channel(1);
+    send.send(Ok(old)).unwrap();
+    panel.worker = Some(Worker {
+        result,
+        cancel: None,
+    });
+    panel.receive(Instant::now());
+    assert!(panel.sample.is_none());
+    assert!(panel.error.is_some());
+}
+
+#[test]
 fn failed_or_stale_reply_disables_automatic_refresh() {
     let mut panel = Panel::default();
     panel.show();

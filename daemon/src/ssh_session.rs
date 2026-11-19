@@ -681,6 +681,25 @@ impl SshSession {
             title: self.title.clone(),
             running: self.running(),
             can_duplicate_ssh_channel: self.running() && self.active_transport().lease.running(),
+            ssh_target: self
+                .reuse_plan
+                .as_ref()
+                .map(|plan| cshell_ipc::SessionSshTarget {
+                    route: plan
+                        .jumps
+                        .iter()
+                        .chain(std::iter::once(&plan.target))
+                        .map(|record| {
+                            let host = &record.host;
+                            if host.contains(':') {
+                                format!("{}@[{host}]:{}", record.username, record.port)
+                            } else {
+                                format!("{}@{host}:{}", record.username, record.port)
+                            }
+                        })
+                        .collect(),
+                    transport_generation: self.transport_generation(),
+                }),
             reconnecting: self.reconnecting.load(Ordering::Acquire),
             generation: self.generation(),
             profile_id: self.profile_id.map(|id| id.as_uuid().as_bytes().to_vec()),

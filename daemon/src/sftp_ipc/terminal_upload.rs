@@ -213,6 +213,38 @@ pub(super) fn plan(paths: &[String], control: &TransferControl) -> Result<Plan, 
     Ok(result)
 }
 impl SftpIpcService {
+    pub(crate) fn completed_upload_directory(
+        &self,
+        task: SessionId,
+        source: &crate::SshSession,
+    ) -> Result<(String, u64), (SftpStatus, String)> {
+        let job = self
+            .uploads
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&task)
+            .cloned()
+            .ok_or((SftpStatus::Unavailable, "原上传记录已释放".into()))?;
+        let snapshot = job.view();
+        if snapshot.source != source.id()
+            || snapshot.state != State::Succeeded
+            || !sftp_remote_path(&snapshot.directory, true)
+        {
+            return Err((
+                SftpStatus::InvalidRequest,
+                "无法定位此会话的已完成上传".into(),
+            ));
+        }
+        if !source.running() || source.transport_generation() != job.source_epoch {
+            return Err((
+                SftpStatus::Unavailable,
+                "原上传的 SSH 连接已变化，请手动核对目标".into(),
+            ));
+        }
+        Ok((snapshot.directory, job.source_epoch))
+    }
+
     pub(super) async fn terminal_upload(
         &self,
         request: SftpRequest,

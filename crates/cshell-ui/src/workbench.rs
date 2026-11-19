@@ -1570,6 +1570,15 @@ fn tab_strip(
                         })
                         .unwrap_or_else(|| "终端".into());
                     let started = saved.as_ref().is_some_and(|t| t.session_id.is_some());
+                    let visible_title = if model
+                        .ssh_routes
+                        .get(tab)
+                        .is_some_and(|route| route.contains(" → "))
+                    {
+                        format!("↪ {title}")
+                    } else {
+                        title.clone()
+                    };
                     let selected = active == Some(*tab);
                     let ssh_state = model.ssh_tab_states.get(tab).copied();
                     let state_color = ssh_state.map_or(ACCENT, ssh_state_color);
@@ -1630,7 +1639,7 @@ fn tab_strip(
                                         .add_sized(
                                             [124.0, 28.0],
                                             egui::Button::new(
-                                                RichText::new(compact(&title, 19))
+                                                RichText::new(compact(&visible_title, 19))
                                                     .color(if selected { INK } else { MUTED }),
                                             )
                                             .frame(false)

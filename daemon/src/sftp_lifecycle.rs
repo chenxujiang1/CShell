@@ -337,6 +337,7 @@ impl SessionIpcService {
                             profile,
                             source_ssh_session: None,
                             discover_directory: false,
+                            upload_task: None,
                         }
                     })
                 })
@@ -359,6 +360,14 @@ impl SessionIpcService {
         reservation: &Reservation<'_>,
     ) -> Result<Option<cshell_application::SftpConnectionInfo>, (SftpStatus, String)> {
         let profile = options.profile;
+        if options.upload_task.is_some()
+            && (options.source_ssh_session.is_none() || options.discover_directory)
+        {
+            return Err((
+                SftpStatus::InvalidRequest,
+                "定位上传目录必须指定原 SSH 会话".into(),
+            ));
+        }
         if options.source_ssh_session.is_some() && options.jump_override.is_some() {
             return Err((
                 SftpStatus::InvalidRequest,
@@ -385,6 +394,10 @@ impl SessionIpcService {
                     "SFTP 配置与原 SSH 会话不匹配".into(),
                 ));
             }
+            let upload = options
+                .upload_task
+                .map(|task| self.sftp.completed_upload_directory(task, &source))
+                .transpose()?;
             let peer = source
                 .clipboard_trust()
                 .cloned()
@@ -410,7 +423,14 @@ impl SessionIpcService {
                         format!("无法在现有 SSH 连接打开 SFTP 渠道：{e}"),
                     )
                 })?;
-                let directory = if options.discover_directory {
+                let directory = if let Some((directory, _)) = &upload {
+                    Some(client.directory_path(directory, false).await.map_err(|_| {
+                        (
+                            SftpStatus::Failed,
+                            "原上传目录已不可访问，未改用其他目录".into(),
+                        )
+                    })?)
+                } else if options.discover_directory {
                     cshell_ssh::connection_progress::stage(
                         cshell_domain::ConnectionStage::InitialDirectory,
                     );
@@ -439,6 +459,14 @@ impl SessionIpcService {
                 })??;
             if !lease.running() {
                 return Err((SftpStatus::Unavailable, "SSH 共享连接已断开".into()));
+            }
+            if upload.is_some_and(|(_, epoch)| {
+                !source.running() || source.transport_generation() != epoch
+            }) {
+                return Err((
+                    SftpStatus::Unavailable,
+                    "原上传的 SSH 连接已变化，请手动核对目标".into(),
+                ));
             }
             let info = cshell_application::SftpConnectionInfo {
                 session,

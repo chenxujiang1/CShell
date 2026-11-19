@@ -134,7 +134,7 @@ async fn setup_native(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn native_b_and_independent_sftp_reuse_mfa_a_deduplicate_and_keep_channels_alive() {
-    let (f, _endpoint, b) = setup_native(JumpReusePolicy::OnlyExisting).await;
+    let (f, endpoint, b) = setup_native(JumpReusePolicy::OnlyExisting).await;
     let missing = open(&f, b, None).await;
     assert!(missing.session.is_none());
     f.counts(0);
@@ -158,6 +158,16 @@ async fn native_b_and_independent_sftp_reuse_mfa_a_deduplicate_and_keep_channels
         .session
         .unwrap_or_else(|| panic!("{}", connected.detail));
     let terminal = f.service.ssh_sessions.get(id(&connected)).unwrap();
+    let route = connected.ssh_target.unwrap().route;
+    assert_eq!(route.len(), 2);
+    assert_eq!(
+        Some(&route[0]),
+        source
+            .ssh_target
+            .as_ref()
+            .and_then(|target| target.route.last())
+    );
+    assert!(route[1].ends_with(&format!(":{}", endpoint.verifier.target().1)));
     echo(&a, "a-after-b").await;
     echo(&terminal, "b-through-a").await;
     f.counts(1);
@@ -170,6 +180,7 @@ async fn native_b_and_independent_sftp_reuse_mfa_a_deduplicate_and_keep_channels
                 profile: b,
                 source_ssh_session: None,
                 discover_directory: true,
+                upload_task: None,
                 jump_override: None,
             })
             .unwrap(),

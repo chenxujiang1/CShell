@@ -124,6 +124,7 @@ async fn command(f: &Fixture, op: SftpOperation, id: SessionId) -> SftpResponse 
                         profile: f.profile,
                         source_ssh_session: None,
                         discover_directory: true,
+                        upload_task: None,
                     })
                     .unwrap()
                 } else {

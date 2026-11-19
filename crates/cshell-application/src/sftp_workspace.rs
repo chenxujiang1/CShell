@@ -392,4 +392,6 @@ pub struct SftpConnectRequest {
     pub source_ssh_session: Option<cshell_domain::SessionId>,
     #[serde(default)]
     pub discover_directory: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_task: Option<cshell_domain::SessionId>,
 }

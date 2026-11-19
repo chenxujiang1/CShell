@@ -2140,6 +2140,7 @@ impl From<LocalSessionInfo> for SessionSummary {
     fn from(info: LocalSessionInfo) -> Self {
         Self {
             can_duplicate_ssh_channel: false,
+            ssh_target: None,
             reconnecting: false,
             session_id: info.session_id.as_uuid().as_bytes().to_vec(),
             title: info.title,

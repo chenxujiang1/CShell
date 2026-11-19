@@ -18,7 +18,23 @@ struct HostTab {
     profile: ProfileId,
     title: String,
     host: String,
+    upload: Option<UploadDirectory>,
     parked: Option<Content>,
+}
+#[derive(Clone, Copy)]
+pub(super) struct UploadDirectory {
+    pub(super) source: SessionId,
+    pub(super) task: SessionId,
+}
+
+impl SftpTabs {
+    pub(super) fn active_upload(&self) -> Option<(ProfileId, UploadDirectory)> {
+        let tab = self
+            .entries
+            .iter()
+            .find(|tab| Some(tab.id) == self.active)?;
+        Some((tab.profile, tab.upload?))
+    }
 }
 struct Content {
     connection: Option<DesktopSftpConnection>,
@@ -155,12 +171,39 @@ impl DesktopApp {
             .then_some(session)
     }
     pub(super) fn open_sftp_tab(&mut self, profile: ProfileId) {
-        if let Some(id) = self
-            .sftp_tabs
-            .entries
-            .iter()
-            .find(|t| t.profile == profile)
-            .map(|t| t.id)
+        self.open_sftp_tab_for(profile, None);
+    }
+
+    pub(crate) fn open_uploaded_directory(&mut self, source: SessionId, task: SessionId) {
+        let profile = self.workspace.sessions.iter().find_map(|(tab, id)| {
+            if *id != source {
+                return None;
+            }
+            self.workspace
+                .document
+                .bindings
+                .iter()
+                .find(|binding| binding.tab_id == *tab)?
+                .profile_id
+        });
+        let Some(profile) =
+            profile.filter(|_| self.view_model.reusable_ssh_sessions.contains(&source))
+        else {
+            self.view_model.input_warning =
+                Some("原上传会话已不可用，请手动核对服务器和目录。".into());
+            return;
+        };
+        self.open_sftp_tab_for(profile, Some(UploadDirectory { source, task }));
+    }
+
+    fn open_sftp_tab_for(&mut self, profile: ProfileId, upload: Option<UploadDirectory>) {
+        if upload.is_none()
+            && let Some(id) = self
+                .sftp_tabs
+                .entries
+                .iter()
+                .find(|t| t.profile == profile && t.upload.is_none())
+                .map(|t| t.id)
         {
             self.select_sftp_tab(id);
             if let Some(view) = self.sftp.as_ref().map(DesktopSftpConnection::view)
@@ -222,12 +265,21 @@ impl DesktopApp {
             }
         }
         connection.share_local_browser();
-        let command = sftp_connection::lifecycle::connect_shared(
+        let mut command = sftp_connection::lifecycle::connect_shared(
             profile,
             None,
-            self.sftp_ssh_source(profile),
+            upload.map_or_else(
+                || self.sftp_ssh_source(profile),
+                |upload| Some(upload.source),
+            ),
         );
-        let session = if let SftpClientCommand::ConnectProfile { session, .. } = &command {
+        let session = if let SftpClientCommand::ConnectProfile {
+            session,
+            upload_task,
+            ..
+        } = &mut command
+        {
+            *upload_task = upload.map(|upload| upload.task);
             *session
         } else {
             unreachable!()
@@ -257,14 +309,27 @@ impl DesktopApp {
                 (title, host)
             })
             .unwrap_or_else(|| ("服务器".into(), String::new()));
-        self.install_sftp_tab(profile, title, host, connection, session);
+        self.install_sftp_tab(
+            HostTab {
+                id: 0,
+                profile,
+                title: if upload.is_some() {
+                    format!("{title} · 上传目录")
+                } else {
+                    title
+                },
+                host,
+                upload,
+                parked: None,
+            },
+            connection,
+            session,
+        );
         self.focus_sftp();
     }
     fn install_sftp_tab(
         &mut self,
-        profile: ProfileId,
-        title: String,
-        host: String,
+        mut tab: HostTab,
         connection: DesktopSftpConnection,
         session: SessionId,
     ) {
@@ -283,13 +348,8 @@ impl DesktopApp {
         }
         self.sftp_tabs.next += 1;
         let id = self.sftp_tabs.next;
-        self.sftp_tabs.entries.push(HostTab {
-            id,
-            profile,
-            title,
-            host,
-            parked: None,
-        });
+        tab.id = id;
+        self.sftp_tabs.entries.push(tab);
         self.sftp_tabs.active = Some(id);
         self.sftp = Some(connection);
         self.sftp_session = Some(session);

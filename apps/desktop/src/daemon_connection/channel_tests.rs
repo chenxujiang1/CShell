@@ -33,6 +33,7 @@ async fn shared_ssh_create_sends_only_source_and_rejects_original_or_unverified_
                                 title: "SSH host".into(),
                                 running: true,
                                 can_duplicate_ssh_channel: true,
+                                ssh_target: None,
                                 ..Default::default()
                             }),
                             ..Default::default()

@@ -410,6 +410,10 @@ async fn managed_peer_real_openssh_terminal_upload_metrics_and_foreign_directory
 
         let b_session =
             registry.insert(session(&b_plan, &known, &vault, &root.path().join("b.csjr")).await);
+        let route = b_session.summary().ssh_target.unwrap().route;
+        assert_eq!(route.len(), 2);
+        assert!(route[0].ends_with(&format!(":{}", fixture.a_port)));
+        assert!(route[1].ends_with(&format!(":{}", fixture.b_port)));
         assert_eq!(
             b_session.clipboard_trust().unwrap().host.port,
             fixture.b_port

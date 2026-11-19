@@ -187,6 +187,7 @@ struct DesktopApp {
     renderer_recovering: bool,
     renderer_needs_font_upload: bool,
     view_model: WorkbenchViewModel,
+    ssh_targets: std::collections::BTreeMap<SessionId, cshell_ipc::SessionSshTarget>,
     daemon: Option<DesktopDaemonConnection>,
     profiles: Option<DesktopProfileConnection>,
     profile_panel: ProfilePanel,
@@ -704,8 +705,25 @@ impl DesktopApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let targets: std::collections::BTreeMap<_, _> = view
+            .sessions
+            .iter()
+            .flatten()
+            .filter_map(|summary| {
+                let id = SessionId::from_bytes(summary.session_id.as_slice().try_into().ok()?);
+                opened
+                    .contains(&id)
+                    .then_some((id, summary.ssh_target.as_ref()?.clone()))
+            })
+            .collect();
         let changed = self.view_model.sessions != sessions
-            || self.view_model.reusable_ssh_sessions != reusable;
+            || self.view_model.reusable_ssh_sessions != reusable
+            || self.ssh_targets != targets;
+        drop(opened);
+        if self.ssh_targets != targets {
+            self.ssh_targets = targets;
+            self.refresh_ssh_route_labels();
+        }
         self.view_model.reusable_ssh_sessions = reusable;
         self.view_model.sessions = sessions;
         changed
@@ -934,6 +952,7 @@ impl DesktopApp {
     }
 
     fn update_workspace_tab_models(&mut self) {
+        self.refresh_ssh_route_labels();
         self.view_model.workspace_document = Some(self.workspace.document.clone());
         self.view_model.workspace_window_id = Some(self.workspace.window_id);
         let focused = self.workspace.focused_group();
@@ -961,6 +980,26 @@ impl DesktopApp {
             })
             .collect();
         self.view_model.selected_tab = self.workspace.active();
+    }
+
+    fn refresh_ssh_route_labels(&mut self) {
+        self.view_model.ssh_routes = self
+            .workspace
+            .sessions
+            .iter()
+            .filter_map(|(tab, session)| {
+                let route = &self.ssh_targets.get(session)?.route;
+                (!route.is_empty()).then(|| (*tab, route.join(" → ")))
+            })
+            .collect();
+    }
+
+    fn ssh_route_for_tab(&self, session: SessionId) -> Option<&str> {
+        let tab = self.current_workspace_tab?;
+        if self.workspace.sessions.get(&tab) != Some(&session) {
+            return None;
+        }
+        self.view_model.ssh_routes.get(&tab).map(String::as_str)
     }
 
     fn initialize_workspace(&mut self, view: &workspace_connection::WorkspaceView) {
@@ -2915,17 +2954,18 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     self.draw_connection_diagnostics(ui);
                     let resource_session = sftp_session
                         .filter(|id| self.view_model.reusable_ssh_sessions.contains(id));
-                    let resource_target = self
+                    let resource_target = resource_session.and_then(|id| self.ssh_targets.get(&id));
+                    self.resources.bind_transport(
+                        resource_session,
+                        resource_target.map(|target| target.transport_generation),
+                    );
+                    let resource_label = self
                         .resources
                         .open
                         .then(|| {
-                            self.active_ssh_profile().and_then(|(_, profile)| {
-                                self.view_model
-                                    .saved_ssh_profiles
-                                    .iter()
-                                    .find(|p| p.id == profile)
-                                    .map(|p| format!("配置：{} · {}", p.name, p.target))
-                            })
+                            resource_session
+                                .and_then(|id| self.ssh_route_for_tab(id))
+                                .map(str::to_owned)
                         })
                         .flatten();
                     return_auxiliary_focus |= self.resources.draw(
@@ -2934,7 +2974,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             .as_ref()
                             .or(self.workspace_config.as_ref()),
                         resource_session,
-                        resource_target.as_deref(),
+                        resource_label.as_deref(),
                         !self.resource_occluded && window.is_minimized() != Some(true),
                     );
                     self.terminal_mouse.zoom = self.view_model.terminal_zoom_pixels;
@@ -3156,10 +3196,15 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                                 .options
                                 .sftp_verification
                         });
+                    let drop_route = drop_source.and_then(|id| {
+                        let tab = self.current_workspace_tab?;
+                        (self.workspace.sessions.get(&tab) == Some(&id)).then_some(())?;
+                        self.view_model.ssh_routes.get(&tab).map(String::as_str)
+                    });
                     self.terminal_upload.drop_target(
                         ui,
                         drop_rect,
-                        drop_source,
+                        drop_source.map(|id| (id, drop_route)),
                         self.daemon_config
                             .as_ref()
                             .or(self.workspace_config.as_ref()),
@@ -3167,6 +3212,9 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         verification,
                     );
                     self.terminal_upload.draw(ui.ctx());
+                    if let Some((source, task)) = self.terminal_upload.take_open_directory() {
+                        self.open_uploaded_directory(source, task);
+                    }
                     if self.key_picker_focus_deferred
                         && (!self.profile_panel.owns_native_key_picker()
                             || !managed_keys_panel::picker_is_foreground())
@@ -3667,7 +3715,7 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::TerminalUploads) => {
-                        self.terminal_upload.open = true;
+                        self.terminal_upload.show();
                         window.request_redraw();
                     }
                     Some(WorkbenchMenuCommand::ZmodemTransfers) => {
@@ -5897,6 +5945,14 @@ mod tests {
                         reconnecting: false,
                         session_id: id.as_uuid().as_bytes().to_vec(),
                         title: format!("{id:?}"),
+                        ssh_target: Some(cshell_ipc::SessionSshTarget {
+                            route: if id == current {
+                                vec!["gateway".into(), "target".into()]
+                            } else {
+                                vec!["other".into()]
+                            },
+                            transport_generation: 0,
+                        }),
                         ..Default::default()
                     })
                     .collect(),
@@ -5908,7 +5964,11 @@ mod tests {
         assert!(primary.view_model.sessions.is_empty());
         let tab = primary.workspace.add(None, "Current".into()).unwrap();
         primary.workspace.sessions.insert(tab, current);
+        primary.current_workspace_tab = Some(tab);
         primary.sync_opened_sessions(&view);
+        assert_eq!(primary.ssh_route_for_tab(current), Some("gateway → target"));
+        assert_eq!(primary.ssh_route_for_tab(peer), None);
+        assert!(!primary.ssh_targets.contains_key(&old));
         assert_eq!(
             primary
                 .view_model

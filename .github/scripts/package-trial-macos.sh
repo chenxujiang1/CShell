@@ -75,7 +75,7 @@ with open(sys.argv[1], "wb") as output:
 PY
 plutil -lint "$app/Contents/Info.plist"
 cat > "$app/Contents/Resources/README-first-run.txt" <<EOF
-CShell 早期测试版 — macOS $2
+CShell — macOS $2
 软件版本：$version
 构建编号：$build_number
 源码版本：$source_label

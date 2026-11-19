@@ -2826,6 +2826,7 @@ mod tests {
             connected: true,
             sessions: Some(vec![SessionSummary {
                 can_duplicate_ssh_channel: false,
+                ssh_target: None,
                 reconnecting: false,
                 session_id: retained.as_uuid().as_bytes().to_vec(),
                 ..Default::default()
@@ -2940,6 +2941,7 @@ mod tests {
                                 SessionListResponse {
                                     sessions: vec![SessionSummary {
                                         can_duplicate_ssh_channel: false,
+                                        ssh_target: None,
                                         reconnecting: false,
                                         session_id: live.as_uuid().as_bytes().to_vec(),
                                         title: "Retained session".into(),
@@ -3011,6 +3013,7 @@ mod tests {
         let later = SessionId::new();
         let summary = |id: SessionId| SessionSummary {
             can_duplicate_ssh_channel: false,
+            ssh_target: None,
             reconnecting: false,
             session_id: id.as_uuid().as_bytes().to_vec(),
             title: "Test session".into(),
@@ -3185,6 +3188,7 @@ mod tests {
             server_handshake(&mut stream, &policy).await.unwrap();
             let summary = SessionSummary {
                 can_duplicate_ssh_channel: false,
+                ssh_target: None,
                 reconnecting: false,
                 session_id: session.as_uuid().as_bytes().to_vec(),
                 profile_id: Some(profile.as_uuid().as_bytes().to_vec()),
@@ -3425,6 +3429,7 @@ mod tests {
             .unwrap()
             .push(SessionSummary {
                 can_duplicate_ssh_channel: false,
+                ssh_target: None,
                 reconnecting: false,
                 session_id: stale.as_uuid().as_bytes().to_vec(),
                 ..Default::default()
@@ -3561,6 +3566,7 @@ mod tests {
                                             envelope::Payload::SessionListResponse(SessionListResponse {
                                                 sessions: vec![SessionSummary {
                                                     can_duplicate_ssh_channel: false,
+                                                    ssh_target: None,
                                                     reconnecting: false,
                                                     session_id: target.as_uuid().as_bytes().to_vec(),
                                                     running: true,
@@ -4568,6 +4574,7 @@ mod tests {
             .unwrap();
             let summary = |running| SessionSummary {
                 can_duplicate_ssh_channel: false,
+                ssh_target: None,
                 reconnecting: false,
                 session_id: session_id.as_uuid().as_bytes().to_vec(),
                 profile_id: Some(profile_id.as_uuid().as_bytes().to_vec()),
@@ -5002,6 +5009,7 @@ mod tests {
                         SessionCreateResponse {
                             session: Some(SessionSummary {
                                 can_duplicate_ssh_channel: false,
+                                ssh_target: None,
                                 reconnecting: false,
                                 session_id: session_id.as_uuid().as_bytes().to_vec(),
                                 title: "Local shell".to_owned(),
@@ -5457,6 +5465,7 @@ mod tests {
                         SessionCreateResponse {
                             session: Some(SessionSummary {
                                 can_duplicate_ssh_channel: false,
+                                ssh_target: None,
                                 reconnecting: false,
                                 session_id: session_id.as_uuid().as_bytes().to_vec(),
                                 title: "saved SSH".into(),
@@ -5504,6 +5513,7 @@ mod tests {
                         SessionListResponse {
                             sessions: vec![SessionSummary {
                                 can_duplicate_ssh_channel: false,
+                                ssh_target: None,
                                 reconnecting: false,
                                 session_id: unrelated.as_uuid().as_bytes().to_vec(),
                                 title: "unrelated".into(),
@@ -5540,6 +5550,7 @@ mod tests {
             &cshell_ipc::SessionListResponse {
                 sessions: vec![cshell_ipc::SessionSummary {
                     can_duplicate_ssh_channel: false,
+                    ssh_target: None,
                     reconnecting: false,
                     session_id: id.as_uuid().as_bytes().to_vec(),
                     running: true,

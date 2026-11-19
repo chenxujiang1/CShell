@@ -86,7 +86,7 @@ try {
         }
 
         $instructions = @(
-            'CShell 早期测试版 — Windows x64'
+            'CShell — Windows x64'
             "软件版本：$version"
             "构建编号：$($versionInfo.build_number)"
             "源码版本：$commit"

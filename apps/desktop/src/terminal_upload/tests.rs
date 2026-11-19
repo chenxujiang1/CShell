@@ -214,9 +214,11 @@ fn upload_progress_and_failure_fit_small_windows_with_real_fonts() {
             id,
             Row {
                 source,
+                route: None,
                 snapshot: Some(snapshot),
                 retry_plan: None,
                 retry_request: RetryRequestState::Idle,
+                start_rejected: false,
                 error: None,
                 finished_at: Some(Instant::now()),
                 auto_close: true,
@@ -259,6 +261,7 @@ fn success_auto_hides_but_failure_cancel_and_opt_out_remain_visible() {
             id,
             Row {
                 source,
+                route: None,
                 snapshot: Some(Snapshot {
                     id,
                     source,
@@ -276,6 +279,7 @@ fn success_auto_hides_but_failure_cancel_and_opt_out_remain_visible() {
                 }),
                 retry_plan: None,
                 retry_request: RetryRequestState::Idle,
+                start_rejected: false,
                 error: None,
                 finished_at: Some(Instant::now() - Duration::from_secs(3)),
                 auto_close,
@@ -314,9 +318,11 @@ fn failure_reopens_once_after_user_hides_progress() {
         id,
         Row {
             source,
+            route: None,
             snapshot: None,
             retry_plan: None,
             retry_request: RetryRequestState::Idle,
+            start_rejected: false,
             error: Some("无法确认上传结果".into()),
             finished_at: None,
             auto_close: true,
@@ -352,6 +358,7 @@ fn task(state: Option<State>, protocol: Protocol) -> (SessionId, Row) {
         id,
         Row {
             source,
+            route: None,
             snapshot: state.map(|state| Snapshot {
                 id,
                 source,
@@ -369,6 +376,7 @@ fn task(state: Option<State>, protocol: Protocol) -> (SessionId, Row) {
             }),
             retry_plan: None,
             retry_request: RetryRequestState::Idle,
+            start_rejected: false,
             error: None,
             finished_at: state.filter(|s| s.finished()).map(|_| Instant::now()),
             auto_close: false,
@@ -473,6 +481,96 @@ fn finished_upload_has_a_working_remove_action_without_remote_operations() {
             assert!(!panel.open, "a removed failure must not reopen the window");
         }
     }
+}
+
+#[test]
+fn rejected_start_can_be_removed_without_sending_a_daemon_request() {
+    let (id, mut row) = task(None, Protocol::Sftp);
+    let source = row.source;
+    row.pending = true;
+    row.apply_response(
+        id,
+        Some(Op::TerminalUploadStart),
+        Ok(cshell_ipc::SftpResponse::with_status(
+            SftpStatus::Unavailable,
+            "请先连接目标 SSH 会话",
+        )),
+    );
+    assert!(row.snapshot.is_none());
+    assert_eq!(row.error.as_deref(), Some("请先连接目标 SSH 会话"));
+    let (mut panel, mut receiver) = panel_with_task(id, row);
+    panel.control(Op::TerminalUploadCancel, source, id);
+    panel.control(Op::TerminalUploadGet, source, id);
+    let ctx = crate::ui_layout_gate::context();
+    let pos = task_button(&ctx, &mut panel, "移除任务");
+    click_task_button(&ctx, &mut panel, pos);
+    assert!(
+        panel
+            .connection
+            .as_ref()
+            .unwrap()
+            .shared
+            .lock()
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(!panel.open);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn unknown_start_cannot_be_removed_and_can_still_query_the_original_task() {
+    for reply in [
+        Err("请求超时".into()),
+        Ok(cshell_ipc::SftpResponse::default()),
+        Ok(cshell_ipc::SftpResponse::with_status(
+            SftpStatus::Conflict,
+            "上传请求已经提交",
+        )),
+    ] {
+        let (id, mut row) = task(None, Protocol::Sftp);
+        let source = row.source;
+        row.apply_response(id, Some(Op::TerminalUploadStart), reply);
+        assert!(row.error.is_some());
+        row.apply_response(
+            id,
+            Some(Op::TerminalUploadGet),
+            Ok(cshell_ipc::SftpResponse::with_status(
+                SftpStatus::Unavailable,
+                "上传任务不存在或不属于此 SSH 会话",
+            )),
+        );
+        let (mut panel, mut receiver) = panel_with_task(id, row);
+        panel.remove_finished(source, id);
+        let ctx = crate::ui_layout_gate::context();
+        let pos = task_button(&ctx, &mut panel, "刷新任务状态");
+        click_task_button(&ctx, &mut panel, pos);
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(request.operation, Op::TerminalUploadGet as i32);
+        assert_eq!(request.transfer_id, id.as_uuid().as_bytes());
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[test]
+fn reopening_uploads_exposes_the_original_directory_action_for_a_completed_task() {
+    let (id, mut row) = task(Some(State::Succeeded), Protocol::Sftp);
+    let source = row.source;
+    row.auto_close = true;
+    row.finished_at = Some(Instant::now() - Duration::from_secs(3));
+    row.route = Some("gateway → target".into());
+    let (mut panel, mut receiver) = panel_with_task(id, row);
+    let ctx = crate::ui_layout_gate::context();
+    crate::ui_layout_gate::frame(&ctx, egui::vec2(720.0, 480.0), |ctx| panel.draw(ctx));
+    assert!(!panel.open);
+
+    panel.show();
+    let pos = task_button(&ctx, &mut panel, "在 SFTP 中打开目录");
+    click_task_button(&ctx, &mut panel, pos);
+    assert_eq!(panel.take_open_directory(), Some((source, id)));
+    assert!(panel.take_open_directory().is_none());
+    assert!(receiver.try_recv().is_err());
 }
 
 #[test]
@@ -587,7 +685,11 @@ fn native_drop_submits_once_to_the_target_and_rejects_local_modal_or_outside_dro
             panel.drop_target(
                 ui,
                 rect,
-                if case == 1 { None } else { Some(source) },
+                if case == 1 {
+                    None
+                } else {
+                    Some((source, Some("gateway → target")))
+                },
                 Some(&config),
                 case == 2,
                 None,

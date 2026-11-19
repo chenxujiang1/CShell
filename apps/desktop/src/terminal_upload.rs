@@ -15,9 +15,11 @@ use std::{
 #[derive(Clone)]
 struct Row {
     source: SessionId,
+    route: Option<String>,
     snapshot: Option<Snapshot>,
     retry_plan: Option<RetryPlan>,
     retry_request: RetryRequestState,
+    start_rejected: bool,
     error: Option<String>,
     finished_at: Option<Instant>,
     auto_close: bool,
@@ -31,13 +33,59 @@ enum RetryRequestState {
     Unknown,
 }
 impl Row {
+    fn finished(&self) -> bool {
+        self.start_rejected || self.snapshot.as_ref().is_some_and(|s| s.state.finished())
+    }
+
+    fn can_remove(&self) -> bool {
+        self.finished() && !self.pending && self.retry_request == RetryRequestState::Idle
+    }
+
+    fn apply_response(
+        &mut self,
+        id: SessionId,
+        operation: Option<Op>,
+        result: Result<cshell_ipc::SftpResponse, String>,
+    ) {
+        self.pending = false;
+        let status = result
+            .as_ref()
+            .ok()
+            .and_then(|reply| SftpStatus::try_from(reply.status).ok());
+        let parsed = result.and_then(|reply| {
+            if reply.status != SftpStatus::Ok as i32 {
+                return Err(reply.detail);
+            }
+            self.accept(
+                id,
+                operation == Some(Op::TerminalUploadRetryInspect),
+                &reply.document_json,
+            )
+        });
+        self.record_response(operation, status, parsed.is_ok());
+        if let Err(error) = parsed {
+            self.error = Some(error);
+        }
+    }
+
     fn record_response(
         &mut self,
         operation: Option<Op>,
         status: Option<SftpStatus>,
         validated: bool,
     ) {
-        if operation == Some(Op::TerminalUploadRetry) {
+        if operation == Some(Op::TerminalUploadStart) {
+            self.start_rejected = self.snapshot.is_none()
+                && matches!(
+                    status,
+                    Some(
+                        SftpStatus::InvalidRequest
+                            | SftpStatus::Unavailable
+                            | SftpStatus::CapacityReached
+                            | SftpStatus::Unsupported
+                    )
+                );
+        } else if operation == Some(Op::TerminalUploadRetry) {
             // Typed rejections precede admission; transport/format errors leave
             // admission unknown. An older poll cannot release an enqueued retry.
             self.retry_request = if validated || status.is_some_and(|s| s != SftpStatus::Ok) {
@@ -79,6 +127,7 @@ impl Row {
                 self.finished_at = None;
             }
             self.snapshot = Some(snapshot);
+            self.start_rejected = false;
             self.retry_plan = None;
         }
         self.error = None;
@@ -117,23 +166,15 @@ impl Connection {
                     let commands=tokio::select! {
                         _=stopped.changed()=>break,
                         request=receiver.recv()=>match request{Some(r)=>vec![r],None=>break},
-                        _=interval.tick()=>{let view=work.lock().unwrap_or_else(std::sync::PoisonError::into_inner);view.rows.iter().filter(|(_,r)|r.snapshot.as_ref().is_none_or(|s|!s.state.finished()) && !(r.snapshot.is_none() && r.error.is_some())).map(|(id,row)|query(Op::TerminalUploadGet,row.source,*id)).collect::<Vec<_>>()},
+                        _=interval.tick()=>{let view=work.lock().unwrap_or_else(std::sync::PoisonError::into_inner);view.rows.iter().filter(|(_,r)|!r.finished() && !(r.snapshot.is_none() && r.error.is_some())).map(|(id,row)|query(Op::TerminalUploadGet,row.source,*id)).collect::<Vec<_>>()},
                     };
                     for request in commands {
                         let Ok(id)=<[u8;16]>::try_from(request.transfer_id.as_slice()).map(SessionId::from_bytes) else{continue;};
                         let operation = Op::try_from(request.operation).ok();
-                        let inspection = operation == Some(Op::TerminalUploadRetryInspect);
                         let result=tokio::select!{_=stopped.changed()=>return,result=crate::sftp_connection::send(&config,request)=>result};
-                        let status = result.as_ref().ok().and_then(|r| SftpStatus::try_from(r.status).ok());
                         let mut view=work.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Some(row)=view.rows.get_mut(&id){
-                            row.pending=false;
-                            let parsed=result.and_then(|reply| {
-                                if reply.status != SftpStatus::Ok as i32 { return Err(reply.detail); }
-                                row.accept(id, inspection, &reply.document_json)
-                            });
-                            row.record_response(operation, status, parsed.is_ok());
-                            if let Err(error)=parsed { row.error=Some(error); }
+                            row.apply_response(id, operation, result);
                             view.generation=view.generation.wrapping_add(1);
                         }
                     }
@@ -164,9 +205,20 @@ pub(crate) struct Panel {
     connection: Option<Connection>,
     generation: u64,
     pub open: bool,
+    show_completed: bool,
+    open_directory: Option<(SessionId, SessionId)>,
     error: Option<String>,
 }
 impl Panel {
+    pub fn show(&mut self) {
+        self.show_completed = true;
+        self.open = true;
+    }
+
+    pub fn take_open_directory(&mut self) -> Option<(SessionId, SessionId)> {
+        self.open_directory.take()
+    }
+
     pub fn poll(&mut self) -> bool {
         let generation = self.connection.as_ref().map_or(0, |c| {
             c.shared
@@ -210,11 +262,12 @@ impl Panel {
     fn upload(
         &mut self,
         config: &DesktopConnectionConfig,
-        source: SessionId,
+        target: (SessionId, Option<&str>),
         paths: Vec<String>,
         settings: zmodem_settings::Settings,
         verification: cshell_domain::SftpVerification,
     ) {
+        let (source, route) = target;
         if self.connection.is_none() {
             match Connection::start(config.clone()) {
                 Ok(c) => self.connection = Some(c),
@@ -251,10 +304,7 @@ impl Panel {
             if view
                 .rows
                 .values()
-                .filter(|r| {
-                    r.snapshot.as_ref().is_none_or(|s| !s.state.finished())
-                        && !(r.snapshot.is_none() && r.error.is_some())
-                })
+                .filter(|r| !r.finished() && !(r.snapshot.is_none() && r.error.is_some()))
                 .count()
                 >= 4
             {
@@ -262,16 +312,17 @@ impl Panel {
                 return;
             }
             if view.rows.len() >= 32 {
-                view.rows
-                    .retain(|_, r| r.snapshot.as_ref().is_none_or(|s| !s.state.finished()));
+                view.rows.retain(|_, r| !r.can_remove());
             }
             view.rows.insert(
                 id,
                 Row {
                     source,
+                    route: route.map(str::to_owned),
                     snapshot: None,
                     retry_plan: None,
                     retry_request: RetryRequestState::Idle,
+                    start_rejected: false,
                     error: None,
                     finished_at: None,
                     auto_close: settings.close_successful_upload,
@@ -294,7 +345,7 @@ impl Panel {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
-        source: Option<SessionId>,
+        target: Option<(SessionId, Option<&str>)>,
         config: Option<&DesktopConnectionConfig>,
         blocked: bool,
         verification: Option<cshell_domain::SftpVerification>,
@@ -305,7 +356,7 @@ impl Panel {
             .is_some_and(|p| rect.contains(p) && context.layer_id_at(p) == Some(ui.layer_id()));
         let hovering = context.input(|i| !i.raw.hovered_files.is_empty());
         if hovering && over {
-            let allowed = source.is_some() && config.is_some() && !blocked;
+            let allowed = target.is_some() && config.is_some() && !blocked;
             let color = if allowed {
                 egui::Color32::from_rgb(95, 185, 220)
             } else {
@@ -326,21 +377,23 @@ impl Panel {
                 Protocol::Sftp => "SFTP",
                 Protocol::Zmodem => "ZMODEM · 文件夹使用 SFTP",
             };
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
+            let painter = ui.painter().with_clip_rect(rect);
+            let galley = painter.layout(
                 if allowed {
-                    format!("释放上传到此标签绑定的 SSH 服务器\n终端中再次 ssh 不会切换上传目标\n{protocol} · 同名文件不覆盖")
+                    let route = target.and_then(|(_, route)| route).unwrap_or("当前 CShell 会话");
+                    format!("释放上传到：{route}\n在 Shell 内手动 ssh 不会切换上传目标\n{protocol} · 同名文件不覆盖")
                 } else {
                     "请先连接 SSH，并关闭正在操作的对话框".into()
                 },
                 egui::FontId::proportional(18.0),
                 color,
+                (rect.width() - 24.0).max(1.0),
             );
+            painter.galley(rect.center() - galley.size() / 2.0, galley, color);
         }
         let dropped = context.input(|i| i.raw.dropped_files.clone());
         if over && !dropped.is_empty() {
-            if blocked || source.is_none() || config.is_none() {
+            if blocked || target.is_none() || config.is_none() {
                 self.error = Some("当前不是可上传的 SSH 终端，文件未发送".into());
                 self.open = true;
                 return;
@@ -364,8 +417,8 @@ impl Panel {
                     let settings = zmodem_settings::load();
                     let mode = verification.unwrap_or(settings.sftp_verification);
                     self.error = None;
-                    if let (Some(config), Some(source)) = (config, source) {
-                        self.upload(config, source, paths, settings, mode);
+                    if let (Some(config), Some(target)) = (config, target) {
+                        self.upload(config, target, paths, settings, mode);
                     }
                 }
                 Err(e) => {
@@ -390,13 +443,14 @@ impl Panel {
         let visible: Vec<_> = rows
             .iter()
             .filter(|(_, r)| {
-                !(r.auto_close
-                    && r.error.is_none()
-                    && r.snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.state == State::Succeeded)
-                    && r.finished_at
-                        .is_some_and(|at| at.elapsed() > Duration::from_millis(1500)))
+                self.show_completed
+                    || !(r.auto_close
+                        && r.error.is_none()
+                        && r.snapshot
+                            .as_ref()
+                            .is_some_and(|s| s.state == State::Succeeded)
+                        && r.finished_at
+                            .is_some_and(|at| at.elapsed() > Duration::from_millis(1500)))
             })
             .collect();
         if !rows.is_empty() && visible.is_empty() && self.error.is_none() {
@@ -424,21 +478,49 @@ impl Panel {
                                         ui.group(|ui| {
                                             ui.strong("确认重试到原目标");
                                             ui.label(&plan.host);
-                                            ui.add(egui::Label::new(egui::RichText::new(&plan.directory).monospace()).wrap());
-                                            ui.label(format!("已完成 {} 个 · 待重试 {} 个", plan.completed_files, plan.retry_files));
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&plan.directory)
+                                                        .monospace(),
+                                                )
+                                                .wrap(),
+                                            );
+                                            ui.label(format!(
+                                                "已完成 {} 个 · 待重试 {} 个",
+                                                plan.completed_files, plan.retry_files
+                                            ));
                                             ui.label(&plan.detail);
                                             ui.horizontal_wrapped(|ui| {
-                                                if ui.add_enabled(plan.can_retry && !row.pending && row.retry_request == RetryRequestState::Idle && row.error.is_none(), egui::Button::new("确认重试")).clicked() {
+                                                if ui
+                                                    .add_enabled(
+                                                        plan.can_retry
+                                                            && !row.pending
+                                                            && row.retry_request
+                                                                == RetryRequestState::Idle
+                                                            && row.error.is_none(),
+                                                        egui::Button::new("确认重试"),
+                                                    )
+                                                    .clicked()
+                                                {
                                                     self.retry(row.source, *id, plan.revision);
                                                 }
-                                                if ui.add_enabled(!row.pending && row.retry_request == RetryRequestState::Idle, egui::Button::new("收起重试确认")).clicked() {
+                                                if ui
+                                                    .add_enabled(
+                                                        !row.pending
+                                                            && row.retry_request
+                                                                == RetryRequestState::Idle,
+                                                        egui::Button::new("收起重试确认"),
+                                                    )
+                                                    .clicked()
+                                                {
                                                     self.clear_retry_plan(row.source, *id);
                                                 }
                                             });
                                         });
                                     }
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.strong(format!("↑ {}", s.host));
+                                        ui.add(egui::Label::new(egui::RichText::new(format!("↑ {}", row.route.as_deref().unwrap_or(&s.host))).strong()).wrap())
+                                            .on_hover_text(format!("实际上传目标：{}\n在 Shell 内手动 ssh 不会切换此目标。", s.host));
                                         ui.weak(match s.protocol {
                                             Protocol::Sftp => "SFTP",
                                             Protocol::Zmodem => "ZMODEM",
@@ -490,6 +572,11 @@ impl Panel {
                                         &s.detail,
                                     );
                                     ui.horizontal_wrapped(|ui| {
+                                        if s.state == State::Succeeded && !s.directory.is_empty()
+                                            && ui.button("在 SFTP 中打开目录").clicked()
+                                        {
+                                            self.open_directory = Some((row.source, *id));
+                                        }
                                         if s.state == State::Ready
                                             && ui.button("确认上传到此目录").clicked()
                                         {
@@ -523,33 +610,60 @@ impl Panel {
                                         {
                                             self.control(Op::TerminalUploadCancel, row.source, *id);
                                         }
-                                        if s.state == State::Failed && s.protocol == Protocol::Sftp
-                                            && ui.add_enabled(!row.pending && row.retry_request == RetryRequestState::Idle && row.error.is_none(), egui::Button::new("重试失败项")).clicked() {
-                                            self.control(Op::TerminalUploadRetryInspect, row.source, *id);
-                                        }
-                                        if s.state.finished()
+                                        if s.state == State::Failed
+                                            && s.protocol == Protocol::Sftp
                                             && ui
-                                                .add_enabled(!row.pending && row.retry_request == RetryRequestState::Idle, egui::Button::new("移除任务"))
-                                                .on_hover_text("上传已结束，仅移除此任务记录，不删除本地或远端文件。")
+                                                .add_enabled(
+                                                    !row.pending
+                                                        && row.retry_request
+                                                            == RetryRequestState::Idle
+                                                        && row.error.is_none(),
+                                                    egui::Button::new("重试失败项"),
+                                                )
                                                 .clicked()
                                         {
-                                            remove.push((row.source, *id));
+                                            self.control(
+                                                Op::TerminalUploadRetryInspect,
+                                                row.source,
+                                                *id,
+                                            );
                                         }
                                     });
-
+                                } else if row.start_rejected {
+                                    ui.label("上传未开始");
                                 } else {
-                                    ui.label("正在确认目标主机和当前目录…");
+                                    ui.label(if row.error.is_some() {
+                                        "无法确认上传是否已开始"
+                                    } else {
+                                        "正在确认目标主机和当前目录…"
+                                    });
                                     if ui.button("取消上传").clicked() {
                                         self.control(Op::TerminalUploadCancel, row.source, *id);
                                     }
                                 }
-                                if row.pending || row.retry_request == RetryRequestState::AwaitingReply {
+                                if row.pending
+                                    || row.retry_request == RetryRequestState::AwaitingReply
+                                {
                                     ui.weak("请求处理中…");
                                 }
                                 if let Some(error) = &row.error {
                                     ui.colored_label(cshell_ui::theme::WARNING, error);
                                 }
-                                if row.error.is_some() || row.retry_request == RetryRequestState::Unknown {
+                                if row.finished()
+                                    && ui
+                                        .add_enabled(
+                                            row.can_remove(),
+                                            egui::Button::new("移除任务"),
+                                        )
+                                        .on_hover_text("仅移除此任务记录，不删除本地或远端文件。")
+                                        .clicked()
+                                {
+                                    remove.push((row.source, *id));
+                                }
+                                if !row.start_rejected
+                                    && (row.error.is_some()
+                                        || row.retry_request == RetryRequestState::Unknown)
+                                {
                                     if ui.button("刷新任务状态").clicked() {
                                         self.control(Op::TerminalUploadGet, row.source, *id);
                                     }
@@ -562,12 +676,15 @@ impl Panel {
                 ui.weak("关闭进度不取消上传；自动收起可在全局设置中调整。");
             });
         self.open = open;
+        if !open {
+            self.show_completed = false;
+        }
         for (source, id) in remove {
             self.remove_finished(source, id);
             ctx.request_repaint();
         }
         if rows.values().any(|r| {
-            r.snapshot.as_ref().is_none_or(|s| !s.state.finished())
+            !r.finished()
                 || r.auto_close
                     && r.finished_at
                         .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
@@ -585,12 +702,11 @@ impl Panel {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Recheck the current row instead of trusting the rendered snapshot.
         // Unknown outcomes and active transfers must use real cancellation.
-        if !view.rows.get(&id).is_some_and(|row| {
-            row.source == source
-                && !row.pending
-                && row.retry_request == RetryRequestState::Idle
-                && row.snapshot.as_ref().is_some_and(|s| s.state.finished())
-        }) {
+        if !view
+            .rows
+            .get(&id)
+            .is_some_and(|row| row.source == source && row.can_remove())
+        {
             return;
         }
         view.rows.remove(&id);
@@ -632,7 +748,11 @@ impl Panel {
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(row) = view.rows.get_mut(&id).filter(|r| r.source == source) else {
+        let Some(row) = view
+            .rows
+            .get_mut(&id)
+            .filter(|r| r.source == source && !r.start_rejected)
+        else {
             return;
         };
         let retry = request.operation == Op::TerminalUploadRetry as i32;

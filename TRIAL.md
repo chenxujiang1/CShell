@@ -1,6 +1,6 @@
-# Windows 与 macOS 早期试用
+# Windows 与 macOS 打包、验证和升级
 
-当前开发版为 `1.1.0-dev.1`，构建编号 `11001`，分支 `develop/1.1`。新增能力、限制和交付步骤见 [1.1 开发版说明](docs/releases/v1.1.0-dev.1.md)。1.0 历史维护分支 `release/1.0` 和标签 `v1.0.0` 保持不变；不把开发版标为正式版，也不混用旧提交的程序。
+当前准备分发的源码版本为 `1.1.0`，构建编号 `11002`，分支 `develop/1.1`。新增能力和发布步骤见 [1.1 发布说明](docs/releases/v1.1.0.md)及[手动发布操作](docs/releases/v1.1.0-publish.md)。旧开发版 `1.1.0-dev.1` 和 1.0 的包需按自己的版本分发。
 
 目标为 Windows x64、macOS Apple Silicon（arm64）和 macOS Intel（x64）。每个平台单独分发 ZIP，不依赖用户安装 Rust。macOS 运行器采用 macOS 15；更早系统尚需实机验收，不能仅按 CPU 架构推断兼容性。
 

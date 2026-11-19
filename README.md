@@ -2,13 +2,13 @@
 
 CShell 是使用 Rust 开发的原生 SSH、SFTP 与本地终端客户端，提供多标签终端、分屏、连接管理和文件传输。
 
-**本分支为 1.1 开发版，软件版本 `1.1.0-dev.1`，构建编号 `11001`。** 它不是 1.1 正式版；可下载产物及自动化验证状态以对应提交的 CI 记录为准。
+**本源码版本为 `1.1.0`，构建编号 `11002`。** 公开发布状态以 GitHub Releases 为准，验证及构建状态以对应提交的 CI 为准。
 
-1.1 开发分支为 `develop/1.1`，功能与交付边界见 [1.1 开发版说明](docs/releases/v1.1.0-dev.1.md)。1.0 维护分支仍为 `release/1.0`，历史标签为 `v1.0.0`；[1.0 发布操作文档](RELEASE.md)及[1.0 发布说明](docs/releases/v1.0.0.md)继续保留。
+1.1 分支为 `develop/1.1`。详见 [1.1 发布说明](docs/releases/v1.1.0.md)和[手动发布操作](docs/releases/v1.1.0-publish.md)。1.0 维护分支为 `release/1.0`，历史标签为 `v1.0.0`。
 
-## 获取试用版
+## 获取程序
 
-目前准备 Windows 和 macOS 试用程序。请按设备架构选择下载，具体可用版本以成功构建的产物为准。
+正式附件在 [GitHub Releases](https://github.com/chenxujiang1/CShell/releases) 发布。发布前的验证包可从对应提交的 CI 下载。请按设备架构选择：
 
 | 设备 | 包名称 | 内容 |
 | --- | --- | --- |
@@ -16,9 +16,9 @@ CShell 是使用 Rust 开发的原生 SSH、SFTP 与本地终端客户端，提�
 | Mac Apple Silicon（M 系列） | `CShell-trial-macos-arm64.zip` | `CShell.app`、首次使用说明 |
 | Mac Intel | `CShell-trial-macos-x64.zip` | `CShell.app`、首次使用说明 |
 
-Windows 和 Mac 双架构试用包由完整 [CI 构建](https://github.com/chenxujiang1/CShell/actions/workflows/ci.yml)生成。进入全部检查通过的构建记录，在 **Artifacts** 中下载对应架构；任一前置门禁失败时，不生成可分发试用包。另有 [macOS personal trial 构建](https://github.com/chenxujiang1/CShell/actions/workflows/macos-trial.yml)供个人验证，该流程通过不代表完整 CI 通过。
+Windows 和 Mac 双架构的包由完整 [CI 构建](https://github.com/chenxujiang1/CShell/actions/workflows/ci.yml)生成。进入全部检查通过的构建记录，在 **Artifacts** 中下载对应架构；任一前置门禁失败时，不生成可分发包。另有 [macOS personal trial 构建](https://github.com/chenxujiang1/CShell/actions/workflows/macos-trial.yml)供个人验证，该流程通过不代表完整 CI 通过。
 
-下载 Actions 产物需要登录 GitHub；解压外层 artifact 后可以找到试用 ZIP 和对应的 `.sha256` 校验文件。试用产物保留 14 天，过期后需要重新构建。本仓库当前没有承诺稳定版本或自动更新渠道。
+下载 Actions 产物需要登录 GitHub；解压外层 artifact 后可以找到程序 ZIP 和对应的 `.sha256` 校验文件。Actions 产物保留 14 天，过期后需要重新构建。程序暂不提供自动更新。
 
 包内 `build-info.json` 记录完整软件版本、构建编号、源码提交、工作区状态和三个程序的 SHA-256；CI 会从解压后的包再次核对。CI 分发要求源码工作区干净，本地修改版会明确标记，不能仅凭 HEAD 提交号当成该提交的正式产物。
 
@@ -36,7 +36,7 @@ Windows 和 Mac 双架构试用包由完整 [CI 构建](https://github.com/chenx
 
 1. 在“苹果菜单 → 关于本机”确认芯片类型，下载对应的 arm64 或 x64 包。
 2. 解压 ZIP，将 `CShell.app` 拖入“应用程序”，从 Finder 打开。
-3. 当前 Mac 试用包只有本地 ad-hoc 签名，**没有 Developer ID 签名或 Apple 公证**。如果系统阻止打开，请核对来源和 SHA-256，再按照 [Apple 官方说明](https://support.apple.com/102445)处理；请勿关闭 Gatekeeper 或全局降低安全设置。
+3. 当前流水线生成的 Mac 包只有 ad-hoc 签名，**没有 Developer ID 签名或 Apple 公证**。如果系统阻止打开，请核对来源和 SHA-256，再按照 [Apple 官方说明](https://support.apple.com/102445)处理；请勿关闭 Gatekeeper 或全局降低安全设置。
 
 Mac 构建运行器使用 macOS 15。更早系统的兼容性、不同硬件组合及浏览器下载后的首次启动体验仍需实际试用验证。
 
@@ -64,9 +64,11 @@ Mac 构建运行器使用 macOS 15。更早系统的兼容性、不同硬件组�
 - Linux 基础资源面板和工具栏入口：打开采集一次，默认间隔 `0` 不自动刷新；不采集历史到本地磁盘。
 - 受管理的 A → B 会话、A 上密钥认证及可选跳板复用；终端、上传和资源采集绑定实际会话。
 - SFTP 终端拖放任务的暂停、取消、移除和安全失败项重试；原目录、原清单与成功项保留。
+- 跳板标签悬停及终端上方身份栏展示实际 SSH 路线，上传和资源面板显示绑定目标。在终端手动执行 `ssh B` 不会切换 CShell 的文件或采集目标；要操作 B，请使用 CShell 建立受管理的 B 会话。
+- 上传成功后，可从「上传任务」点击「在 SFTP 中打开目录」。面板自动收起后仍可重新打开任务记录；定位只复用原上传的 SSH 连接，连接已变化或目录不可访问时会提示，避免打开另一个服务器或目录。
 - 中文输入、Ctrl+C、选词/整行/全选、滚动回看与焦点恢复；“帮助”下提供独立快捷键说明。
 
-各功能仍在持续验证。当前不提供 RDP、串口、TELNET 或自动更新；X11 转发也不属于本次试用范围。Linux 在源码和 CI 中继续维护，当前这轮试用交付聚焦 Windows 与 Mac。
+当前不提供 RDP、串口、TELNET、X11 转发或自动更新。Linux 在源码和 CI 中继续维护，本次提供的二进制包面向 Windows 与 Mac。
 
 ## 已知限制与更新
 

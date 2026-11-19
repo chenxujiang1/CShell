@@ -584,12 +584,21 @@ impl DesktopApp {
             profile,
             source_ssh_session,
             jump_options,
+            upload_task,
             ..
         } = &mut command
-            && source_ssh_session.is_none()
-            && !*jump_options
         {
-            *source_ssh_session = self.sftp_ssh_source(*profile);
+            if let Some((original_profile, upload)) = self.sftp_tabs.active_upload() {
+                if *profile != original_profile || *jump_options {
+                    self.view_model.input_warning =
+                        Some("上传目录标签绑定原 SSH 会话；其他连接请从配置列表打开。".into());
+                    return;
+                }
+                *source_ssh_session = Some(upload.source);
+                *upload_task = Some(upload.task);
+            } else if source_ssh_session.is_none() && !*jump_options {
+                *source_ssh_session = self.sftp_ssh_source(*profile);
+            }
         }
         let new_session =
             if let sftp_connection::SftpClientCommand::ConnectProfile { session, .. } = &command {

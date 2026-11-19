@@ -312,6 +312,7 @@ impl Fixture {
                         profile: self.profile,
                         source_ssh_session: source,
                         discover_directory: true,
+                        upload_task: None,
                     })
                     .unwrap()
                 } else {
@@ -324,6 +325,32 @@ impl Fixture {
             panic!()
         };
         reply
+    }
+    async fn open_upload_directory(
+        &self,
+        source: Option<SessionId>,
+        task: SessionId,
+    ) -> (SessionId, SftpResponse) {
+        let session = SessionId::new();
+        let envelope::Payload::SftpResponse(reply) = self
+            .call(envelope::Payload::SftpRequest(SftpRequest {
+                operation: SftpOperation::ConnectProfile as i32,
+                session_id: session.as_uuid().as_bytes().to_vec(),
+                document_json: serde_json::to_vec(&cshell_application::SftpConnectRequest {
+                    jump_override: None,
+                    profile: self.profile,
+                    source_ssh_session: source,
+                    discover_directory: false,
+                    upload_task: Some(task),
+                })
+                .unwrap(),
+                ..Default::default()
+            }))
+            .await
+        else {
+            panic!()
+        };
+        (session, reply)
     }
     async fn close(&self, id: SessionId) {
         let reply = self
@@ -391,6 +418,7 @@ async fn cancelling_mfa_reports_cancelled_for_ssh_and_sftp_and_creates_no_sessio
                     profile,
                     source_ssh_session: None,
                     discover_directory: true,
+                    upload_task: None,
                 })
                 .unwrap(),
                 ..Default::default()
@@ -625,6 +653,7 @@ async fn invalid_source_and_channel_denial_never_reauthenticate_or_damage_source
         profile: ProfileId::new(),
         source_ssh_session: Some(source),
         discover_directory: true,
+        upload_task: None,
     };
     let envelope::Payload::SftpResponse(reply) = f
         .call(envelope::Payload::SftpRequest(SftpRequest {
@@ -1331,9 +1360,25 @@ async fn terminal_drop_upload_preserves_folders_batches_and_current_directory_wi
             .is_err()
     );
     client.close().await.unwrap();
+    echo(&shell, "cd /home/cshell").await;
+    let (browser, reply) = f.open_upload_directory(Some(source), task).await;
+    assert_eq!(reply.status, SftpStatus::Ok as i32, "{}", reply.detail);
+    let info: cshell_application::SftpConnectionInfo =
+        serde_json::from_slice(&reply.document_json).unwrap();
+    assert_eq!(info.shared_from, Some(source));
+    assert_eq!(info.initial_directory.as_deref(), Some("/srv/one"));
+    let (_, reply) = f.open_upload_directory(None, task).await;
+    assert_eq!(reply.status, SftpStatus::InvalidRequest as i32);
+    let other = id(&f.duplicate(source).await.session.unwrap());
+    let (_, reply) = f.open_upload_directory(Some(other), task).await;
+    assert_eq!(reply.status, SftpStatus::InvalidRequest as i32);
+    f.close(other).await;
+    f.sftp(SftpOperation::Disconnect, browser, None).await;
     echo(&shell, "after-drop-upload").await;
     f.counts(1);
     f.close(source).await;
+    let (_, reply) = f.open_upload_directory(Some(source), task).await;
+    assert_eq!(reply.status, SftpStatus::Unavailable as i32);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires isolated CSHELL_RUNTIME_DIR"]
@@ -1686,6 +1731,7 @@ async fn vault_protection_unlock_precedes_ssh_and_sftp_mfa_and_never_reaches_the
                     profile: f.profile,
                     source_ssh_session: None,
                     discover_directory: true,
+                    upload_task: None,
                 })
                 .unwrap(),
                 ..Default::default()
@@ -1762,6 +1808,7 @@ async fn vault_protection_cancelled_sftp_unlock_closes_attempt_without_contactin
                     profile,
                     source_ssh_session: None,
                     discover_directory: true,
+                    upload_task: None,
                 })
                 .unwrap(),
                 ..Default::default()

@@ -101,6 +101,7 @@ pub enum SftpClientCommand {
         profile: cshell_domain::ProfileId,
         previous: Option<SessionId>,
         source_ssh_session: Option<SessionId>,
+        upload_task: Option<SessionId>,
     },
     Disconnect(SessionId),
     OpenBrowser(SessionId),
@@ -1387,6 +1388,13 @@ async fn send_inner(
         && negotiated.protocol_minor < 69
     {
         return Err("请一起更新 GUI 和后台，以支持 SSH 终端拖放上传".into());
+    }
+    if request.operation == SftpOperation::ConnectProfile as i32
+        && negotiated.protocol_minor < cshell_ipc::SFTP_UPLOAD_DIRECTORY_MINOR
+        && serde_json::from_slice::<cshell_application::SftpConnectRequest>(&request.document_json)
+            .is_ok_and(|r| r.upload_task.is_some())
+    {
+        return Err("请一并更新 CShell 和后台程序，以打开原上传目录".into());
     }
     if request.operation == SftpOperation::ConnectProfile as i32
         && negotiated.protocol_minor < cshell_ipc::JUMP_REUSE_EXECUTION_MINOR

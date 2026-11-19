@@ -35,6 +35,7 @@ fn cancellation_removes_active_and_background_hosts_without_reopening_last_windo
                 profile: ProfileId::new(),
                 title: "A".into(),
                 host: "A".into(),
+                upload: None,
                 parked: None,
             },
             HostTab {
@@ -42,6 +43,7 @@ fn cancellation_removes_active_and_background_hosts_without_reopening_last_windo
                 profile: ProfileId::new(),
                 title: "B".into(),
                 host: "B".into(),
+                upload: None,
                 parked: Some(cancelled_content(true)),
             },
         ];
@@ -76,6 +78,7 @@ fn cancelling_active_host_returns_to_other_host_and_preserves_its_connection() {
             profile: ProfileId::new(),
             title: "cancel".into(),
             host: "A".into(),
+            upload: None,
             parked: None,
         },
         HostTab {
@@ -83,6 +86,7 @@ fn cancelling_active_host_returns_to_other_host_and_preserves_its_connection() {
             profile: ProfileId::new(),
             title: "keep".into(),
             host: "B".into(),
+            upload: None,
             parked: Some(survivor),
         },
     ];

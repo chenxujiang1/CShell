@@ -32,6 +32,7 @@ pub fn connect(
         profile,
         previous,
         source_ssh_session: None,
+        upload_task: None,
     }
 }
 pub fn connect_shared(
@@ -45,6 +46,7 @@ pub fn connect_shared(
         profile,
         previous,
         source_ssh_session,
+        upload_task: None,
     }
 }
 pub(crate) fn connect_options(
@@ -126,7 +128,8 @@ pub(super) async fn run(
     shared: &Arc<Mutex<SftpView>>,
     command: SftpClientCommand,
 ) {
-    let (session, profile, previous, source_ssh_session, jump_options) = match command {
+    let (session, profile, previous, source_ssh_session, jump_options, upload_task) = match command
+    {
         SftpClientCommand::Disconnect(session) => {
             let previous = shared
                 .lock()
@@ -152,7 +155,15 @@ pub(super) async fn run(
             previous,
             source_ssh_session,
             jump_options,
-        } => (session, profile, previous, source_ssh_session, jump_options),
+            upload_task,
+        } => (
+            session,
+            profile,
+            previous,
+            source_ssh_session,
+            jump_options,
+            upload_task,
+        ),
         _ => return,
     };
     if let Some(previous) = previous {
@@ -191,7 +202,8 @@ pub(super) async fn run(
         jump_override,
         profile,
         source_ssh_session,
-        discover_directory: true,
+        discover_directory: upload_task.is_none(),
+        upload_task,
     })
     .unwrap_or_default();
     let mut cancelled = false;
@@ -210,9 +222,11 @@ pub(super) async fn run(
         send(config, query.clone()),
     )
     .await;
-    let result = if result
-        .as_ref()
-        .is_ok_and(|reply| reply.status == SftpStatus::JumpSelectionRequired as i32)
+    let result = if source_ssh_session.is_none()
+        && upload_task.is_none()
+        && result
+            .as_ref()
+            .is_ok_and(|reply| reply.status == SftpStatus::JumpSelectionRequired as i32)
     {
         match choose_jump(config, shared, session, profile).await {
             Ok(choice) => {
@@ -221,6 +235,7 @@ pub(super) async fn run(
                     source_ssh_session: None,
                     discover_directory: true,
                     jump_override: choice,
+                    upload_task: None,
                 })
                 .unwrap_or_default();
                 send(config, query).await
@@ -251,6 +266,7 @@ pub(super) async fn run(
             || info.profile != profile
             || !info.running
             || info.shared_from != source_ssh_session
+            || (upload_task.is_some() && info.initial_directory.is_none())
         {
             return Err("SFTP 连接回复与请求不匹配".into());
         }

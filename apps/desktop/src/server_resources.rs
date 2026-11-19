@@ -59,6 +59,7 @@ impl Worker {
 pub(super) struct Panel {
     pub open: bool,
     session: Option<SessionId>,
+    transport_generation: Option<u64>,
     sample: Option<ServerResources>,
     worker: Option<Worker>,
     error: Option<String>,
@@ -80,8 +81,18 @@ impl Panel {
     }
     pub fn suspend(&mut self) {
         self.visible = false;
-        self.worker = None;
         self.next_due = None;
+    }
+    pub fn bind_transport(&mut self, session: Option<SessionId>, generation: Option<u64>) {
+        if (self.session, self.transport_generation) != (session, generation) {
+            self.worker = None;
+            self.sample = None;
+            self.error = None;
+            self.session = session;
+            self.transport_generation = generation;
+            self.initial = session.is_some();
+            self.interval(0, Instant::now());
+        }
     }
     fn interval(&mut self, seconds: u32, now: Instant) {
         self.refresh_seconds = if seconds == 0 {
@@ -112,7 +123,12 @@ impl Panel {
         };
         self.worker = None;
         match result {
-            Ok(sample) if Some(sample.session) == self.session => {
+            Ok(sample)
+                if Some(sample.session) == self.session
+                    && self
+                        .transport_generation
+                        .is_none_or(|expected| expected == sample.transport_generation) =>
+            {
                 self.sample = Some(sample);
                 self.error = None;
                 self.interval(self.refresh_seconds, now);
@@ -142,12 +158,7 @@ impl Panel {
         }
         let now = Instant::now();
         if self.session != session {
-            self.worker = None;
-            self.sample = None;
-            self.error = None;
-            self.session = session;
-            self.initial = session.is_some();
-            self.interval(0, now);
+            self.bind_transport(session, None);
         }
         if !self.visible {
             self.visible = true;
@@ -186,9 +197,12 @@ impl Panel {
                     .truncate(),
                 )
                 .on_hover_text(format!(
-                    "Linux · 当前标签绑定的 SSH 会话\n{}",
+                    "Linux · 实际采集目标\n{}\n在 Shell 内手动 ssh 不会切换采集目标。",
                     target.unwrap_or("当前 SSH 会话")
                 ));
+                if session.is_some() {
+                    ui.weak("采集此 CShell 会话的目标；在 Shell 内手动 ssh 不切换目标。");
+                }
                 egui::Frame::new()
                     .fill(cshell_ui::theme::RAISED)
                     .inner_margin(12.0)
@@ -305,6 +319,7 @@ impl Panel {
         if !open || close {
             self.open = false;
             self.initial = false;
+            self.worker = None;
             self.interval(0, now);
             self.suspend();
             return true;

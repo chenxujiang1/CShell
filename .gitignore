@@ -64,6 +64,8 @@ __pycache__/
 /docs/releases/*
 !/docs/releases/v1.0.0.md
 !/docs/releases/v1.1.0-dev.1.md
+!/docs/releases/v1.1.0.md
+!/docs/releases/v1.1.0-publish.md
 RELEASE.md
 # Editors, operating systems and temporary files
 /.idea/

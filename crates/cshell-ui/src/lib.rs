@@ -127,6 +127,7 @@ pub struct WorkbenchViewModel {
     pub can_restart_ssh: bool,
     pub ssh_control_busy: bool,
     pub ssh_tab_states: std::collections::BTreeMap<TabId, SshConnectionState>,
+    pub ssh_routes: std::collections::BTreeMap<TabId, String>,
     /// Selected recipients: false = command bar, true = live keyboard broadcast.
     pub input_target_tabs: std::collections::BTreeMap<TabId, bool>,
     pub unread_output_tabs: std::collections::BTreeSet<TabId>,
