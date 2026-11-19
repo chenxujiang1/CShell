@@ -828,6 +828,31 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn sftp_v3_file_metadata_preserves_unix_seconds_and_utc_longnames() {
+        use std::fs::FileTimes;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let file = tempfile::tempfile().unwrap();
+        file.set_times(
+            FileTimes::new().set_modified(UNIX_EPOCH + Duration::new(951_782_400, 345_000_000)),
+        )
+        .unwrap();
+        let mut attrs = FileAttributes::from(&file.metadata().unwrap());
+        assert_eq!(attrs.mtime, Some(951_782_400));
+        for (seconds, date) in [
+            (0, "Jan 01 1970 00:00"),
+            (951_782_400, "Feb 29 2000 00:00"),
+            (i32::MAX as u32, "Jan 19 2038 03:14"),
+            (u32::MAX, "Feb 07 2106 06:28"),
+        ] {
+            attrs.mtime = Some(seconds);
+            let entry = File::new("fixture.txt", attrs.clone());
+            assert!(entry.longname.ends_with(&format!(" {date} fixture.txt")));
+            assert_eq!(entry.attrs.mtime, Some(seconds));
+        }
+    }
+
     #[derive(Debug, Default)]
     struct TestState {
         files: HashMap<String, Vec<u8>>,

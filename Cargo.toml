@@ -36,6 +36,8 @@ exclude = [
     "vendor/zbus-lockstep-macros",
     "vendor/zbus-secret-service-keyring-store",
     "vendor/sqlx-sqlite",
+    "vendor/russh-sftp",
+    "vendor/russh-util",
 ]
 
 [workspace.package]
@@ -140,6 +142,8 @@ debug = true
 
 [patch.crates-io]
 sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
+russh-sftp = { path = "vendor/russh-sftp" }
+russh-util = { path = "vendor/russh-util" }
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 
 accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
